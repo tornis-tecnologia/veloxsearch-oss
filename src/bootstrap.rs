@@ -24,12 +24,18 @@ use std::time::Duration;
 use crate::k8s::ns;
 
 /// Vendored install bundles (see deploy/bootstrap/README note in DECISIONS ADR-022).
-const CERT_MANAGER_BUNDLE: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/deploy/bootstrap/cert-manager.yaml"));
-const OPERATOR_BUNDLE: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/deploy/bootstrap/operator.yaml"));
-const LONGHORN_BUNDLE: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/deploy/bootstrap/longhorn.yaml"));
+const CERT_MANAGER_BUNDLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/deploy/bootstrap/cert-manager.yaml"
+));
+const OPERATOR_BUNDLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/deploy/bootstrap/operator.yaml"
+));
+const LONGHORN_BUNDLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/deploy/bootstrap/longhorn.yaml"
+));
 
 /// The operator bundle was helm-rendered into `veloxsearch-test`; every
 /// occurrence of that token semantically means "the operator's namespace", so
@@ -51,7 +57,11 @@ const OPERATOR_CRDS: &[&str] = &[
     "opensearchclusters.opensearch.opster.io",
 ];
 const CERT_MANAGER_NS: &str = "cert-manager";
-const CERT_MANAGER_DEPLOYS: &[&str] = &["cert-manager", "cert-manager-webhook", "cert-manager-cainjector"];
+const CERT_MANAGER_DEPLOYS: &[&str] = &[
+    "cert-manager",
+    "cert-manager-webhook",
+    "cert-manager-cainjector",
+];
 const OPERATOR_DEPLOY: &str = "opensearch-operator";
 
 // --- Storage self-bootstrap (Longhorn, ADR-031/043) -------------------------
@@ -130,7 +140,9 @@ fn classify_storage_classes(
     if let Some(sc) = items.iter().find(|sc| {
         sc.metadata.name.as_deref() == Some(LONGHORN_SC) && sc.provisioner == LONGHORN_PROVISIONER
     }) {
-        return DeploymentStorage::Longhorn { default: sc_is_default(sc) };
+        return DeploymentStorage::Longhorn {
+            default: sc_is_default(sc),
+        };
     }
     match items.iter().find(|sc| sc_is_default(sc)) {
         Some(sc) => {
@@ -279,9 +291,12 @@ fn describe_storage(ds: &DeploymentStorage) -> (bool, bool, Option<String>, Stri
             Some(n.clone()),
             format!("foreign CSI default '{n}' — Longhorn required (ADR-043)"),
         ),
-        DeploymentStorage::NodeLocal(n) => {
-            (false, true, Some(n.clone()), format!("node-local default '{n}'"))
-        }
+        DeploymentStorage::NodeLocal(n) => (
+            false,
+            true,
+            Some(n.clone()),
+            format!("node-local default '{n}'"),
+        ),
         DeploymentStorage::Absent => (false, true, None, "no default StorageClass".to_string()),
     }
 }
@@ -360,7 +375,11 @@ pub struct Requirement {
 }
 
 fn req(id: &'static str, status: &'static str, detail: impl Into<String>) -> Requirement {
-    Requirement { id, status, detail: detail.into() }
+    Requirement {
+        id,
+        status,
+        detail: detail.into(),
+    }
 }
 
 /// Parse a Kubernetes resource Quantity ("12251496Ki", "4", "500m") into a
@@ -412,8 +431,16 @@ async fn check_requirements(
     // R1 — Kubernetes version ≥ 1.30
     match client.apiserver_version().await {
         Ok(v) => {
-            let major: u32 = v.major.trim_matches(|c: char| !c.is_ascii_digit()).parse().unwrap_or(0);
-            let minor: u32 = v.minor.trim_matches(|c: char| !c.is_ascii_digit()).parse().unwrap_or(0);
+            let major: u32 = v
+                .major
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse()
+                .unwrap_or(0);
+            let minor: u32 = v
+                .minor
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse()
+                .unwrap_or(0);
             let ok = (major, minor) >= (1, 30);
             out.push(req("r1", if ok { "pass" } else { "fail" }, v.git_version));
         }
@@ -466,7 +493,11 @@ async fn check_requirements(
                 DeploymentStorage::Absent => "no default StorageClass".to_string(),
                 DeploymentStorage::Longhorn { .. } => unreachable!("Longhorn handled above"),
             };
-            let verb = if installing { "installing" } else { "will install" };
+            let verb = if installing {
+                "installing"
+            } else {
+                "will install"
+            };
             out.push(req(
                 "r3",
                 "warn",
@@ -484,7 +515,11 @@ async fn check_requirements(
                 let (mut mem, mut cpu) = (0.0_f64, 0.0_f64);
                 let mut archs: Vec<String> = Vec::new();
                 for n in &list.items {
-                    let schedulable = !n.spec.as_ref().and_then(|s| s.unschedulable).unwrap_or(false);
+                    let schedulable = !n
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.unschedulable)
+                        .unwrap_or(false);
                     if let Some(st) = &n.status {
                         if let Some(info) = &st.node_info {
                             if !archs.contains(&info.architecture) {
@@ -624,7 +659,11 @@ enum OperatorPresence {
     Ours { ready: bool },
     /// An operator runs in a namespace we do not own: a conflict, because both
     /// controllers watch the same cluster-scoped CRDs.
-    Foreign { namespace: String, name: String, ready: bool },
+    Foreign {
+        namespace: String,
+        name: String,
+        ready: bool,
+    },
     /// Operator CRDs exist but nothing is running them. Not a live conflict
     /// (nothing reconciles), but our bundle would apply its pinned CRDs over
     /// whatever version is there — worth saying out loud. Deliberately NOT a
@@ -696,19 +735,19 @@ fn operator_r7(p: &OperatorPresence, allow_foreign: bool) -> Option<Requirement>
     match p {
         // The refusal text is `foreign_operator_block`'s, verbatim — the row the
         // user reads and the error the installer bails with are one string.
-        OperatorPresence::Foreign { namespace, name, .. } => {
-            Some(match foreign_operator_block(p, allow_foreign) {
-                Some(why) => req("r7", "fail", why),
-                None => req(
-                    "r7",
-                    "warn",
-                    format!(
-                        "foreign OpenSearch operator {namespace}/{name} — adopted because \
+        OperatorPresence::Foreign {
+            namespace, name, ..
+        } => Some(match foreign_operator_block(p, allow_foreign) {
+            Some(why) => req("r7", "fail", why),
+            None => req(
+                "r7",
+                "warn",
+                format!(
+                    "foreign OpenSearch operator {namespace}/{name} — adopted because \
                          {ALLOW_FOREIGN_OPERATOR_ENV} is set; VeloxSearch will not install its own"
-                    ),
                 ),
-            })
-        }
+            ),
+        }),
         OperatorPresence::UnmanagedCrds => Some(req(
             "r7",
             "warn",
@@ -734,7 +773,9 @@ fn operator_r7(p: &OperatorPresence, allow_foreign: bool) -> Option<Requirement>
 /// when it matters.
 fn foreign_operator_block(p: &OperatorPresence, allow_foreign: bool) -> Option<String> {
     match p {
-        OperatorPresence::Foreign { namespace, name, .. } if !allow_foreign => Some(format!(
+        OperatorPresence::Foreign {
+            namespace, name, ..
+        } if !allow_foreign => Some(format!(
             "foreign OpenSearch operator {namespace}/{name} — installing ours would leave \
              two cluster-wide operators reconciling the same OpenSearchCluster CRs. \
              Remove it (`helm uninstall` in namespace {namespace}), or set \
@@ -846,7 +887,11 @@ pub async fn ensure() -> Result<State> {
             // once Longhorn is in place, since any cluster without it still
             // needs cluster-admin for the create-flow Longhorn auto-install.
             if let Ok(client) = crate::k8s::client().await {
-                if classify_storage(&client).await.map(|d| d.longhorn_ready()).unwrap_or(false) {
+                if classify_storage(&client)
+                    .await
+                    .map(|d| d.longhorn_ready())
+                    .unwrap_or(false)
+                {
                     revoke_bootstrap(&client).await;
                 }
             }
@@ -1130,12 +1175,18 @@ fn node_issue_from_status(name: &str, data: &serde_json::Value) -> Option<NodeIs
     // Node-level Ready=False — `reason`/`message` name the cause. The classic
     // prereq gap is `MissingDependency` ("iscsiadm not found", i.e. no
     // open-iscsi), which is fatal: it never clears without installing the pkg.
-    if let Some(conds) = data.pointer("/status/conditions").and_then(|c| c.as_array()) {
+    if let Some(conds) = data
+        .pointer("/status/conditions")
+        .and_then(|c| c.as_array())
+    {
         for c in conds {
             let typ = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if typ.eq_ignore_ascii_case("Ready") && status.eq_ignore_ascii_case("False") {
-                let reason = c.get("reason").and_then(|v| v.as_str()).unwrap_or("NotReady");
+                let reason = c
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("NotReady");
                 let detail = c.get("message").and_then(|v| v.as_str()).unwrap_or("");
                 return Some(NodeIssue {
                     fatal: reason_is_missing_prereq(reason),
@@ -1148,13 +1199,18 @@ fn node_issue_from_status(name: &str, data: &serde_json::Value) -> Option<NodeIs
     // reason `DiskPressure`/`DiskNotReady`), or there is no disk at all. Not
     // fatal-fast (a fresh disk can take a moment to register), but it's the
     // honest explanation if the wait times out: PVCs would stay Pending.
-    if let Some(disks) = data.pointer("/status/diskStatus").and_then(|d| d.as_object()) {
+    if let Some(disks) = data
+        .pointer("/status/diskStatus")
+        .and_then(|d| d.as_object())
+    {
         let mut any_schedulable = false;
         let mut last_unschedulable: Option<String> = None;
         for (disk, st) in disks {
             if let Some(conds) = st.get("conditions").and_then(|c| c.as_array()) {
                 for c in conds {
-                    if c.get("type").and_then(|v| v.as_str()).unwrap_or("")
+                    if c.get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
                         .eq_ignore_ascii_case("Schedulable")
                     {
                         let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
@@ -1174,8 +1230,9 @@ fn node_issue_from_status(name: &str, data: &serde_json::Value) -> Option<NodeIs
         if !any_schedulable {
             return Some(NodeIssue {
                 fatal: false,
-                msg: last_unschedulable
-                    .unwrap_or_else(|| format!("node '{name}' has no schedulable disk for Longhorn")),
+                msg: last_unschedulable.unwrap_or_else(|| {
+                    format!("node '{name}' has no schedulable disk for Longhorn")
+                }),
             });
         }
     }
@@ -1423,11 +1480,18 @@ mod tests {
     }
 
     fn op_deploy(namespace: &str, name: &str, ready: bool) -> OperatorDeploy {
-        OperatorDeploy { namespace: namespace.into(), name: name.into(), ready }
+        OperatorDeploy {
+            namespace: namespace.into(),
+            name: name.into(),
+            ready,
+        }
     }
 
     fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
     }
 
     /// The regression: the predicate must match the names the chart installs.
@@ -1472,8 +1536,15 @@ mod tests {
         );
 
         let row = operator_r7(&presence, false).expect("a foreign operator owes an R7 row");
-        assert_eq!(row.status, "fail", "silence is the worst property a guard can have");
-        assert!(row.detail.contains("opensearch/opensearch-operator"), "{}", row.detail);
+        assert_eq!(
+            row.status, "fail",
+            "silence is the worst property a guard can have"
+        );
+        assert!(
+            row.detail.contains("opensearch/opensearch-operator"),
+            "{}",
+            row.detail
+        );
         assert!(
             row.detail.contains(ALLOW_FOREIGN_OPERATOR_ENV),
             "the refusal must name its escape hatch: {}",
@@ -1483,9 +1554,18 @@ mod tests {
         // ...and it must never read as "in conformity, ready to deploy", even
         // though the foreign operator itself is serving.
         let (installed, ready) = operator_flags(&presence);
-        assert!(installed && ready, "the foreign operator really is installed and serving");
-        assert!(!bootstrap_ready(true, ready, &presence, false), "dual-operator must be unreachable");
-        assert!(bootstrap_ready(true, ready, &presence, true), "the override adopts it");
+        assert!(
+            installed && ready,
+            "the foreign operator really is installed and serving"
+        );
+        assert!(
+            !bootstrap_ready(true, ready, &presence, false),
+            "dual-operator must be unreachable"
+        );
+        assert!(
+            bootstrap_ready(true, ready, &presence, true),
+            "the override adopts it"
+        );
     }
 
     /// Only the explicit override downgrades the refusal.
@@ -1555,7 +1635,10 @@ mod tests {
             OWN_NS,
         );
         assert_eq!(presence, OperatorPresence::Ours { ready: true });
-        assert!(operator_r7(&presence, false).is_none(), "no operator row — cert-manager decides");
+        assert!(
+            operator_r7(&presence, false).is_none(),
+            "no operator row — cert-manager decides"
+        );
         assert_eq!(operator_flags(&presence), (true, true));
         assert!(bootstrap_ready(true, true, &presence, false));
 
@@ -1576,7 +1659,10 @@ mod tests {
 
         let orphan = classify_operator(&crds(REAL_OPERATOR_CRDS), &[], OWN_NS);
         let row = operator_r7(&orphan, false).expect("an orphan-CRD row");
-        assert_eq!(row.status, "warn", "an interrupted install of OURS looks like this");
+        assert_eq!(
+            row.status, "warn",
+            "an interrupted install of OURS looks like this"
+        );
         assert_eq!(operator_flags(&orphan), (true, false));
     }
 
@@ -1599,10 +1685,22 @@ mod tests {
             ("app.kubernetes.io/name", "opensearch-operator"),
             ("app.kubernetes.io/instance", "os-op-prod"),
         ]);
-        assert!(deploy_is_operator("os-op-prod", Some(&chart)), "renamed helm release");
-        assert!(deploy_is_operator("opensearch-operator-controller-manager", None), "by name");
-        assert!(!deploy_is_operator("opensearch-dashboards", None), "dashboards is not an operator");
-        assert!(!deploy_is_operator("cert-manager", Some(&labels(&[("app.kubernetes.io/name", "cert-manager")]))));
+        assert!(
+            deploy_is_operator("os-op-prod", Some(&chart)),
+            "renamed helm release"
+        );
+        assert!(
+            deploy_is_operator("opensearch-operator-controller-manager", None),
+            "by name"
+        );
+        assert!(
+            !deploy_is_operator("opensearch-dashboards", None),
+            "dashboards is not an operator"
+        );
+        assert!(!deploy_is_operator(
+            "cert-manager",
+            Some(&labels(&[("app.kubernetes.io/name", "cert-manager")]))
+        ));
     }
 
     /// Several foreign operators: the message must name the same one every poll.
@@ -1615,7 +1713,9 @@ mod tests {
         let forward = classify_operator(&[], &deploys, OWN_NS);
         let reversed: Vec<OperatorDeploy> = deploys.iter().rev().cloned().collect();
         assert_eq!(forward, classify_operator(&[], &reversed, OWN_NS));
-        assert!(matches!(forward, OperatorPresence::Foreign { ref namespace, .. } if namespace == "opensearch"));
+        assert!(
+            matches!(forward, OperatorPresence::Foreign { ref namespace, .. } if namespace == "opensearch")
+        );
     }
 
     #[test]
@@ -1629,14 +1729,21 @@ mod tests {
     }
 
     /// Build a StorageClass fixture for the pure classifier.
-    fn sc(name: &str, provisioner: &str, default: bool) -> k8s_openapi::api::storage::v1::StorageClass {
+    fn sc(
+        name: &str,
+        provisioner: &str,
+        default: bool,
+    ) -> k8s_openapi::api::storage::v1::StorageClass {
         let mut s = k8s_openapi::api::storage::v1::StorageClass::default();
         s.metadata.name = Some(name.to_string());
         s.provisioner = provisioner.to_string();
         if default {
             s.metadata.annotations = Some(
-                [("storageclass.kubernetes.io/is-default-class".to_string(), "true".to_string())]
-                    .into(),
+                [(
+                    "storageclass.kubernetes.io/is-default-class".to_string(),
+                    "true".to_string(),
+                )]
+                .into(),
             );
         }
         s
@@ -1667,7 +1774,10 @@ mod tests {
             DeploymentStorage::Absent,
         ] {
             assert!(!ds.longhorn_ready(), "{ds:?} must not read as ready");
-            assert!(ds.needs_longhorn(), "{ds:?} must trigger the Longhorn install");
+            assert!(
+                ds.needs_longhorn(),
+                "{ds:?} must trigger the Longhorn install"
+            );
         }
     }
 
@@ -1709,9 +1819,14 @@ mod tests {
         assert_eq!(m.package, Some("open-iscsi"));
         assert_eq!(m.reason, "iscsiadm not found");
         let inst = m.install.expect("install commands");
-        assert!(inst.debian.contains("apt-get install -y open-iscsi") && inst.debian.contains("iscsid"));
+        assert!(
+            inst.debian.contains("apt-get install -y open-iscsi") && inst.debian.contains("iscsid")
+        );
         assert_eq!(inst.debian, inst.ubuntu);
-        assert!(inst.arch.contains("pacman -S --needed open-iscsi") && inst.arch.contains("iscsid.socket"));
+        assert!(
+            inst.arch.contains("pacman -S --needed open-iscsi")
+                && inst.arch.contains("iscsid.socket")
+        );
 
         // nfs → nfs-common on debian/ubuntu, nfs-utils on arch.
         let m = map_missing_package("vm1", "NFS client utilities are not found");
@@ -1724,7 +1839,11 @@ mod tests {
         for msg in ["dmsetup not found", "device-mapper missing"] {
             let m = map_missing_package("vm1", msg);
             assert_eq!(m.package, Some("dmsetup"), "message {msg:?}");
-            assert!(m.install.expect("install commands").arch.contains("device-mapper"));
+            assert!(m
+                .install
+                .expect("install commands")
+                .arch
+                .contains("device-mapper"));
         }
 
         // Unknown message → package null, raw node + reason kept verbatim.
@@ -1755,7 +1874,8 @@ mod tests {
             ]}
         });
         assert_eq!(missing_package_from_status("vm2", &status), None);
-        let status = json!({ "status": { "conditions": [ { "type": "Ready", "status": "True" } ] } });
+        let status =
+            json!({ "status": { "conditions": [ { "type": "Ready", "status": "True" } ] } });
         assert_eq!(missing_package_from_status("vm3", &status), None);
     }
 

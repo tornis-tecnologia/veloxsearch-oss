@@ -29,10 +29,14 @@ async fn main() {
             std::process::exit(1);
         }
     } else {
-        tracing::info!("control-plane postgres disabled (VELOX_PG_ENABLED unset; ADR-041 bring-up flag)");
+        tracing::info!(
+            "control-plane postgres disabled (VELOX_PG_ENABLED unset; ADR-041 bring-up flag)"
+        );
         tokio::spawn(async {
             if let Err(e) = veloxsearch::db::ensure_pg_secret_best_effort().await {
-                tracing::warn!("could not ensure postgres credentials Secret (harmless off-cluster): {e:#}");
+                tracing::warn!(
+                    "could not ensure postgres credentials Secret (harmless off-cluster): {e:#}"
+                );
             }
         });
     }
@@ -41,7 +45,8 @@ async fn main() {
     // index.html so the client-side router owns navigation (/login, /setup,
     // /d/:name, …). Built by the frontend; the dir is overridable for deploys.
     let static_dir = std::env::var("VELOX_STATIC_DIR").unwrap_or_else(|_| "dist".to_string());
-    let spa = ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html")));
+    let spa =
+        ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html")));
 
     let app = Router::new()
         .nest("/api", veloxsearch::api::routes())

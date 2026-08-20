@@ -8,9 +8,9 @@
 
 use crate::api::{ClusterMetrics, MetricPoint, MetricSeries, NodeStat};
 use crate::recipes::{http, os_base};
+use crate::scope::Deployment;
 use anyhow::{Context, Result};
 use serde_json::json;
-use crate::scope::Deployment;
 
 /// Query `_nodes/stats` and shape it into the per-node blocks the Overview
 /// renders. Cluster totals are summed across nodes (shard-level, so docs
@@ -79,8 +79,14 @@ pub async fn node_stats(deployment: &Deployment) -> Result<ClusterMetrics> {
                 let (mut t, mut a) = (0u64, 0u64);
                 if let Some(arr) = n.pointer("/fs/data").and_then(|v| v.as_array()) {
                     for d in arr {
-                        t += d.get("total_in_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-                        a += d.get("available_in_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        t += d
+                            .get("total_in_bytes")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        a += d
+                            .get("available_in_bytes")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                     }
                 }
                 (t, a)
@@ -102,7 +108,11 @@ pub async fn node_stats(deployment: &Deployment) -> Result<ClusterMetrics> {
                 roles: n
                     .get("roles")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 cpu_percent: geti(&["os", "cpu", "percent"]),
                 heap_percent: geti(&["jvm", "mem", "heap_used_percent"]),
@@ -259,8 +269,14 @@ async fn collect_sample(deployment: &Deployment) -> Result<Sample> {
             // not the node fs). Summed across nodes for a cluster figure.
             if let Some(arr) = node.pointer("/fs/data").and_then(|v| v.as_array()) {
                 for d in arr {
-                    let t = d.get("total_in_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let a = d.get("available_in_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let t = d
+                        .get("total_in_bytes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let a = d
+                        .get("available_in_bytes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     disk_used += t.saturating_sub(a);
                 }
             }
@@ -410,7 +426,11 @@ fn metrics_policy() -> serde_json::Value {
 /// look-back window (sorted, capped) and downsample them into `buckets`
 /// time-buckets. Best-effort — a missing index / unreachable cluster surfaces
 /// as an error the API layer degrades to an empty series.
-pub async fn series(deployment: &Deployment, window_minutes: i64, buckets: usize) -> Result<MetricSeries> {
+pub async fn series(
+    deployment: &Deployment,
+    window_minutes: i64,
+    buckets: usize,
+) -> Result<MetricSeries> {
     let window_minutes = window_minutes.clamp(1, 7 * 24 * 60);
     let buckets = buckets.clamp(1, 1000);
     let base = os_base(deployment);

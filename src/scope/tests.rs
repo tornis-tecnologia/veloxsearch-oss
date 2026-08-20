@@ -94,7 +94,9 @@ fn account_b_is_refused_account_as_deployment_on_every_tenant_scoped_route() {
         // ...and the same route resolves fine for its actual owner, so the
         // refusal above is ownership and not a blanket failure.
         assert!(
-            scope_a().adopt("acme-logs-x1z9", a_deployment.clone()).is_some(),
+            scope_a()
+                .adopt("acme-logs-x1z9", a_deployment.clone())
+                .is_some(),
             "{route}: account A must still reach its own deployment",
         );
     }
@@ -164,7 +166,10 @@ fn admin_scope_is_the_pre_80_behaviour() {
          byte-identical to the one that shipped before #80",
     );
     assert!(admin.owns(&BTreeMap::new()), "legacy CRs stay visible");
-    assert!(admin.owns(&cluster_of(TENANT_A, NS_A).labels), "and so do tenants'");
+    assert!(
+        admin.owns(&cluster_of(TENANT_A, NS_A).labels),
+        "and so do tenants'"
+    );
     assert!(admin.require_admin().is_ok());
 }
 
@@ -176,7 +181,11 @@ fn admin_adopts_any_deployment_and_keeps_its_owner() {
     let dep = Scope::Admin
         .adopt("acme-logs-x1z9", cluster_of(TENANT_A, NS_A))
         .expect("admin sees everything");
-    assert_eq!(dep.namespace(), NS_A, "acts in the object's namespace, not ours");
+    assert_eq!(
+        dep.namespace(),
+        NS_A,
+        "acts in the object's namespace, not ours"
+    );
     assert_eq!(dep.tenant(), Some(TENANT_A));
 
     let legacy = Scope::Admin
@@ -273,7 +282,10 @@ fn a_v1_session_resolves_to_admin_without_a_datastore() {
         user: "admin".to_string(),
         tenant: None,
     };
-    assert_eq!(rt.block_on(Scope::from_session(&session)).unwrap(), Scope::Admin);
+    assert_eq!(
+        rt.block_on(Scope::from_session(&session)).unwrap(),
+        Scope::Admin
+    );
 }
 
 /// A v2 session for a tenant that cannot be resolved must NOT widen into the

@@ -201,9 +201,7 @@ mod tests {
 
         // And a deployment host under it is still a legal DNS name.
         let host = format!("velox-test-traces.{d}");
-        assert!(host
-            .split('.')
-            .all(|l| !l.is_empty() && l.len() <= 63));
+        assert!(host.split('.').all(|l| !l.is_empty() && l.len() <= 63));
         assert!(host.len() <= 253);
     }
 }

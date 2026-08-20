@@ -24,8 +24,16 @@ const AGENT_IMAGE: &str = "fluent/fluent-bit:3.1.9";
 
 /// Namespace + ServiceAccount + RBAC the Fluent Bit kubernetes filter needs.
 async fn ensure_rbac(client: &Client) -> Result<()> {
-    apply(client, "", "v1", "Namespace", None, AGENT_NS,
-        &serde_json::json!({ "apiVersion":"v1","kind":"Namespace","metadata":{"name":AGENT_NS} })).await?;
+    apply(
+        client,
+        "",
+        "v1",
+        "Namespace",
+        None,
+        AGENT_NS,
+        &serde_json::json!({ "apiVersion":"v1","kind":"Namespace","metadata":{"name":AGENT_NS} }),
+    )
+    .await?;
     apply(client, "", "v1", "ServiceAccount", Some(AGENT_NS), "velox-agent",
         &serde_json::json!({ "apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"velox-agent","namespace":AGENT_NS} })).await?;
     apply(client, "rbac.authorization.k8s.io", "v1", "ClusterRole", None, "velox-agent",
@@ -187,7 +195,12 @@ pub(crate) fn fluent_bit_conf_template(recipe: &str) -> String {
 /// template through the engine's closed-set interpolation
 /// (`integrations::render`), so the built-in path and the package path
 /// (`agent.conf.tmpl`) produce byte-identical configs by construction.
-pub(crate) fn fluent_bit_conf(deployment: &Deployment, recipe: &str, user: &str, password: &str) -> String {
+pub(crate) fn fluent_bit_conf(
+    deployment: &Deployment,
+    recipe: &str,
+    user: &str,
+    password: &str,
+) -> String {
     let vars = crate::integrations::Vars::new(
         deployment,
         crate::recipes::recipe_index(recipe),
@@ -247,12 +260,20 @@ async fn apply_agent_workload(
     ensure_rbac(&client).await?;
 
     let agent = agent_name(deployment, recipe);
-    apply(&client, "", "v1", "ConfigMap", Some(AGENT_NS), &agent,
+    apply(
+        &client,
+        "",
+        "v1",
+        "ConfigMap",
+        Some(AGENT_NS),
+        &agent,
         &serde_json::json!({
             "apiVersion":"v1","kind":"ConfigMap",
             "metadata":{"name":agent,"namespace":AGENT_NS},
             "data":{"fluent-bit.conf": conf}
-        })).await?;
+        }),
+    )
+    .await?;
 
     // Log tailers need every node's /var/log → DaemonSet. The events watcher
     // talks to the API server only — one replica, or every node would index
@@ -288,12 +309,20 @@ async fn apply_agent_workload(
         }
     });
     if tails_logs {
-        apply(&client, "apps", "v1", "DaemonSet", Some(AGENT_NS), &agent,
+        apply(
+            &client,
+            "apps",
+            "v1",
+            "DaemonSet",
+            Some(AGENT_NS),
+            &agent,
             &serde_json::json!({
                 "apiVersion":"apps/v1","kind":"DaemonSet",
                 "metadata":{"name":agent,"namespace":AGENT_NS,"labels":{"app":agent}},
                 "spec":{ "selector":{"matchLabels":{"app":agent}}, "template": template }
-            })).await?;
+            }),
+        )
+        .await?;
     } else {
         apply(&client, "apps", "v1", "Deployment", Some(AGENT_NS), &agent,
             &serde_json::json!({
@@ -309,8 +338,15 @@ async fn apply_agent_workload(
 /// `velox-agent-<recipe>` leftovers, best-effort).
 pub async fn remove_agent(deployment: &Deployment, recipe: &str) -> Result<()> {
     let client = client().await?;
-    for agent in [agent_name(deployment, recipe), format!("velox-agent-{recipe}")] {
-        for (group, kind) in [("apps", "DaemonSet"), ("apps", "Deployment"), ("", "ConfigMap")] {
+    for agent in [
+        agent_name(deployment, recipe),
+        format!("velox-agent-{recipe}"),
+    ] {
+        for (group, kind) in [
+            ("apps", "DaemonSet"),
+            ("apps", "Deployment"),
+            ("", "ConfigMap"),
+        ] {
             delete_dynamic(&client, group, "v1", kind, Some(AGENT_NS), &agent).await;
         }
     }

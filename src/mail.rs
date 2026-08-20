@@ -164,8 +164,14 @@ async fn send_via(cfg: &SmtpConfig, to: &str, subject: &str, body: &str) -> Resu
     use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
     let message = Message::builder()
-        .from(from_address().parse().context("VELOX_MAIL_FROM is not a valid address")?)
-        .to(to.parse().with_context(|| format!("invalid recipient {to:?}"))?)
+        .from(
+            from_address()
+                .parse()
+                .context("VELOX_MAIL_FROM is not a valid address")?,
+        )
+        .to(to
+            .parse()
+            .with_context(|| format!("invalid recipient {to:?}"))?)
         .subject(subject)
         .header(lettre::message::header::ContentType::TEXT_PLAIN)
         .body(body.to_string())
@@ -241,7 +247,10 @@ mod tests {
     /// No host = dev-mode, which is what makes the flow runnable with no relay.
     #[test]
     fn no_host_means_dev_mode() {
-        assert_eq!(resolve_smtp(None, s("587"), s("tls"), None, None).unwrap(), None);
+        assert_eq!(
+            resolve_smtp(None, s("587"), s("tls"), None, None).unwrap(),
+            None
+        );
     }
 
     #[test]

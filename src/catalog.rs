@@ -30,6 +30,7 @@
 //! string the UI can show. The deployment screen never breaks because the
 //! registry is down.
 
+use crate::scope::Deployment;
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -37,7 +38,6 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
-use crate::scope::Deployment;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -205,8 +205,14 @@ fn bootstrap_entry(id: &str) -> Option<CatalogEntry> {
     Some(CatalogEntry {
         id: id.to_string(),
         version: BOOTSTRAP_VERSION.to_string(),
-        title: rows.iter().map(|(l, t, _)| (l.to_string(), t.to_string())).collect(),
-        summary: rows.iter().map(|(l, _, s)| (l.to_string(), s.to_string())).collect(),
+        title: rows
+            .iter()
+            .map(|(l, t, _)| (l.to_string(), t.to_string()))
+            .collect(),
+        summary: rows
+            .iter()
+            .map(|(l, _, s)| (l.to_string(), s.to_string()))
+            .collect(),
         min_core_version: core_version().to_string(),
     })
 }
@@ -275,7 +281,11 @@ impl Registry {
             .with_context(|| format!("GET {url}"))?
             .error_for_status()
             .with_context(|| format!("GET {url}"))?;
-        Ok(resp.bytes().await.with_context(|| format!("body of {url}"))?.to_vec())
+        Ok(resp
+            .bytes()
+            .await
+            .with_context(|| format!("body of {url}"))?
+            .to_vec())
     }
 
     /// Fetch and parse `catalog.json`.
@@ -292,8 +302,11 @@ impl Registry {
         if !valid_component(id) {
             bail!("refusing to fetch integration with an unsafe id: {id:?}");
         }
-        let manifest_yaml = String::from_utf8(self.get(&format!("integrations/{id}/manifest.yaml")).await?)
-            .with_context(|| format!("{id}/manifest.yaml is not UTF-8"))?;
+        let manifest_yaml = String::from_utf8(
+            self.get(&format!("integrations/{id}/manifest.yaml"))
+                .await?,
+        )
+        .with_context(|| format!("{id}/manifest.yaml is not UTF-8"))?;
         let names = asset_filenames(&manifest_yaml)?;
         let mut assets = BTreeMap::new();
         for name in names {
@@ -538,7 +551,11 @@ pub fn verify_package(manifest_yaml: &str, assets: &BTreeMap<String, Vec<u8>>) -
             format!(
                 "package signed by UNKNOWN KEY {:?} (trusted: {})",
                 sig.key_id,
-                KEYRING.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")
+                KEYRING
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })?;
     let key = base64::engine::general_purpose::STANDARD
@@ -731,7 +748,9 @@ fn build_view(state: CatalogState, installed: &BTreeMap<String, String>) -> Cata
 pub async fn view(deployment: Option<&Deployment>) -> CatalogView {
     let state = CACHE.load(&Registry::from_env(), DEFAULT_TTL).await;
     let installed = match deployment {
-        Some(d) => crate::k8s::integration_versions(d).await.unwrap_or_default(),
+        Some(d) => crate::k8s::integration_versions(d)
+            .await
+            .unwrap_or_default(),
         None => BTreeMap::new(),
     };
     build_view(state, &installed)
@@ -760,7 +779,12 @@ pub async fn install(deployment: &Deployment, id: &str, version: Option<&str>) -
     let reg = Registry::from_env();
     let state = CACHE.load(&reg, DEFAULT_TTL).await;
     let degraded = state.source != CatalogSource::Registry;
-    let entry = state.catalog.integrations.iter().find(|e| e.id == id).cloned();
+    let entry = state
+        .catalog
+        .integrations
+        .iter()
+        .find(|e| e.id == id)
+        .cloned();
 
     if let Some(e) = &entry {
         if !e.min_core_version.is_empty() && !version_ge(core_version(), &e.min_core_version) {
@@ -922,10 +946,9 @@ mod tests {
     /// signature ever verifies.
     #[test]
     fn jcs_sorts_keys_and_escapes_strings() {
-        let doc: serde_yaml::Value = serde_yaml::from_str(
-            "b: 2\na: \"x\\\"y\"\nc:\n  - 1\n  - true\n  - null\nA: z\n",
-        )
-        .unwrap();
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str("b: 2\na: \"x\\\"y\"\nc:\n  - 1\n  - true\n  - null\nA: z\n")
+                .unwrap();
         assert_eq!(
             jcs(&doc).unwrap(),
             r#"{"A":"z","a":"x\"y","b":2,"c":[1,true,null]}"#
@@ -936,7 +959,10 @@ mod tests {
     #[test]
     fn jcs_refuses_floats() {
         let doc: serde_yaml::Value = serde_yaml::from_str("a: 1.5\n").unwrap();
-        assert!(jcs(&doc).unwrap_err().to_string().contains("floating-point"));
+        assert!(jcs(&doc)
+            .unwrap_err()
+            .to_string()
+            .contains("floating-point"));
     }
 
     /// The digest is over *content*, not layout: reordering the manifest's
@@ -961,11 +987,14 @@ mod tests {
     #[test]
     fn digest_strips_signature_and_covers_assets() {
         let base = "id: x\nassets:\n  saved_objects: s.ndjson\n";
-        let signed = format!("{base}signature:\n  algorithm: ed25519\n  key_id: k\n  value: AAAA\n");
-        let assets: BTreeMap<String, Vec<u8>> =
-            [("s.ndjson".to_string(), b"one".to_vec())].into_iter().collect();
-        let flipped: BTreeMap<String, Vec<u8>> =
-            [("s.ndjson".to_string(), b"two".to_vec())].into_iter().collect();
+        let signed =
+            format!("{base}signature:\n  algorithm: ed25519\n  key_id: k\n  value: AAAA\n");
+        let assets: BTreeMap<String, Vec<u8>> = [("s.ndjson".to_string(), b"one".to_vec())]
+            .into_iter()
+            .collect();
+        let flipped: BTreeMap<String, Vec<u8>> = [("s.ndjson".to_string(), b"two".to_vec())]
+            .into_iter()
+            .collect();
         assert_eq!(
             package_digest(base, &assets).unwrap(),
             package_digest(&signed, &assets).unwrap()
@@ -1016,7 +1045,9 @@ mod tests {
     fn tampered_manifest_is_rejected() {
         let Some(root) = checkout() else { return };
         let pkg = FetchedPackage::load_from_dir(&root.join("integrations/nginx")).unwrap();
-        let edited = pkg.manifest_yaml.replace("index: nginx-logs", "index: evil-logs");
+        let edited = pkg
+            .manifest_yaml
+            .replace("index: nginx-logs", "index: evil-logs");
         assert_ne!(edited, pkg.manifest_yaml, "the replace must have applied");
         let err = verify_package(&edited, &pkg.assets).unwrap_err();
         assert!(err.to_string().contains("TAMPERED"), "unhelpful: {err:#}");
@@ -1045,8 +1076,8 @@ mod tests {
     /// The #74 staging placeholder is UNSIGNED, not "bad signature".
     #[test]
     fn placeholder_signature_is_unsigned() {
-        let value = base64::engine::general_purpose::STANDARD
-            .encode((0u8..64).collect::<Vec<u8>>());
+        let value =
+            base64::engine::general_purpose::STANDARD.encode((0u8..64).collect::<Vec<u8>>());
         let yaml = format!(
             "id: x\nassets: {{}}\nsignature:\n  algorithm: ed25519\n  key_id: velox-registry-2026\n  value: {value}\n"
         );
@@ -1064,7 +1095,10 @@ mod tests {
             .manifest_yaml
             .replace("key_id: velox-registry-2026", "key_id: attacker-2026");
         let err = verify_package(&edited, &pkg.assets).unwrap_err();
-        assert!(err.to_string().contains("UNKNOWN KEY"), "unhelpful: {err:#}");
+        assert!(
+            err.to_string().contains("UNKNOWN KEY"),
+            "unhelpful: {err:#}"
+        );
     }
 
     /// The vendored public key is the registry's, byte for byte.
@@ -1090,7 +1124,11 @@ mod tests {
         let reg = Registry::new(format!("file://{}", root.display()), None);
         let cat = rt().block_on(reg.fetch_catalog()).expect("fetch catalog");
         assert_eq!(cat.schema_version, "1.0");
-        assert!(cat.integrations.len() >= 12, "{} rows", cat.integrations.len());
+        assert!(
+            cat.integrations.len() >= 12,
+            "{} rows",
+            cat.integrations.len()
+        );
         for e in &cat.integrations {
             assert!(!e.version.is_empty(), "{}: no version", e.id);
             assert!(e.title.contains_key("pt"), "{}: no pt title", e.id);
@@ -1134,7 +1172,9 @@ mod tests {
     fn file_transport_fetches_and_verifies() {
         let Some(root) = checkout() else { return };
         let reg = Registry::new(format!("file://{}", root.display()), None);
-        let pkg = rt().block_on(reg.fetch_package("nginx")).expect("fetch nginx");
+        let pkg = rt()
+            .block_on(reg.fetch_package("nginx"))
+            .expect("fetch nginx");
         assert_eq!(pkg.id, "nginx");
         verify_package(&pkg.manifest_yaml, &pkg.assets).expect("fetched package verifies");
         let engine_pkg = pkg.into_package().expect("into engine package");
@@ -1250,8 +1290,9 @@ mod tests {
                 },
             ],
         };
-        let installed: BTreeMap<String, String> =
-            [("nginx".to_string(), "1.1.0".to_string())].into_iter().collect();
+        let installed: BTreeMap<String, String> = [("nginx".to_string(), "1.1.0".to_string())]
+            .into_iter()
+            .collect();
         let view = build_view(
             CatalogState {
                 catalog,
@@ -1261,17 +1302,29 @@ mod tests {
             },
             &installed,
         );
-        let by_id = |id: &str| view.integrations.iter().find(|i| i.id == id).unwrap().clone();
+        let by_id = |id: &str| {
+            view.integrations
+                .iter()
+                .find(|i| i.id == id)
+                .unwrap()
+                .clone()
+        };
 
         let nginx = by_id("nginx");
         assert_eq!(nginx.installed_version.as_deref(), Some("1.1.0"));
         assert!(nginx.update_available, "1.1.0 installed, 1.2.0 offered");
 
         let redis = by_id("redis");
-        assert!(redis.installed_version.is_none(), "available, not installed");
+        assert!(
+            redis.installed_version.is_none(),
+            "available, not installed"
+        );
         assert!(!redis.update_available);
 
-        assert!(!by_id("future").compatible, "min_core_version 99 is a floor");
+        assert!(
+            !by_id("future").compatible,
+            "min_core_version 99 is a floor"
+        );
         // The bootstrap floor is merged in even when the registry omits it.
         assert!(by_id("kubernetes").builtin);
         assert!(!view.stale);

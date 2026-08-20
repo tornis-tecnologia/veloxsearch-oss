@@ -311,7 +311,13 @@ fn sanitize_label(s: &str) -> String {
         .trim()
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed: String = mapped.trim_matches('-').chars().take(35).collect();
     let trimmed = trimmed.trim_matches('-').to_string();
@@ -376,8 +382,7 @@ pub(crate) fn random_chars(alphabet: &[u8], len: usize) -> Result<String> {
 /// four classes are present (overwhelmingly the first draw at length 24), so the
 /// operator's securityconfig seeding never rejects it. NEVER a literal default.
 fn gen_admin_password() -> Result<String> {
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
     const LEN: usize = 24;
     loop {
         let pw = random_chars(ALPHABET, LEN)?;
@@ -895,7 +900,10 @@ fn versions_of(cr: Option<&serde_json::Value>) -> (String, String) {
 /// upgrade cannot do.
 async fn validate_create_version(v: &str) -> Result<()> {
     crate::upgrade::Version::parse(v)?;
-    for repo in [crate::upgrade::IMAGE_NODES, crate::upgrade::IMAGE_DASHBOARDS] {
+    for repo in [
+        crate::upgrade::IMAGE_NODES,
+        crate::upgrade::IMAGE_DASHBOARDS,
+    ] {
         match crate::version_feed::image_tag_exists(repo, v).await {
             Ok(true) => {}
             Ok(false) => bail!(
@@ -937,7 +945,12 @@ pub async fn create_cluster(
     // credentials Secret behind for a deployment that was never created.
     // `ov.version` is only ever set by the create handler — a save carries
     // `None`, so this cannot fire on an existing deployment.
-    if let Some(v) = ov.version.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(v) = ov
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         validate_create_version(v).await?;
     }
     let client = client().await?;
@@ -981,7 +994,12 @@ pub async fn create_cluster(
     // way to move it is the upgrade operation, which pre-flights first.
     if existing.is_none() {
         // Already validated above, before anything was written.
-        if let Some(v) = ov.version.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(v) = ov
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             node_version = v.to_string();
             dash_version = v.to_string();
         }
@@ -1071,10 +1089,12 @@ fn dashboards_ingress_manifest(
     let backend = serde_json::json!({
         "service": { "name": format!("{name}-dashboards"), "port": { "number": 5601 } }
     });
-    let rule = |h: &str| serde_json::json!({
-        "host": h,
-        "http": { "paths": [{ "path": "/", "pathType": "Prefix", "backend": backend }]}
-    });
+    let rule = |h: &str| {
+        serde_json::json!({
+            "host": h,
+            "http": { "paths": [{ "path": "/", "pathType": "Prefix", "backend": backend }]}
+        })
+    };
     // Both the historical short host and the explicit `-dashboard` one. Adding
     // rather than renaming: the short host is what SSO redirect URIs were
     // registered with (ADR-045).
@@ -1134,7 +1154,11 @@ pub async fn ensure_dashboards_ingress(
     let ing_name = format!("{}-dashboards", dep.name());
     let ingress = dashboards_ingress_manifest(access, dep, &host, &allow);
     ingress_api(client, dep.namespace())
-        .patch(&ing_name, &PatchParams::apply("veloxsearch").force(), &Patch::Apply(&ingress))
+        .patch(
+            &ing_name,
+            &PatchParams::apply("veloxsearch").force(),
+            &Patch::Apply(&ingress),
+        )
         .await
         .context("applying dashboards ingress")?;
     Ok(())
@@ -1210,7 +1234,15 @@ async fn ensure_ip_allow_middleware(client: &Client, dep: &Deployment, allow: &[
     let name = dep.name();
     let mw = format!("{name}-ipallow");
     if allow.is_empty() {
-        delete_dynamic(client, "traefik.io", "v1alpha1", "Middleware", Some(dep.namespace()), &mw).await;
+        delete_dynamic(
+            client,
+            "traefik.io",
+            "v1alpha1",
+            "Middleware",
+            Some(dep.namespace()),
+            &mw,
+        )
+        .await;
         return;
     }
     if let Err(e) = apply_dynamic(
@@ -1261,8 +1293,7 @@ fn opensearch_route_manifest(
         "services": [service],
     });
     if !allow.is_empty() {
-        route["middlewares"] =
-            serde_json::json!([{ "name": format!("{name}-ipallow"), "namespace": dep.namespace() }]);
+        route["middlewares"] = serde_json::json!([{ "name": format!("{name}-ipallow"), "namespace": dep.namespace() }]);
     }
     let mut spec = serde_json::json!({
         "entryPoints": ["websecure"],
@@ -1348,7 +1379,11 @@ pub async fn ensure_opensearch_ingress(
 
     let ingress = opensearch_ingress_manifest(access, dep, &host, &allow);
     ingress_api(client, dep.namespace())
-        .patch(&ing_name, &PatchParams::apply("veloxsearch").force(), &Patch::Apply(&ingress))
+        .patch(
+            &ing_name,
+            &PatchParams::apply("veloxsearch").force(),
+            &Patch::Apply(&ingress),
+        )
         .await
         .context("applying opensearch ingress")?;
     Ok(())
@@ -1483,7 +1518,13 @@ async fn data_pvcs_in(namespace: &str, name: &str) -> BTreeMap<String, PvcInfo> 
             })
             .map(quantity_bytes)
             .unwrap_or(0);
-        out.insert(pvc_name, PvcInfo { phase, capacity_bytes: cap });
+        out.insert(
+            pvc_name,
+            PvcInfo {
+                phase,
+                capacity_bytes: cap,
+            },
+        );
     }
     out
 }
@@ -1613,8 +1654,15 @@ pub async fn delete_cluster(dep: &Deployment) -> Result<()> {
         )
         .await;
     }
-    delete_dynamic(&client, "traefik.io", "v1alpha1", "Middleware", Some(dep.namespace()),
-                   &format!("{name}-ipallow")).await;
+    delete_dynamic(
+        &client,
+        "traefik.io",
+        "v1alpha1",
+        "Middleware",
+        Some(dep.namespace()),
+        &format!("{name}-ipallow"),
+    )
+    .await;
     let secrets: Api<Secret> = Api::namespaced(client.clone(), dep.namespace());
     for s in owned_secret_names(name) {
         let _ = secrets.delete(&s, &dp).await;
@@ -2157,7 +2205,10 @@ pub async fn has_dashboards(dep: &Deployment) -> bool {
         return false;
     };
     let api: Api<Deployment> = Api::namespaced(client, dep.namespace());
-    matches!(api.get_opt(&format!("{name}-dashboards")).await, Ok(Some(_)))
+    matches!(
+        api.get_opt(&format!("{name}-dashboards")).await,
+        Ok(Some(_))
+    )
 }
 
 /// Full status + config of one deployment (drives the list and the edit page).
@@ -2314,9 +2365,14 @@ async fn status_from(
     // annotation are the intent, the record annotation is what has been
     // applied — so a deployment nobody deferred work for costs nothing.
     let provisioning = crate::provisioning::state_from(
-        labels.get(LABEL_PURPOSE).map(String::as_str).unwrap_or_default(),
+        labels
+            .get(LABEL_PURPOSE)
+            .map(String::as_str)
+            .unwrap_or_default(),
         &monitors,
-        annotations.get(crate::provisioning::ANNOTATION).map(String::as_str),
+        annotations
+            .get(crate::provisioning::ANNOTATION)
+            .map(String::as_str),
     );
 
     // ADR-053. Empty = not installed; it rides the existing SSE stream, so the
@@ -2358,16 +2414,16 @@ async fn status_from(
     let sts: Api<StatefulSet> = Api::namespaced(client.clone(), &obj_ns);
     let (nodes_ready, nodes_desired, nodes_updated) =
         match sts.get_opt(&format!("{name}-nodes")).await {
-        Ok(Some(s)) => {
-            let st = s.status.unwrap_or_default();
-            (
-                st.ready_replicas.unwrap_or(0),
-                st.replicas,
-                st.updated_replicas.unwrap_or(0),
-            )
-        }
-        _ => (0, 0, 0),
-    };
+            Ok(Some(s)) => {
+                let st = s.status.unwrap_or_default();
+                (
+                    st.ready_replicas.unwrap_or(0),
+                    st.replicas,
+                    st.updated_replicas.unwrap_or(0),
+                )
+            }
+            _ => (0, 0, 0),
+        };
 
     // Version + upgrade state (ADR-048). `status.version` is what the operator
     // considers running; the spec is what we asked for. They diverge exactly
@@ -2418,7 +2474,10 @@ async fn status_from(
                 .filter_map(|r| {
                     Some((
                         r.get("component")?.as_str()?.to_string(),
-                        r.get("status").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                        r.get("status")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     ))
                 })
                 .collect()
@@ -2639,11 +2698,7 @@ pub async fn activity_log(dep: &Deployment, limit: usize) -> Result<Vec<Activity
     match events.list(&ListParams::default()).await {
         Ok(list) => {
             for e in list {
-                let obj = e
-                    .involved_object
-                    .name
-                    .clone()
-                    .unwrap_or_default();
+                let obj = e.involved_object.name.clone().unwrap_or_default();
                 if !(obj == name || obj.starts_with(&format!("{name}-"))) {
                     continue;
                 }
@@ -2750,7 +2805,11 @@ pub async fn activity_log(dep: &Deployment, limit: usize) -> Result<Vec<Activity
     //    this array and discards the rest (`component != "Upgrader"`); here the
     //    whole thing is shown, which is the only place those rows surface.
     if let Ok(Some(cr)) = os_api(&client, dep).get_opt(name).await {
-        if let Some(rows) = cr.data.pointer("/status/componentsStatus").and_then(|v| v.as_array()) {
+        if let Some(rows) = cr
+            .data
+            .pointer("/status/componentsStatus")
+            .and_then(|v| v.as_array())
+        {
             for r in rows {
                 let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("");
                 out.push(ActivityLine {
@@ -3103,7 +3162,11 @@ pub async fn reset_admin_password(dep: &Deployment, new_password: &str) -> Resul
     let patch =
         serde_json::json!({ "stringData": { "username": ADMIN_USER, "password": new_password } });
     secrets
-        .patch(&admin_secret_name(name), &PatchParams::default(), &Patch::Merge(&patch))
+        .patch(
+            &admin_secret_name(name),
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
         .await
         .context("updating admin credentials Secret")?;
 
@@ -3207,7 +3270,9 @@ async fn read_deferred(client: &Client, dep: &Deployment) -> Result<Option<Defer
         purpose: labels.get(LABEL_PURPOSE).cloned().unwrap_or_default(),
         monitors: monitors_from(Some(&annotations)),
         record: crate::provisioning::parse(
-            annotations.get(crate::provisioning::ANNOTATION).map(String::as_str),
+            annotations
+                .get(crate::provisioning::ANNOTATION)
+                .map(String::as_str),
         ),
     }))
 }
@@ -3321,7 +3386,10 @@ async fn run_deferred_provisioning(dep: Deployment, mut snapshot: Option<Snapsho
         }
         if let Err(e) = wait_settled(&dep, budget).await {
             record.mark_failed(&format!("{e:#}"), &now_rfc3339());
-            tracing::warn!("{e:#}; attempt {} of the deferred provisioning", record.attempts);
+            tracing::warn!(
+                "{e:#}; attempt {} of the deferred provisioning",
+                record.attempts
+            );
             if let Err(e) = write_deferred_record(&dep, Some(&record)).await {
                 tracing::error!("recording a failed provisioning attempt on {dep}: {e:#}");
             }
@@ -3498,7 +3566,10 @@ pub async fn preflight_upgrade(
     validate_name(name)?;
     let target = target.trim();
     let Some(s) = get_deployment(dep).await? else {
-        bail!("no deployment named '{name}' in namespace '{}'", dep.namespace());
+        bail!(
+            "no deployment named '{name}' in namespace '{}'",
+            dep.namespace()
+        );
     };
 
     // 1. Is this a target we ship, or the one the hourly check discovered and
@@ -3533,21 +3604,32 @@ pub async fn preflight_upgrade(
     if s.upgrade.in_flight() {
         bail!(
             "an upgrade to {} is already in progress on '{name}' — wait for it to finish",
-            if s.target_version.is_empty() { target.to_string() } else { s.target_version.clone() }
+            if s.target_version.is_empty() {
+                target.to_string()
+            } else {
+                s.target_version.clone()
+            }
         );
     }
     if s.health != "green" {
         bail!(
             "'{name}' is {} — a rolling upgrade restarts nodes one by one and \
              needs a green cluster to make progress",
-            if s.health == "unknown" { "not reporting its health" } else { &s.health }
+            if s.health == "unknown" {
+                "not reporting its health"
+            } else {
+                &s.health
+            }
         );
     }
 
     // 4. Both images resolve before EITHER is written — an upgraded data plane
     //    with an unpullable Dashboards is not a state we may create.
     let mut images_verified = true;
-    for repo in [crate::upgrade::IMAGE_NODES, crate::upgrade::IMAGE_DASHBOARDS] {
+    for repo in [
+        crate::upgrade::IMAGE_NODES,
+        crate::upgrade::IMAGE_DASHBOARDS,
+    ] {
         match crate::version_feed::image_tag_exists(repo, target).await {
             Ok(true) => {}
             Ok(false) => bail!(
@@ -3861,7 +3943,11 @@ pub(crate) fn bcrypt_hash(password: &str) -> Result<String> {
 /// we are telling people to point production exporters at.
 pub async fn copy_tls_secret(client: &Client, secret_name: &str, target_ns: &str) -> Result<()> {
     let src: Api<Secret> = Api::namespaced(client.clone(), ns());
-    let Some(s) = src.get_opt(secret_name).await.context("reading TLS secret")? else {
+    let Some(s) = src
+        .get_opt(secret_name)
+        .await
+        .context("reading TLS secret")?
+    else {
         bail!("TLS secret {secret_name} not found in {}", ns());
     };
     // `stringData` rather than `data`: the API server decodes the source for us
@@ -4207,7 +4293,10 @@ fn snapshot_cr_patch(name: &str, cfg: Option<&SnapshotConfig>) -> serde_json::Va
 /// state Secret, because everything except the credentials is already on the
 /// CR and the credentials must never be read back (they return as the
 /// `secret_kept` sentinel).
-fn snapshot_config_from(cr: &serde_json::Value, policy: Option<&serde_json::Value>) -> SnapshotConfig {
+fn snapshot_config_from(
+    cr: &serde_json::Value,
+    policy: Option<&serde_json::Value>,
+) -> SnapshotConfig {
     let repo = cr
         .pointer("/spec/general/snapshotRepositories")
         .and_then(|v| v.as_array())
@@ -4355,7 +4444,10 @@ pub async fn get_snapshot_config(
     validate_name(name)?;
     let client = client().await?;
     let Some(cr) = os_api(&client, dep).get_opt(name).await? else {
-        bail!("no deployment named '{name}' in namespace '{}'", dep.namespace());
+        bail!(
+            "no deployment named '{name}' in namespace '{}'",
+            dep.namespace()
+        );
     };
     let policy = policy_api(&client, dep)
         .get_opt(&snapshot::policy_name(name))
@@ -4464,7 +4556,10 @@ pub async fn plan_snapshot_config(
     validate_name(name)?;
     let client = client().await?;
     let Some(cr) = os_api(&client, dep).get_opt(name).await? else {
-        bail!("no deployment named '{name}' in namespace '{}'", dep.namespace());
+        bail!(
+            "no deployment named '{name}' in namespace '{}'",
+            dep.namespace()
+        );
     };
     let policy = policy_api(&client, dep)
         .get_opt(&snapshot::policy_name(name))
@@ -4547,9 +4642,13 @@ pub async fn set_snapshot_config(
         .await?;
     }
 
-    os.patch(name, &pp, &Patch::Apply(&snapshot_cr_patch(name, Some(&cfg))))
-        .await
-        .context("wiring the snapshot repository onto the cluster CR")?;
+    os.patch(
+        name,
+        &pp,
+        &Patch::Apply(&snapshot_cr_patch(name, Some(&cfg))),
+    )
+    .await
+    .context("wiring the snapshot repository onto the cluster CR")?;
 
     if cfg.policy.enabled {
         policies
@@ -4620,10 +4719,22 @@ pub async fn verify_snapshot_repo(dep: &Deployment) -> Result<String> {
 /// The vendored templates (ADR-044), applied by [`crate::bootstrap::apply_bundle`],
 /// which sorts Namespace first so the namespaced objects have somewhere to land.
 const TENANT_TEMPLATES: [&str; 4] = [
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/deploy/tenant-templates/namespace.yaml")),
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/deploy/tenant-templates/resourcequota.yaml")),
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/deploy/tenant-templates/limitrange.yaml")),
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/deploy/tenant-templates/networkpolicy.yaml")),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deploy/tenant-templates/namespace.yaml"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deploy/tenant-templates/resourcequota.yaml"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deploy/tenant-templates/limitrange.yaml"
+    )),
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/deploy/tenant-templates/networkpolicy.yaml"
+    )),
 ];
 
 /// Field manager for tenant primitives. Its own manager (not `veloxsearch`) so
@@ -4970,8 +5081,8 @@ mod tests {
     fn parse_bundle(bundle: &str) -> Vec<serde_json::Value> {
         serde_yaml::Deserializer::from_str(bundle)
             .filter_map(|de| {
-                let v: serde_json::Value =
-                    serde::Deserialize::deserialize(de).expect("rendered bundle must be valid YAML");
+                let v: serde_json::Value = serde::Deserialize::deserialize(de)
+                    .expect("rendered bundle must be valid YAML");
                 v.is_object().then_some(v)
             })
             .collect()
@@ -5102,7 +5213,8 @@ mod tests {
                 serde_json::Value::Object(m) => {
                     for (k, val) in m {
                         if k == "namespaceSelector" {
-                            if let Some(n) = val["matchLabels"]["kubernetes.io/metadata.name"].as_str()
+                            if let Some(n) =
+                                val["matchLabels"]["kubernetes.io/metadata.name"].as_str()
                             {
                                 out.push(n.to_string());
                             }
@@ -5134,7 +5246,9 @@ mod tests {
             "the allowed peer set drifted from ADR-044's five flows"
         );
         assert!(
-            !peers.iter().any(|p| p.starts_with(crate::tenants::NAMESPACE_PREFIX)),
+            !peers
+                .iter()
+                .any(|p| p.starts_with(crate::tenants::NAMESPACE_PREFIX)),
             "a tenant namespace is named as a peer: {peers:?}"
         );
     }
@@ -5153,12 +5267,16 @@ mod tests {
         for doc in parse_bundle(&bundle) {
             let labels = &doc["metadata"]["labels"];
             assert_eq!(
-                labels[crate::scope::LABEL_MANAGED_BY], crate::scope::MANAGED_BY,
-                "{} is not selectable by the managed-by sweep", doc["kind"]
+                labels[crate::scope::LABEL_MANAGED_BY],
+                crate::scope::MANAGED_BY,
+                "{} is not selectable by the managed-by sweep",
+                doc["kind"]
             );
             assert_eq!(
-                labels[crate::scope::LABEL_TENANT], t.id,
-                "{} carries the wrong owner (must be tenants.id, not the slug)", doc["kind"]
+                labels[crate::scope::LABEL_TENANT],
+                t.id,
+                "{} carries the wrong owner (must be tenants.id, not the slug)",
+                doc["kind"]
             );
         }
     }
@@ -5174,7 +5292,8 @@ mod tests {
             } else {
                 assert_eq!(
                     doc["metadata"]["namespace"], t.namespace,
-                    "{} escaped the tenant namespace", doc["kind"]
+                    "{} escaped the tenant namespace",
+                    doc["kind"]
                 );
             }
         }
@@ -5239,7 +5358,10 @@ mod tests {
         assert!(cpu_millis("-1").is_err());
         assert_eq!(mem_mib("3Gi").unwrap(), 3072);
         assert_eq!(mem_mib("512Mi").unwrap(), 512);
-        assert!(mem_mib("3G").is_err(), "SI vs binary must not be guessed at");
+        assert!(
+            mem_mib("3G").is_err(),
+            "SI vs binary must not be guessed at"
+        );
         assert_eq!(fmt_cpu(4000), "4");
         assert_eq!(fmt_cpu(4500), "4500m");
         assert_eq!(fmt_mem(10240), "10Gi");
@@ -5308,8 +5430,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let want: Vec<(String, i64)> =
-                ports.iter().map(|(p, n)| (p.to_string(), *n)).collect();
+            let want: Vec<(String, i64)> = ports.iter().map(|(p, n)| (p.to_string(), *n)).collect();
             assert_eq!(got, want, "{policy} → '{peer}' opens the wrong ports");
         }
     }
@@ -5328,7 +5449,10 @@ mod tests {
         // `kubernetes.io/metadata.name` selects nothing, silently.
         assert!(!live.ingress.is_empty());
         assert!(!live.minio.is_empty());
-        assert_eq!(env_ns("VELOX_NS_VAR_THAT_IS_UNSET_IN_TESTS", "fallback"), "fallback");
+        assert_eq!(
+            env_ns("VELOX_NS_VAR_THAT_IS_UNSET_IN_TESTS", "fallback"),
+            "fallback"
+        );
     }
 
     fn ingress_access(tls_secret: &str) -> crate::access::AccessConfig {
@@ -5354,7 +5478,10 @@ mod tests {
             securityconfig_secret_name("prod"),
             auth_state_secret_name("prod"),
         ] {
-            assert!(owned.contains(&expected), "{expected} is not deleted with the deployment");
+            assert!(
+                owned.contains(&expected),
+                "{expected} is not deleted with the deployment"
+            );
         }
     }
 
@@ -5540,7 +5667,8 @@ mod tests {
         // Default is OPEN: no list means no middleware annotation, so a
         // customer opts IN to restriction and can never be locked out by a
         // default they did not choose.
-        let m = dashboards_ingress_manifest(&ingress_access(""), &test_dep(), "prod.example.com", &[]);
+        let m =
+            dashboards_ingress_manifest(&ingress_access(""), &test_dep(), "prod.example.com", &[]);
         assert!(m["metadata"]["annotations"].as_object().unwrap().is_empty());
 
         let m = dashboards_ingress_manifest(
@@ -5549,17 +5677,24 @@ mod tests {
             "prod.example.com",
             &["203.0.113.0/24".to_string()],
         );
-        assert!(m["metadata"]["annotations"]
-            ["traefik.ingress.kubernetes.io/router.middlewares"]
-            .as_str()
-            .unwrap()
-            .contains("prod-ipallow"));
+        assert!(
+            m["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.middlewares"]
+                .as_str()
+                .unwrap()
+                .contains("prod-ipallow")
+        );
 
         // A typo in a security control must fail when it is saved, not later.
         for good in ["203.0.113.0/24", "198.51.100.7", "2001:db8::/32", "::1"] {
             validate_cidr(good).unwrap_or_else(|e| panic!("{good} rejected: {e}"));
         }
-        for bad in ["", "not-an-ip", "203.0.113.0/33", "203.0.113.0/x", "10.0.0.0/999"] {
+        for bad in [
+            "",
+            "not-an-ip",
+            "203.0.113.0/33",
+            "203.0.113.0/x",
+            "10.0.0.0/999",
+        ] {
             assert!(validate_cidr(bad).is_err(), "{bad} was accepted");
         }
     }
@@ -5568,15 +5703,18 @@ mod tests {
     fn the_dashboards_route_keeps_its_original_host() {
         // Renaming it would invalidate every SSO redirect URI registered at the
         // customer's IdP (ADR-045). The explicit `-dashboard` name is an ALIAS.
-        let m = dashboards_ingress_manifest(
-            &ingress_access(""), &test_dep(), "prod.example.com", &[]);
+        let m =
+            dashboards_ingress_manifest(&ingress_access(""), &test_dep(), "prod.example.com", &[]);
         let hosts: Vec<&str> = m["spec"]["rules"]
             .as_array()
             .unwrap()
             .iter()
             .map(|r| r["host"].as_str().unwrap())
             .collect();
-        assert!(hosts.contains(&"prod.example.com"), "the SSO host was dropped: {hosts:?}");
+        assert!(
+            hosts.contains(&"prod.example.com"),
+            "the SSO host was dropped: {hosts:?}"
+        );
     }
 
     #[test]
@@ -5585,18 +5723,31 @@ mod tests {
         // transport is never applied and the default one rejects the operator's
         // CA. This shape was measured working on the live cluster.
         let m = opensearch_route_manifest(
-            &ingress_access("wild-tls"), &test_dep(), "prod-opensearch.example.com", &[]);
+            &ingress_access("wild-tls"),
+            &test_dep(),
+            "prod-opensearch.example.com",
+            &[],
+        );
         let svc = &m["spec"]["routes"][0]["services"][0];
         assert_eq!(svc["scheme"], "https");
         assert_eq!(svc["serversTransport"], "prod-opensearch");
         assert_eq!(svc["port"], 9200);
         assert_eq!(m["spec"]["tls"]["secretName"], "wild-tls");
-        assert!(m["spec"]["routes"][0]["middlewares"].is_null(), "no list = no middleware");
+        assert!(
+            m["spec"]["routes"][0]["middlewares"].is_null(),
+            "no list = no middleware"
+        );
 
         let m = opensearch_route_manifest(
-            &ingress_access("wild-tls"), &test_dep(), "prod-opensearch.example.com",
-            &["203.0.113.0/24".to_string()]);
-        assert_eq!(m["spec"]["routes"][0]["middlewares"][0]["name"], "prod-ipallow");
+            &ingress_access("wild-tls"),
+            &test_dep(),
+            "prod-opensearch.example.com",
+            &["203.0.113.0/24".to_string()],
+        );
+        assert_eq!(
+            m["spec"]["routes"][0]["middlewares"][0]["name"],
+            "prod-ipallow"
+        );
     }
 
     #[test]
@@ -5604,9 +5755,16 @@ mod tests {
         // The API serves HTTPS with the operator's internal CA. Without telling
         // the controller both facts the route fails its handshake.
         let m = opensearch_ingress_manifest(
-            &ingress_access(""), &test_dep(), "prod-opensearch.example.com", &[]);
+            &ingress_access(""),
+            &test_dep(),
+            "prod-opensearch.example.com",
+            &[],
+        );
         let a = &m["metadata"]["annotations"];
-        assert_eq!(a["traefik.ingress.kubernetes.io/service.serversscheme"], "https");
+        assert_eq!(
+            a["traefik.ingress.kubernetes.io/service.serversscheme"],
+            "https"
+        );
         assert_eq!(a["nginx.ingress.kubernetes.io/backend-protocol"], "HTTPS");
         let b = &m["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"];
         assert_eq!(b["name"], "prod");
@@ -5617,7 +5775,8 @@ mod tests {
     fn ingress_manifest_without_tls_secret_is_unchanged() {
         // Regression guarantee (issue #54): no tls_secret ⇒ the rendered spec
         // is exactly the historical one — no `tls` key at all.
-        let m = dashboards_ingress_manifest(&ingress_access(""), &test_dep(), "prod.example.com", &[]);
+        let m =
+            dashboards_ingress_manifest(&ingress_access(""), &test_dep(), "prod.example.com", &[]);
         assert_eq!(m["metadata"]["name"], "prod-dashboards");
         assert_eq!(m["spec"]["ingressClassName"], "traefik");
         assert_eq!(m["spec"]["rules"][0]["host"], "prod.example.com");
@@ -5637,7 +5796,7 @@ mod tests {
             &ingress_access("client-wildcard-tls"),
             &test_dep(),
             "prod.example.com",
-        &[],
+            &[],
         );
         assert_eq!(m["spec"]["tls"][0]["secretName"], "client-wildcard-tls");
         assert_eq!(m["spec"]["tls"][0]["hosts"][0], "prod.example.com");
@@ -5647,7 +5806,12 @@ mod tests {
 
     #[test]
     fn ingress_manifest_trims_whitespace_only_tls_secret() {
-        let m = dashboards_ingress_manifest(&ingress_access("   "), &test_dep(), "prod.example.com", &[]);
+        let m = dashboards_ingress_manifest(
+            &ingress_access("   "),
+            &test_dep(),
+            "prod.example.com",
+            &[],
+        );
         assert!(m["spec"].get("tls").is_none());
     }
 
@@ -5658,7 +5822,10 @@ mod tests {
         let rsa_key = "-----BEGIN RSA PRIVATE KEY-----\nMIIE…\n-----END RSA PRIVATE KEY-----";
         assert!(validate_tls_pem(cert, key).is_ok());
         assert!(validate_tls_pem(cert, rsa_key).is_ok(), "PKCS#1 keys count");
-        assert!(validate_tls_pem(key, cert).is_err(), "swapped paste rejected");
+        assert!(
+            validate_tls_pem(key, cert).is_err(),
+            "swapped paste rejected"
+        );
         assert!(validate_tls_pem(cert, "not a key").is_err());
         assert!(validate_tls_pem("", key).is_err());
     }
@@ -5684,8 +5851,14 @@ mod tests {
             "unsafe char in password: {pw}"
         );
         // Satisfies OpenSearch's strict regex: all four classes present.
-        assert!(pw.chars().any(|c| c.is_ascii_uppercase()), "needs uppercase: {pw}");
-        assert!(pw.chars().any(|c| c.is_ascii_lowercase()), "needs lowercase: {pw}");
+        assert!(
+            pw.chars().any(|c| c.is_ascii_uppercase()),
+            "needs uppercase: {pw}"
+        );
+        assert!(
+            pw.chars().any(|c| c.is_ascii_lowercase()),
+            "needs lowercase: {pw}"
+        );
         assert!(pw.chars().any(|c| c.is_ascii_digit()), "needs digit: {pw}");
         assert!(
             pw.chars().any(|c| matches!(c, '-' | '.' | '_' | '~')),
@@ -5749,12 +5922,18 @@ mod tests {
         // Env beats the SA file when both are present.
         assert_eq!(resolve_ns(Some("a".into()), Some("b".into())).unwrap(), "a");
         // A blank/whitespace signal is ignored → fallback (not a blank ns()).
-        assert_eq!(resolve_ns(Some("   ".into()), None).unwrap_err(), DEV_FALLBACK_NS);
+        assert_eq!(
+            resolve_ns(Some("   ".into()), None).unwrap_err(),
+            DEV_FALLBACK_NS
+        );
         // Off-cluster, nothing set: the inert dev fallback, and explicitly NOT
         // the Tornis prod namespace — this is the whole point of #67.
         let fb = resolve_ns(None, None).unwrap_err();
         assert_eq!(fb, DEV_FALLBACK_NS);
-        assert_ne!(fb, "veloxsearch-test", "off-cluster must never default to prod (#67)");
+        assert_ne!(
+            fb, "veloxsearch-test",
+            "off-cluster must never default to prod (#67)"
+        );
     }
 
     /// #52: node scaling up/down is supported; scaling to zero is refused with
@@ -5787,7 +5966,10 @@ mod tests {
         assert!(ceil.contains("62Gi"), "names the ceiling: {ceil}");
         // "4GB" is not a Kubernetes quantity — refuse instead of a broken apply.
         let bad = memory_check("4GB").unwrap_err().to_string();
-        assert!(bad.contains("4GB") && bad.contains("4Gi"), "shows the fix: {bad}");
+        assert!(
+            bad.contains("4GB") && bad.contains("4Gi"),
+            "shows the fix: {bad}"
+        );
         assert!(memory_check("lots").is_err());
     }
 
@@ -5798,7 +5980,10 @@ mod tests {
         assert!(quantity_check("disk", "20Gi").is_ok());
         assert!(quantity_check("disk", "500Mi").is_ok());
         let err = quantity_check("disk", "20GB").unwrap_err().to_string();
-        assert!(err.contains("disk") && err.contains("20GB"), "names field+value: {err}");
+        assert!(
+            err.contains("disk") && err.contains("20GB"),
+            "names field+value: {err}"
+        );
     }
 
     /// #52: the admin-password rule `reset_admin_password` enforces.
@@ -5821,7 +6006,11 @@ mod tests {
         assert_eq!(heap_mib("2Gi"), 1024);
         assert_eq!(heap_mib("1Gi"), 512);
         assert_eq!(heap_mib(""), 512, "operator default when unset");
-        assert_eq!(heap_mib("nonsense"), 512, "operator default when unparseable");
+        assert_eq!(
+            heap_mib("nonsense"),
+            512,
+            "operator default when unparseable"
+        );
     }
 
     #[test]
@@ -5829,17 +6018,29 @@ mod tests {
         // ADR-035: the CR must NOT carry a `jvm` field — its absence is what
         // makes the operator compute -Xms/-Xmx = half the memory request.
         let p = node_pool(3, "10Gi", "3Gi", "1", "2");
-        assert!(p.get("jvm").is_none(), "jvm must be omitted (operator-managed)");
+        assert!(
+            p.get("jvm").is_none(),
+            "jvm must be omitted (operator-managed)"
+        );
         // One memory number: request = limit (Guaranteed QoS), so the value
         // the operator halves is exactly the value the user set.
         let res = p.get("resources").expect("resources block");
-        assert_eq!(res.pointer("/requests/memory"), Some(&serde_json::json!("3Gi")));
-        assert_eq!(res.pointer("/limits/memory"), Some(&serde_json::json!("3Gi")));
+        assert_eq!(
+            res.pointer("/requests/memory"),
+            Some(&serde_json::json!("3Gi"))
+        );
+        assert_eq!(
+            res.pointer("/limits/memory"),
+            Some(&serde_json::json!("3Gi"))
+        );
         assert_eq!(res.pointer("/requests/cpu"), Some(&serde_json::json!("1")));
         assert_eq!(res.pointer("/limits/cpu"), Some(&serde_json::json!("2")));
         assert_eq!(p.get("replicas"), Some(&serde_json::json!(3)));
         assert_eq!(p.get("diskSize"), Some(&serde_json::json!("10Gi")));
-        assert!(p.get("persistence").is_some(), "PVC persistence stays (ADR-031)");
+        assert!(
+            p.get("persistence").is_some(),
+            "PVC persistence stays (ADR-031)"
+        );
     }
 
     #[test]
@@ -5875,7 +6076,7 @@ mod tests {
         assert_eq!(heap_short(sizing("small").mem), "1g"); // 2Gi/2
         assert_eq!(heap_short(sizing("medium").mem), "1536m"); // 3Gi/2
         assert_eq!(heap_short(sizing("large").mem), "1536m"); // 3Gi/2
-        // All presets stay inside the guarded memory range.
+                                                              // All presets stay inside the guarded memory range.
         for size in ["small", "medium", "large"] {
             assert!(memory_check(sizing(size).mem).is_ok(), "preset {size}");
         }
@@ -5946,16 +6147,28 @@ mod tests {
     fn snapshot_patch_carries_repo_keystore_and_plugin() {
         let m = snapshot_cr_patch("prod", Some(&snap_cfg()));
         let g = &m["spec"]["general"];
-        assert_eq!(g["snapshotRepositories"][0]["name"], crate::snapshot::REPO_NAME);
-        assert_eq!(g["snapshotRepositories"][0]["settings"]["bucket"], "velox-snap");
+        assert_eq!(
+            g["snapshotRepositories"][0]["name"],
+            crate::snapshot::REPO_NAME
+        );
+        assert_eq!(
+            g["snapshotRepositories"][0]["settings"]["bucket"],
+            "velox-snap"
+        );
         assert_eq!(g["keystore"][0]["secret"]["name"], "prod-snapshot-s3");
         // repository-s3 is NOT bundled in the OpenSearch image (verified on
         // 3.7.0), so both the nodes and the bootstrap pod must declare it.
         assert_eq!(g["pluginsList"][0], crate::snapshot::S3_PLUGIN);
-        assert_eq!(m["spec"]["bootstrap"]["pluginsList"][0], crate::snapshot::S3_PLUGIN);
+        assert_eq!(
+            m["spec"]["bootstrap"]["pluginsList"][0],
+            crate::snapshot::S3_PLUGIN
+        );
         // No key material on the CR — it reaches the node through the keystore.
         let s = serde_json::to_string(&m).unwrap();
-        assert!(!s.contains("AKIA") && !s.contains("s3cr3t"), "credentials on the CR: {s}");
+        assert!(
+            !s.contains("AKIA") && !s.contains("s3cr3t"),
+            "credentials on the CR: {s}"
+        );
     }
 
     /// Disabling renders an empty spec: server-side apply then prunes exactly
@@ -5970,7 +6183,10 @@ mod tests {
             }),
         ] {
             let m = snapshot_cr_patch("prod", cfg.as_ref());
-            assert!(m.get("spec").is_none(), "disabled patch must carry no spec: {m}");
+            assert!(
+                m.get("spec").is_none(),
+                "disabled patch must carry no spec: {m}"
+            );
             assert_eq!(m["metadata"]["name"], "prod");
         }
     }
@@ -6061,11 +6277,16 @@ mod tests {
         });
         let st = snapshot_state_from(&cfg, Some(&errored), true);
         assert_eq!(st.policy_state, "ERROR");
-        assert_eq!(st.last_error, "403 Access Denied", "the S3 reason must reach the UI verbatim");
+        assert_eq!(
+            st.last_error, "403 Access Denied",
+            "the S3 reason must reach the UI verbatim"
+        );
 
         // A reason attached to a non-error state is not an error message.
         let created = serde_json::json!({ "status": { "state": "CREATED", "reason": "ok" } });
-        assert!(snapshot_state_from(&cfg, Some(&created), true).last_error.is_empty());
+        assert!(snapshot_state_from(&cfg, Some(&created), true)
+            .last_error
+            .is_empty());
 
         // Unconfigured deployments report nothing at all.
         assert!(!snapshot_state_from(&SnapshotConfig::default(), None, true).configured);

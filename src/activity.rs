@@ -544,7 +544,11 @@ pub fn evaluate(i: &ActivityInput) -> Activity {
         // Only carried while stalled: before the threshold the panel's job is
         // to say "this is normal, wait", and dressing an ordinary 40-second
         // node start in a diagnosis would teach the user to ignore it.
-        blocked: if stalled { blocked_of(i) } else { Blocked::default() },
+        blocked: if stalled {
+            blocked_of(i)
+        } else {
+            Blocked::default()
+        },
     }
 }
 
@@ -629,7 +633,10 @@ mod tests {
         );
         assert_eq!(a.kind, "restarting");
         assert_eq!(a.stage, "nodes");
-        assert_eq!(a.detail, "1/3", "the roll counts updated pods, not ready ones");
+        assert_eq!(
+            a.detail, "1/3",
+            "the roll counts updated pods, not ready ones"
+        );
         assert!(a.locks_edits);
     }
 
@@ -659,18 +666,27 @@ mod tests {
             "1 of 3 nodes cannot be settled — the StatefulSet is still being scaled up"
         );
         assert_eq!(a.stage, "nodes");
-        assert_eq!(a.detail, "1/3", "progress counts toward the requested size, not the current one");
+        assert_eq!(
+            a.detail, "1/3",
+            "progress counts toward the requested size, not the current one"
+        );
     }
 
     #[test]
     fn security_bootstrap_and_dashboards_both_hold_it_open() {
-        let no_security = ActivityInput { initialized: false, ..steady() };
+        let no_security = ActivityInput {
+            initialized: false,
+            ..steady()
+        };
         let a = evaluate(&no_security);
         assert!(!a.settled);
         assert_eq!(a.kind, "creating");
         assert_eq!(a.stage, "security");
 
-        let no_dashboards = ActivityInput { dashboards_ready: false, ..steady() };
+        let no_dashboards = ActivityInput {
+            dashboards_ready: false,
+            ..steady()
+        };
         let a = evaluate(&no_dashboards);
         assert!(!a.settled);
         assert_eq!(a.stage, "dashboards");
@@ -718,41 +734,86 @@ mod tests {
         // A create, in the order it really happens.
         let seq: Vec<ActivityInput> = vec![
             // 1. storage gate: no CR status, no StatefulSet yet
-            ActivityInput { phase: String::new(), health: "unknown".into(), ..Default::default() },
+            ActivityInput {
+                phase: String::new(),
+                health: "unknown".into(),
+                ..Default::default()
+            },
             // 2. CR accepted, StatefulSet not created yet
-            ActivityInput { phase: "PENDING".into(), health: "unknown".into(), ..Default::default() },
+            ActivityInput {
+                phase: "PENDING".into(),
+                health: "unknown".into(),
+                ..Default::default()
+            },
             // 3. volumes binding
             ActivityInput {
-                phase: "PENDING".into(), health: "red".into(),
-                nodes_desired: 3, pvcs_total: 3, pvcs_bound: 1, ..Default::default()
+                phase: "PENDING".into(),
+                health: "red".into(),
+                nodes_desired: 3,
+                pvcs_total: 3,
+                pvcs_bound: 1,
+                ..Default::default()
             },
             ActivityInput {
-                phase: "PENDING".into(), health: "red".into(),
-                nodes_desired: 3, pvcs_total: 3, pvcs_bound: 3, ..Default::default()
+                phase: "PENDING".into(),
+                health: "red".into(),
+                nodes_desired: 3,
+                pvcs_total: 3,
+                pvcs_bound: 3,
+                ..Default::default()
             },
             // 4. nodes coming up
             ActivityInput {
-                phase: "RUNNING".into(), health: "red".into(), nodes_ready: 1, nodes_updated: 1,
-                nodes_desired: 3, pvcs_total: 3, pvcs_bound: 3, ..Default::default()
+                phase: "RUNNING".into(),
+                health: "red".into(),
+                nodes_ready: 1,
+                nodes_updated: 1,
+                nodes_desired: 3,
+                pvcs_total: 3,
+                pvcs_bound: 3,
+                ..Default::default()
             },
             ActivityInput {
-                phase: "RUNNING".into(), health: "yellow".into(), nodes_ready: 2, nodes_updated: 2,
-                nodes_desired: 3, pvcs_total: 3, pvcs_bound: 3, ..Default::default()
+                phase: "RUNNING".into(),
+                health: "yellow".into(),
+                nodes_ready: 2,
+                nodes_updated: 2,
+                nodes_desired: 3,
+                pvcs_total: 3,
+                pvcs_bound: 3,
+                ..Default::default()
             },
             // 5. all nodes up, security still bootstrapping
             ActivityInput {
-                phase: "RUNNING".into(), health: "yellow".into(), nodes_ready: 3, nodes_updated: 3,
-                nodes_desired: 3, pvcs_total: 3, pvcs_bound: 3, ..Default::default()
+                phase: "RUNNING".into(),
+                health: "yellow".into(),
+                nodes_ready: 3,
+                nodes_updated: 3,
+                nodes_desired: 3,
+                pvcs_total: 3,
+                pvcs_bound: 3,
+                ..Default::default()
             },
             // 6. security done, dashboards still starting
-            ActivityInput { initialized: true, dashboards_ready: false, health: "green".into(),
+            ActivityInput {
+                initialized: true,
+                dashboards_ready: false,
+                health: "green".into(),
                 ..ActivityInput {
-                    phase: "RUNNING".into(), nodes_ready: 3, nodes_updated: 3,
-                    nodes_desired: 3, pvcs_total: 3, pvcs_bound: 3, ..Default::default()
+                    phase: "RUNNING".into(),
+                    nodes_ready: 3,
+                    nodes_updated: 3,
+                    nodes_desired: 3,
+                    pvcs_total: 3,
+                    pvcs_bound: 3,
+                    ..Default::default()
                 }
             },
             // 7. everything up, cluster not green yet
-            ActivityInput { health: "yellow".into(), ..steady() },
+            ActivityInput {
+                health: "yellow".into(),
+                ..steady()
+            },
             // 8. settled
             steady(),
         ];
@@ -763,7 +824,8 @@ mod tests {
             assert!(
                 a.percent >= last,
                 "step {n} went backwards: {last}% → {}% (stage {})",
-                a.percent, a.stage
+                a.percent,
+                a.stage
             );
             assert!(a.percent <= 100);
             if !a.settled {
@@ -779,17 +841,25 @@ mod tests {
         // The old bar sat at 0% through PVC provisioning and image pull — the
         // longest, most confusing part of a create. Each early stage now has
         // its own floor, so something moves.
-        let storage = evaluate(&ActivityInput { health: "unknown".into(), ..Default::default() });
+        let storage = evaluate(&ActivityInput {
+            health: "unknown".into(),
+            ..Default::default()
+        });
         assert_eq!(storage.stage, "storage");
 
         let accepted = evaluate(&ActivityInput {
-            phase: "PENDING".into(), health: "unknown".into(), ..Default::default()
+            phase: "PENDING".into(),
+            health: "unknown".into(),
+            ..Default::default()
         });
         assert_eq!(accepted.stage, "accepted");
         assert!(accepted.percent >= 5);
 
         let volumes = evaluate(&ActivityInput {
-            phase: "PENDING".into(), nodes_desired: 3, pvcs_total: 3, pvcs_bound: 1,
+            phase: "PENDING".into(),
+            nodes_desired: 3,
+            pvcs_total: 3,
+            pvcs_bound: 1,
             ..Default::default()
         });
         assert_eq!(volumes.stage, "volumes");
@@ -802,7 +872,9 @@ mod tests {
     #[test]
     fn zero_nodes_is_never_settled() {
         let a = evaluate(&ActivityInput {
-            health: "green".into(), initialized: true, dashboards_ready: true,
+            health: "green".into(),
+            initialized: true,
+            dashboards_ready: true,
             ..Default::default()
         });
         assert!(!a.settled, "a deployment with no nodes cannot be ready");
@@ -821,7 +893,10 @@ mod tests {
         assert!(!a.settled);
         assert_eq!(a.kind, "restarting");
         assert!(a.stalled, "16 hours without progress is a stall");
-        assert_eq!(a.since_secs, 57_240, "the age comes from the cluster, not a client clock");
+        assert_eq!(
+            a.since_secs, 57_240,
+            "the age comes from the cluster, not a client clock"
+        );
 
         // Every fact the incident's screenshots and logs contained, on the
         // wire, so the SPA can compose "waiting for green — 7 unassigned
@@ -839,7 +914,10 @@ mod tests {
     /// would make the diagnosis worthless by crying wolf on every create.
     #[test]
     fn a_young_activity_is_not_stalled_and_carries_no_diagnosis() {
-        let young = ActivityInput { since_secs: STALL_AFTER_SECS - 1, ..stuck_roll() };
+        let young = ActivityInput {
+            since_secs: STALL_AFTER_SECS - 1,
+            ..stuck_roll()
+        };
         let a = evaluate(&young);
         assert!(!a.stalled);
         assert_eq!(a.blocked, Blocked::default());
@@ -853,7 +931,10 @@ mod tests {
     /// is a claim about elapsed time and we refuse to make it without one.
     #[test]
     fn an_unmeasurable_age_never_claims_a_stall() {
-        let a = evaluate(&ActivityInput { since_secs: 0, ..stuck_roll() });
+        let a = evaluate(&ActivityInput {
+            since_secs: 0,
+            ..stuck_roll()
+        });
         assert!(!a.stalled);
     }
 
@@ -862,7 +943,10 @@ mod tests {
     /// cluster is yellow" instead of showing nothing.
     #[test]
     fn a_stall_without_opensearch_still_names_what_kubernetes_knows() {
-        let a = evaluate(&ActivityInput { cluster: None, ..stuck_roll() });
+        let a = evaluate(&ActivityInput {
+            cluster: None,
+            ..stuck_roll()
+        });
         assert!(a.stalled);
         assert_eq!(a.blocked.health, "yellow");
         assert_eq!(a.blocked.component_status, "Running");
@@ -886,7 +970,8 @@ mod tests {
             let a = evaluate(&oversized);
             assert_eq!(a.nodes_total, 3);
             assert_eq!(
-                a.nodes_ready, 3,
+                a.nodes_ready,
+                3,
                 "{} ready pods against a 3-node spec must read 3/3, never {}/3",
                 3 + extra,
                 3 + extra
@@ -922,7 +1007,10 @@ mod tests {
         assert!(!a.settled, "…and one that has not finished converging");
 
         // A cluster missing a primary is not serving.
-        let red = evaluate(&ActivityInput { health: "red".into(), ..stuck_roll() });
+        let red = evaluate(&ActivityInput {
+            health: "red".into(),
+            ..stuck_roll()
+        });
         assert!(!red.serving);
 
         // Nor is one whose nodes are not all up yet — a create at 1 of 3.
@@ -951,7 +1039,10 @@ mod tests {
     fn the_ladder_is_ordered_and_ends_at_100() {
         let mut last = 0u8;
         for (name, ceiling) in LADDER {
-            assert!(*ceiling > last, "stage `{name}` does not advance the ladder");
+            assert!(
+                *ceiling > last,
+                "stage `{name}` does not advance the ladder"
+            );
             last = *ceiling;
         }
         assert_eq!(last, 100);

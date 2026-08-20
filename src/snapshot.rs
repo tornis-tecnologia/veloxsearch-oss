@@ -455,8 +455,14 @@ mod tests {
     fn repo_entry_has_no_credentials() {
         let v = repo_entry(&cfg());
         let s = serde_json::to_string(&v).unwrap();
-        assert!(!s.contains("AKIA"), "access key leaked into the repo body: {s}");
-        assert!(!s.contains("s3cr3t"), "secret key leaked into the repo body: {s}");
+        assert!(
+            !s.contains("AKIA"),
+            "access key leaked into the repo body: {s}"
+        );
+        assert!(
+            !s.contains("s3cr3t"),
+            "secret key leaked into the repo body: {s}"
+        );
         for k in ["access_key", "secret_key", "accessKey", "secretKey"] {
             assert!(!s.contains(k), "credential key `{k}` in the repo body: {s}");
         }
@@ -475,7 +481,8 @@ mod tests {
     fn encryption_is_left_to_the_bucket() {
         let set = repo_entry(&cfg())["settings"].as_object().unwrap().clone();
         assert_eq!(
-            set.get("server_side_encryption_type").and_then(|v| v.as_str()),
+            set.get("server_side_encryption_type")
+                .and_then(|v| v.as_str()),
             Some("bucket_default"),
             "the repository must not request SSE itself — MinIO rejects both \
              AES256 and aws:kms without a KMS"
@@ -545,7 +552,10 @@ mod tests {
         assert_eq!(v["metadata"]["namespace"], "velox");
         assert_eq!(v["spec"]["opensearchCluster"]["name"], "logs-abcd");
         assert_eq!(v["spec"]["snapshotConfig"]["repository"], REPO_NAME);
-        assert_eq!(v["spec"]["creation"]["schedule"]["cron"]["expression"], "0 2 * * *");
+        assert_eq!(
+            v["spec"]["creation"]["schedule"]["cron"]["expression"],
+            "0 2 * * *"
+        );
         assert_eq!(v["spec"]["deletion"]["deleteCondition"]["maxAge"], "7d");
         assert_eq!(v["spec"]["deletion"]["deleteCondition"]["maxCount"], 14);
         assert_eq!(v["spec"]["deletion"]["deleteCondition"]["minCount"], 3);
@@ -564,7 +574,10 @@ mod tests {
             ..cfg()
         };
         let v = policy_cr("velox", "logs-abcd", &c);
-        assert_eq!(v["spec"]["creation"]["schedule"]["cron"]["expression"], "30 4 * * 0");
+        assert_eq!(
+            v["spec"]["creation"]["schedule"]["cron"]["expression"],
+            "30 4 * * 0"
+        );
         assert_eq!(
             v["spec"]["creation"]["schedule"]["cron"]["timezone"],
             "America/Sao_Paulo"

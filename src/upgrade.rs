@@ -58,7 +58,11 @@ impl Version {
         if it.next().is_some() {
             bail!("'{s}' is not a valid version: too many components (expected MAJOR.MINOR.PATCH, e.g. 3.7.0)");
         }
-        Ok(Version { major, minor, patch })
+        Ok(Version {
+            major,
+            minor,
+            patch,
+        })
     }
 }
 
@@ -87,9 +91,18 @@ pub const CATALOG: &[CatalogEntry] = &[
     // rolling upgrade 3.7.0 → 3.8.0 on k3s (2026-08-06), green afterwards with
     // the indices intact. `DEFAULT_VERSION` stays at 3.7.0 — what a NEW
     // deployment is created with is a separate decision (ADR-040).
-    CatalogEntry { version: "3.8.0", note: "current" },
-    CatalogEntry { version: "3.7.0", note: "previous" },
-    CatalogEntry { version: "3.6.0", note: "lts" },
+    CatalogEntry {
+        version: "3.8.0",
+        note: "current",
+    },
+    CatalogEntry {
+        version: "3.7.0",
+        note: "previous",
+    },
+    CatalogEntry {
+        version: "3.6.0",
+        note: "lts",
+    },
 ];
 
 /// Is this version one we ship as a tested target?
@@ -173,7 +186,11 @@ pub enum UpgradeState {
     /// The spec asks for a new version, the operator has not started the pool.
     Pending { from: String, to: String },
     /// A node pool is being rolled, one node at a time.
-    Upgrading { pool: String, from: String, to: String },
+    Upgrading {
+        pool: String,
+        from: String,
+        to: String,
+    },
     /// Every pool finished and the cluster reports the target version.
     Finished { version: String },
     /// The operator refused or could not complete. `reason` is the upstream
@@ -184,7 +201,10 @@ pub enum UpgradeState {
 impl UpgradeState {
     /// Is an upgrade in flight? The pre-flight refuses to start a second one.
     pub fn in_flight(&self) -> bool {
-        matches!(self, UpgradeState::Pending { .. } | UpgradeState::Upgrading { .. })
+        matches!(
+            self,
+            UpgradeState::Pending { .. } | UpgradeState::Upgrading { .. }
+        )
     }
 
     /// Stable id for the DTO/UI (`idle`, `pending`, …).
@@ -259,7 +279,9 @@ pub fn upgrade_state(
     }
     if diverged {
         if let Some(w) = warning.map(str::trim).filter(|w| !w.is_empty()) {
-            return UpgradeState::Failed { reason: w.to_string() };
+            return UpgradeState::Failed {
+                reason: w.to_string(),
+            };
         }
         return UpgradeState::Pending {
             from: status_v.to_string(),
@@ -291,7 +313,14 @@ mod tests {
 
     #[test]
     fn parses_and_orders() {
-        assert_eq!(v("3.7.0"), Version { major: 3, minor: 7, patch: 0 });
+        assert_eq!(
+            v("3.7.0"),
+            Version {
+                major: 3,
+                minor: 7,
+                patch: 0
+            }
+        );
         assert!(v("3.7.0") > v("3.6.9"));
         assert!(v("3.10.0") > v("3.9.0")); // not a string comparison
         assert!(v("2.19.0") < v("3.0.0"));
@@ -299,7 +328,15 @@ mod tests {
 
     #[test]
     fn refuses_malformed_versions() {
-        for bad in ["", "3.7", "3.7.0.1", "3.7.x", "v3.7.0", "3.7.0-beta1", "latest"] {
+        for bad in [
+            "",
+            "3.7",
+            "3.7.0.1",
+            "3.7.x",
+            "v3.7.0",
+            "3.7.0-beta1",
+            "latest",
+        ] {
             assert!(Version::parse(bad).is_err(), "{bad} should not parse");
         }
     }
@@ -326,7 +363,10 @@ mod tests {
         // A deployment created today (DEFAULT_VERSION) is offered only what is
         // ahead of it.
         assert_eq!(
-            targets_for(DEFAULT_VERSION).iter().map(|e| e.version).collect::<Vec<_>>(),
+            targets_for(DEFAULT_VERSION)
+                .iter()
+                .map(|e| e.version)
+                .collect::<Vec<_>>(),
             vec!["3.8.0"]
         );
         // The legacy 3.0.0 deployment (ADR-044) sees every catalog entry.
@@ -359,8 +399,16 @@ mod tests {
     #[test]
     fn stable_versions_drops_everything_that_is_not_a_release() {
         let tags: Vec<String> = [
-            "latest", "3", "3.7", "3.7.0", "3.6.0", "3.8.0-beta1", "2.19.1",
-            "3.7.0.arm64", "", "3.7.0",
+            "latest",
+            "3",
+            "3.7",
+            "3.7.0",
+            "3.6.0",
+            "3.8.0-beta1",
+            "2.19.1",
+            "3.7.0.arm64",
+            "",
+            "3.7.0",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -381,10 +429,16 @@ mod tests {
         assert!(same.contains("already"), "{same}");
 
         let down = validate("3.7.0", "3.6.0").unwrap_err().to_string();
-        assert!(down.contains("downgrade") && down.contains("no rollback"), "{down}");
+        assert!(
+            down.contains("downgrade") && down.contains("no rollback"),
+            "{down}"
+        );
 
         let jump = validate("3.7.0", "5.0.0").unwrap_err().to_string();
-        assert!(jump.contains("more than one major") && jump.contains("4.x"), "{jump}");
+        assert!(
+            jump.contains("more than one major") && jump.contains("4.x"),
+            "{jump}"
+        );
 
         assert!(validate("3.7.0", "3.7").is_err());
         assert!(validate("nonsense", "3.7.0").is_err());
@@ -413,7 +467,10 @@ mod tests {
         );
         // A component from another reconciler must not be read as an upgrade.
         let other = comps(&[("Security", "Pending", "")]);
-        assert_eq!(upgrade_state("3.7.0", "3.7.0", &other, None), UpgradeState::Idle);
+        assert_eq!(
+            upgrade_state("3.7.0", "3.7.0", &other, None),
+            UpgradeState::Idle
+        );
     }
 
     #[test]
@@ -421,7 +478,10 @@ mod tests {
         let s = upgrade_state("3.7.0", "3.0.0", &serde_json::Value::Null, None);
         assert_eq!(
             s,
-            UpgradeState::Pending { from: "3.0.0".into(), to: "3.7.0".into() }
+            UpgradeState::Pending {
+                from: "3.0.0".into(),
+                to: "3.7.0".into()
+            }
         );
         assert!(s.in_flight());
     }
@@ -442,7 +502,10 @@ mod tests {
     #[test]
     fn state_finished_pools_with_the_version_reached_is_idle() {
         let c = comps(&[("Upgrader", "Finished", "nodes")]);
-        assert_eq!(upgrade_state("3.7.0", "3.7.0", &c, None), UpgradeState::Idle);
+        assert_eq!(
+            upgrade_state("3.7.0", "3.7.0", &c, None),
+            UpgradeState::Idle
+        );
     }
 
     #[test]
@@ -461,7 +524,10 @@ mod tests {
         // An empty event message is not a failure.
         assert_eq!(
             upgrade_state("3.7.0", "3.0.0", &serde_json::Value::Null, Some("  ")),
-            UpgradeState::Pending { from: "3.0.0".into(), to: "3.7.0".into() }
+            UpgradeState::Pending {
+                from: "3.0.0".into(),
+                to: "3.7.0".into()
+            }
         );
     }
 

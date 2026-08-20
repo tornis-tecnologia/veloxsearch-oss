@@ -143,7 +143,13 @@ pub fn obj_name(deployment: &str, part: &str) -> String {
 /// the classic three-source shape needed (21892) no longer exists.
 pub const DP_OTLP_PORT: u16 = 21890;
 
-pub const COMPONENTS: [&str; 5] = ["cortex", "alertmanager", "os-exporter", "data-prepper", "collector"];
+pub const COMPONENTS: [&str; 5] = [
+    "cortex",
+    "alertmanager",
+    "os-exporter",
+    "data-prepper",
+    "collector",
+];
 
 /// SQL-plugin datasource name — **the upstream name, verbatim**.
 ///
@@ -233,17 +239,52 @@ struct Res {
     mem_req_mib: u64,
 }
 
-const R_CORTEX: Res = Res { cpu_req: "100m", mem_req: "512Mi", cpu_lim: "500m", mem_lim: "1Gi", cpu_req_millis: 100, mem_req_mib: 512 };
-const R_AM: Res = Res { cpu_req: "50m", mem_req: "64Mi", cpu_lim: "200m", mem_lim: "128Mi", cpu_req_millis: 50, mem_req_mib: 64 };
-const R_OSEXP: Res = Res { cpu_req: "50m", mem_req: "64Mi", cpu_lim: "200m", mem_lim: "128Mi", cpu_req_millis: 50, mem_req_mib: 64 };
+const R_CORTEX: Res = Res {
+    cpu_req: "100m",
+    mem_req: "512Mi",
+    cpu_lim: "500m",
+    mem_lim: "1Gi",
+    cpu_req_millis: 100,
+    mem_req_mib: 512,
+};
+const R_AM: Res = Res {
+    cpu_req: "50m",
+    mem_req: "64Mi",
+    cpu_lim: "200m",
+    mem_lim: "128Mi",
+    cpu_req_millis: 50,
+    mem_req_mib: 64,
+};
+const R_OSEXP: Res = Res {
+    cpu_req: "50m",
+    mem_req: "64Mi",
+    cpu_lim: "200m",
+    mem_lim: "128Mi",
+    cpu_req_millis: 50,
+    mem_req_mib: 64,
+};
 // Data Prepper is the memory-hungry one, and measurably so: with the documented
 // six-pipeline topology it sits at ~1.4 GiB **idle**, because `otel_traces`
 // holds spans for its 180s flush interval and `otel_apm_service_map` keeps a
 // window. At the 2 GiB upstream ceiling it was OOM-killed (exit 137) on this
 // cluster, so the limit is 3 GiB here — a deliberate departure, taken from a
 // measurement rather than from the chart.
-const R_DP: Res = Res { cpu_req: "500m", mem_req: "1536Mi", cpu_lim: "1", mem_lim: "3Gi", cpu_req_millis: 500, mem_req_mib: 1536 };
-const R_OTEL: Res = Res { cpu_req: "200m", mem_req: "512Mi", cpu_lim: "1", mem_lim: "1Gi", cpu_req_millis: 200, mem_req_mib: 512 };
+const R_DP: Res = Res {
+    cpu_req: "500m",
+    mem_req: "1536Mi",
+    cpu_lim: "1",
+    mem_lim: "3Gi",
+    cpu_req_millis: 500,
+    mem_req_mib: 1536,
+};
+const R_OTEL: Res = Res {
+    cpu_req: "200m",
+    mem_req: "512Mi",
+    cpu_lim: "1",
+    mem_lim: "1Gi",
+    cpu_req_millis: 200,
+    mem_req_mib: 512,
+};
 
 /// Cortex TSDB blocks + Alertmanager silences/notification state.
 const CORTEX_DISK_GIB: u64 = 20;
@@ -873,7 +914,10 @@ pub fn apm_config_id(_deployment: &str) -> String {
 /// `data_connection_id` is the OSD saved-object id of the Prometheus
 /// connection, which only exists once the datasource is registered *through
 /// Dashboards* (see `register_datasource`).
-pub fn correlation_objects(deployment: &str, data_connection_id: Option<&str>) -> Vec<serde_json::Value> {
+pub fn correlation_objects(
+    deployment: &str,
+    data_connection_id: Option<&str>,
+) -> Vec<serde_json::Value> {
     let mut out = vec![serde_json::json!({
         "id": trace_to_logs_id(deployment),
         "type": "correlations",
@@ -1397,7 +1441,12 @@ pub fn manifests(
 
     // ---- config ----
     v.push(config_map(deployment, "cortex", "cortex.yaml", &cortex_cfg));
-    v.push(config_map(deployment, "alertmanager", "alertmanager.yml", &am_cfg));
+    v.push(config_map(
+        deployment,
+        "alertmanager",
+        "alertmanager.yml",
+        &am_cfg,
+    ));
 
     // Data Prepper's pipeline carries the OpenSearch password → Secret, never a
     // ConfigMap. (`agents.rs` puts its Fluent Bit password in a ConfigMap; that
@@ -1455,7 +1504,11 @@ pub fn manifests(
         ]),
         &config_hash(&cortex_cfg),
     ));
-    v.push(service(deployment, "cortex", &[("http", 9090), ("grpc", 9095)]));
+    v.push(service(
+        deployment,
+        "cortex",
+        &[("http", 9090), ("grpc", 9095)],
+    ));
 
     // ---- alertmanager ----
     v.push(deployment_obj(
@@ -1518,13 +1571,17 @@ pub fn manifests(
         &config_hash(&dp_pipelines),
     ));
     v.push(service(
-        deployment, "data-prepper",
+        deployment,
+        "data-prepper",
         &[("otlp", 21890), ("http-source", 2021), ("metrics", 4900)],
     ));
 
     // ---- collector ----
     v.push(deployment_obj(
-        dep, "collector", OTEL_IMAGE, &R_OTEL,
+        dep,
+        "collector",
+        OTEL_IMAGE,
+        &R_OTEL,
         serde_json::json!(["--config=/etc/otel/otel-config.yaml"]),
         serde_json::json!([]),
         &[4317, 4318, 8888],
@@ -1536,7 +1593,8 @@ pub fn manifests(
         &config_hash(&otel_cfg),
     ));
     v.push(service(
-        deployment, "collector",
+        deployment,
+        "collector",
         &[("otlp-grpc", 4317), ("otlp-http", 4318), ("metrics", 8888)],
     ));
 
@@ -1602,7 +1660,13 @@ pub fn manifests(
         // `…-logs` really only carries logs. Three hosts pointing at `/` would
         // all accept everything and the name would be decoration.
         for (signal, path) in SIGNALS {
-            v.push(ingress_obj(deployment, signal, &ing.host(signal), path, ing));
+            v.push(ingress_obj(
+                deployment,
+                signal,
+                &ing.host(signal),
+                path,
+                ing,
+            ));
         }
     }
 
@@ -1649,10 +1713,16 @@ fn ingress_obj(
 
 /// Every object key `manifests()` creates.
 pub fn created_objects(dep: &Deployment) -> BTreeSet<ObjectKey> {
-    manifests(dep, "u", "p", &ScrapeTargets::default(), &EndpointAccess::default())
-        .iter()
-        .map(|o| o.key())
-        .collect()
+    manifests(
+        dep,
+        "u",
+        "p",
+        &ScrapeTargets::default(),
+        &EndpointAccess::default(),
+    )
+    .iter()
+    .map(|o| o.key())
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1768,9 +1838,7 @@ pub async fn install(dep: &Deployment, targets: ScrapeTargets) -> Result<()> {
     //    Prepper's span template on this cluster was installed for a different
     //    `index_type`; it has to go while the old pod is still the one holding
     //    it, so the new pod installs the right one at startup.
-    if needs_span_migration(
-        (!status.otel_stack.is_empty()).then_some(status.otel_stack.as_str()),
-    ) {
+    if needs_span_migration((!status.otel_stack.is_empty()).then_some(status.otel_stack.as_str())) {
         tracing::info!("otel stack: clearing the stale span template for {deployment}");
         clear_span_template(dep).await;
     }
@@ -1883,9 +1951,8 @@ pub async fn install(dep: &Deployment, targets: ScrapeTargets) -> Result<()> {
     //    objects, a type that does not exist until the config lands, and every
     //    panel plus the APM correlation references the datasource.
     let d = dep.clone();
-    let migrating = needs_span_migration(
-        (!status.otel_stack.is_empty()).then_some(status.otel_stack.as_str()),
-    );
+    let migrating =
+        needs_span_migration((!status.otel_stack.is_empty()).then_some(status.otel_stack.as_str()));
     tokio::spawn(async move {
         if has_dashboards {
             if let Err(e) = wait_dashboards_features(&d, 600).await {
@@ -2078,12 +2145,19 @@ pub async fn uninstall(dep: &Deployment, delete_indices: bool) -> Result<()> {
 async fn delete_telemetry_indices(dep: &Deployment) {
     let deployment = dep.name();
     let base = crate::recipes::os_base(dep);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(dep).await;
     // `SERVICE_MAP_INDEX` as well as the alias pattern: deleting through the
     // alias alone is a no-op (see the constant), and deleting the alias pattern
     // is still worth attempting so the alias itself does not outlive its index.
-    for pattern in [SPAN_PATTERN, SERVICE_MAP_PATTERN, SERVICE_MAP_INDEX, LOGS_PATTERN] {
+    for pattern in [
+        SPAN_PATTERN,
+        SERVICE_MAP_PATTERN,
+        SERVICE_MAP_INDEX,
+        LOGS_PATTERN,
+    ] {
         match c
             .delete(format!("{base}/{pattern}"))
             .basic_auth(&u, Some(&p))
@@ -2112,17 +2186,16 @@ pub async fn status(dep: &Deployment) -> Result<StackState> {
 
     let access = crate::access::get().await.unwrap_or_default();
     let routes = access.ingress_enabled().then(|| {
-        IngressAccess::for_deployment(
-            deployment,
-            &access.base_domain,
-            &access.ingress_class,
-            "",
-        )
+        IngressAccess::for_deployment(deployment, &access.base_domain, &access.ingress_class, "")
     });
 
     let mut st = StackState {
         installed,
-        version: if installed { STACK_VERSION.into() } else { String::new() },
+        version: if installed {
+            STACK_VERSION.into()
+        } else {
+            String::new()
+        },
         otlp_grpc: format!("{}:4317", svc(deployment, "collector")),
         otlp_http: format!("http://{}:4318", svc(deployment, "collector")),
         otlp_logs_url: routes
@@ -2147,11 +2220,9 @@ pub async fn status(dep: &Deployment) -> Result<StackState> {
         opensearch_url: access
             .opensearch_url(deployment)
             .unwrap_or_else(|| crate::recipes::os_base(dep)),
-        dashboards_url: access
-            .dashboard_url(deployment)
-            .unwrap_or_else(|| {
-                crate::access::AccessConfig::portforward_cmd(dep.namespace(), deployment)
-            }),
+        dashboards_url: access.dashboard_url(deployment).unwrap_or_else(|| {
+            crate::access::AccessConfig::portforward_cmd(dep.namespace(), deployment)
+        }),
         ..Default::default()
     };
     if !installed {
@@ -2185,11 +2256,7 @@ pub async fn status(dep: &Deployment) -> Result<StackState> {
     Ok(st)
 }
 
-async fn component_state(
-    client: &kube::Client,
-    deployment: &str,
-    part: &str,
-) -> ComponentState {
+async fn component_state(client: &kube::Client, deployment: &str, part: &str) -> ComponentState {
     use k8s_openapi::api::apps::v1::Deployment as KDeployment;
     use kube::Api;
     let name = obj_name(deployment, part);
@@ -2223,7 +2290,10 @@ pub async fn wait_available(dep: &Deployment, part: &str, secs: u64) -> Result<(
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
-            bail!("{} did not become available within {secs}s", obj_name(deployment, part));
+            bail!(
+                "{} did not become available within {secs}s",
+                obj_name(deployment, part)
+            );
         }
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
@@ -2268,7 +2338,10 @@ async fn ensure_ism(dep: &Deployment, days: u32) -> Result<()> {
             .await
             .with_context(|| format!("parsing ISM policy {policy_id}"))?;
         let seq = cur.get("_seq_no").and_then(|v| v.as_u64()).unwrap_or(0);
-        let term = cur.get("_primary_term").and_then(|v| v.as_u64()).unwrap_or(0);
+        let term = cur
+            .get("_primary_term")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let updated = c
             .put(format!("{url}?if_seq_no={seq}&if_primary_term={term}"))
             .basic_auth(&u, Some(&p))
@@ -2277,7 +2350,10 @@ async fn ensure_ism(dep: &Deployment, days: u32) -> Result<()> {
             .await
             .with_context(|| format!("updating ISM policy {policy_id}"))?;
         if !updated.status().is_success() {
-            bail!("ISM policy {policy_id} update returned {}", updated.status());
+            bail!(
+                "ISM policy {policy_id} update returned {}",
+                updated.status()
+            );
         }
     }
     Ok(())
@@ -2436,7 +2512,9 @@ fn osd_url(dash: &str, workspace: &str, path: &str) -> String {
 /// asserts against.
 pub async fn set_multitenancy(deployment: &Deployment, enabled: bool) {
     let base = crate::recipes::os_base(deployment);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(deployment).await;
     match c
         .put(format!("{base}/_plugins/_security/api/tenancy/config"))
@@ -2480,7 +2558,9 @@ pub async fn tenant_saved_objects(deployment: &Deployment) -> Option<u64> {
     let c = crate::recipes::http().ok()?;
     let (u, p) = crate::k8s::admin_creds(deployment).await;
     let body = c
-        .get(format!("{base}/_cat/indices/.kibana*?h=index,docs.count&format=json"))
+        .get(format!(
+            "{base}/_cat/indices/.kibana*?h=index,docs.count&format=json"
+        ))
         .basic_auth(&u, Some(&p))
         .send()
         .await
@@ -2582,7 +2662,10 @@ async fn import_objects(deployment: &Deployment, workspace: &str, ndjson: &str) 
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("import rejected ({status}): {}", text.chars().take(300).collect::<String>());
+        anyhow::bail!(
+            "import rejected ({status}): {}",
+            text.chars().take(300).collect::<String>()
+        );
     }
     Ok(())
 }
@@ -2657,7 +2740,9 @@ async fn workspace_id(dep: &Deployment) -> Option<String> {
 /// Best-effort: a 404 means there is nothing stale, which is the good case.
 async fn clear_span_template(dep: &Deployment) {
     let base = crate::recipes::os_base(dep);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(dep).await;
     let _ = c
         .delete(format!("{base}/_template/{SPAN_TEMPLATE}"))
@@ -2674,7 +2759,9 @@ async fn clear_span_template(dep: &Deployment) {
 async fn roll_span_alias(dep: &Deployment) {
     let deployment = dep.name();
     let base = crate::recipes::os_base(dep);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(dep).await;
     match c
         .post(format!("{base}/{SPAN_ALIAS}/_rollover"))
@@ -2703,7 +2790,9 @@ async fn roll_span_alias(dep: &Deployment) {
 /// at something the workspace cannot see. Idempotent: re-associating is a no-op.
 async fn associate_datasource(dep: &Deployment, workspace: &str, data_connection_id: &str) {
     let dash = crate::recipes::dashboards_base(dep);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(dep).await;
     let _ = c
         .post(format!("{dash}/api/workspaces/_associate"))
@@ -2728,7 +2817,9 @@ async fn associate_datasource(dep: &Deployment, workspace: &str, data_connection
 async fn apply_ui_settings(dep: &Deployment, workspace: &str) {
     let deployment = dep.name();
     let dash = crate::recipes::dashboards_base(dep);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(dep).await;
     // `defaultWorkspace` is deliberately NOT set. It is a global setting, so it
     // would send every user of this Dashboards into our workspace whether or
@@ -2741,7 +2832,11 @@ async fn apply_ui_settings(dep: &Deployment, workspace: &str) {
     // they land on the workspace object itself (confirmed live — they come back
     // under its `uiSettings`), which is where the screens read them.
     let _ = c
-        .post(osd_url(&dash, workspace, "/api/opensearch-dashboards/settings"))
+        .post(osd_url(
+            &dash,
+            workspace,
+            "/api/opensearch-dashboards/settings",
+        ))
         .basic_auth(&u, Some(&p))
         .header("osd-xsrf", "true")
         .json(&serde_json::json!({ "changes": {
@@ -2762,7 +2857,9 @@ async fn apply_ui_settings(dep: &Deployment, workspace: &str) {
 /// settings back.
 async fn remove_workspace(dep: &Deployment) {
     let dash = crate::recipes::dashboards_base(dep);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(dep).await;
     // `null` on a setting removes the user value, restoring the OSD default —
     // the same shape `set_monitor` uses on an annotation.
@@ -2811,7 +2908,11 @@ async fn fields_for(
 ) -> Option<Vec<serde_json::Value>> {
     loop {
         if let Ok(resp) = c
-            .get(osd_url(dash, workspace, "/api/index_patterns/_fields_for_wildcard"))
+            .get(osd_url(
+                dash,
+                workspace,
+                "/api/index_patterns/_fields_for_wildcard",
+            ))
             .query(&[("pattern", pattern)])
             .basic_auth(u, Some(p))
             .header("osd-xsrf", "true")
@@ -2857,7 +2958,9 @@ async fn fields_for(
 ///   was found. Fields are resolved first and written with the rest.
 async fn ensure_index_patterns(dep: &Deployment, workspace: &str) {
     let dash = crate::recipes::dashboards_base(dep);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(dep).await;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(FIELDS_WAIT_SECS);
 
@@ -2892,7 +2995,10 @@ async fn ensure_index_patterns(dep: &Deployment, workspace: &str) {
             .post(osd_url(
                 &dash,
                 workspace,
-                &format!("/api/saved_objects/index-pattern/{}?overwrite=true", spec.id),
+                &format!(
+                    "/api/saved_objects/index-pattern/{}?overwrite=true",
+                    spec.id
+                ),
             ))
             .basic_auth(&u, Some(&p))
             .header("osd-xsrf", "true")
@@ -2917,10 +3023,16 @@ async fn ensure_dashboards(dep: &Deployment, workspace: &str, data_connection_id
         return;
     }
     let dash = crate::recipes::dashboards_base(dep);
-    let Ok(c) = crate::recipes::http() else { return };
+    let Ok(c) = crate::recipes::http() else {
+        return;
+    };
     let (u, p) = crate::k8s::admin_creds(dep).await;
     let resp = c
-        .post(osd_url(&dash, workspace, "/api/saved_objects/_bulk_create?overwrite=true"))
+        .post(osd_url(
+            &dash,
+            workspace,
+            "/api/saved_objects/_bulk_create?overwrite=true",
+        ))
         .basic_auth(&u, Some(&p))
         .header("osd-xsrf", "true")
         .json(&objs)
@@ -3029,9 +3141,9 @@ pub async fn register_datasource(dep: &Deployment) -> Result<String> {
         bail!("datasource registration returned {code}: {}", body.trim());
     }
 
-    data_connection_id(dep)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("datasource {name} registered but no data-connection saved object appeared"))
+    data_connection_id(dep).await.ok_or_else(|| {
+        anyhow::anyhow!("datasource {name} registered but no data-connection saved object appeared")
+    })
 }
 
 /// Rotate the credential the published endpoints check, and return the new one.
@@ -3211,21 +3323,39 @@ mod tests {
     fn dns_ok(s: &str) -> bool {
         !s.is_empty()
             && s.len() <= 63
-            && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
             && !s.starts_with('-')
             && !s.ends_with('-')
     }
 
     #[test]
     fn names_dns_safe_and_bounded() {
-        for o in manifests(&d(), "admin", "pw", &ScrapeTargets::default(), &EndpointAccess::default()) {
+        for o in manifests(
+            &d(),
+            "admin",
+            "pw",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        ) {
             assert!(dns_ok(&o.name), "bad object name: {}", o.name);
         }
         // ADR-020 caps a deployment name at 30 chars (base + "-xxxx"); the
         // longest suffix here is "-data-prepper".
         let longest_d = "a".repeat(30);
-        for o in manifests(&Deployment::for_test(&longest_d, crate::k8s::ns(), None), "admin", "pw", &ScrapeTargets::default(), &EndpointAccess::default()) {
-            assert!(o.name.len() <= 63, "name over 63: {} ({})", o.name, o.name.len());
+        for o in manifests(
+            &Deployment::for_test(&longest_d, crate::k8s::ns(), None),
+            "admin",
+            "pw",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        ) {
+            assert!(
+                o.name.len() <= 63,
+                "name over 63: {} ({})",
+                o.name,
+                o.name.len()
+            );
         }
     }
 
@@ -3235,19 +3365,35 @@ mod tests {
         // construction. This test is the guard that a future edit does not
         // introduce a second, hand-maintained delete list.
         let created = created_objects(&d());
-        let deleted: BTreeSet<ObjectKey> = manifests(&d(), "u", "p", &ScrapeTargets::default(), &EndpointAccess::default())
-            .iter()
-            .rev()
-            .map(|o| o.key())
-            .collect();
+        let deleted: BTreeSet<ObjectKey> = manifests(
+            &d(),
+            "u",
+            "p",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        )
+        .iter()
+        .rev()
+        .map(|o| o.key())
+        .collect();
         assert_eq!(created, deleted);
-        assert_eq!(created.len(), 16, "expected 16 objects, got {}", created.len());
+        assert_eq!(
+            created.len(),
+            16,
+            "expected 16 objects, got {}",
+            created.len()
+        );
 
         // Ingress mode adds exactly the three signal routes, and uninstall
         // walks the same list — so a deployment with routes still tears down
         // to nothing.
         let with_routes = EndpointAccess {
-            ingress: Some(IngressAccess::for_deployment(D, "example.com", "traefik", "tls")),
+            ingress: Some(IngressAccess::for_deployment(
+                D,
+                "example.com",
+                "traefik",
+                "tls",
+            )),
             ..Default::default()
         };
         let routed: BTreeSet<ObjectKey> =
@@ -3267,7 +3413,12 @@ mod tests {
         let ep = EndpointAccess {
             password: "s3cret".into(),
             password_hash: "$2y$12$abc".into(),
-            ingress: Some(IngressAccess::for_deployment(D, "example.com", "traefik", "tls")),
+            ingress: Some(IngressAccess::for_deployment(
+                D,
+                "example.com",
+                "traefik",
+                "tls",
+            )),
         };
         let objs = manifests(&d(), "u", "p", &ScrapeTargets::default(), &ep);
         let secret = objs
@@ -3279,7 +3430,10 @@ mod tests {
         assert!(otel.contains("basicauth/otlp"));
         assert!(otel.contains("authenticator: basicauth/otlp"));
         assert!(otel.contains("extensions: [basicauth/otlp]"));
-        assert!(sd["am-web.yml"].as_str().unwrap().contains("basic_auth_users"));
+        assert!(sd["am-web.yml"]
+            .as_str()
+            .unwrap()
+            .contains("basic_auth_users"));
 
         let am = objs
             .iter()
@@ -3309,7 +3463,10 @@ mod tests {
             let rule = &r.manifest["spec"]["rules"][0];
             assert!(rule["host"].as_str().unwrap().contains(signal));
             assert_eq!(rule["http"]["paths"][0]["path"].as_str().unwrap(), path);
-            assert_eq!(rule["http"]["paths"][0]["pathType"].as_str().unwrap(), "Exact");
+            assert_eq!(
+                rule["http"]["paths"][0]["pathType"].as_str().unwrap(),
+                "Exact"
+            );
         }
     }
 
@@ -3333,7 +3490,12 @@ mod tests {
         assert_eq!(ports(&EndpointAccess::default()), vec![4317, 4318]);
 
         let published = EndpointAccess {
-            ingress: Some(IngressAccess::for_deployment(D, "example.com", "traefik", "")),
+            ingress: Some(IngressAccess::for_deployment(
+                D,
+                "example.com",
+                "traefik",
+                "",
+            )),
             ..Default::default()
         };
         // Publishing changes nothing here: the collector's OTLP ports were
@@ -3414,7 +3576,11 @@ mod tests {
             assert_eq!(panels.as_array().unwrap().len(), refs.len());
             for r in refs {
                 let rid = r["id"].as_str().unwrap();
-                assert!(ids.contains(rid), "board {} references missing {rid}", o["id"]);
+                assert!(
+                    ids.contains(rid),
+                    "board {} references missing {rid}",
+                    o["id"]
+                );
             }
         }
         assert_eq!(boards, 3, "expected three self-monitoring boards");
@@ -3444,7 +3610,10 @@ mod tests {
         ] {
             assert!(a.contains(id), "{id} missing from the saved-object set");
         }
-        assert_eq!(datasource_name("logs-ab12"), "ObservabilityStack_Prometheus");
+        assert_eq!(
+            datasource_name("logs-ab12"),
+            "ObservabilityStack_Prometheus"
+        );
         assert_eq!(workspace_name("logs-ab12"), "Observability Stack");
     }
 
@@ -3529,7 +3698,10 @@ mod tests {
     /// stack's uninstall would silently take the new UI down with it.
     #[test]
     fn the_ui_and_the_stack_own_disjoint_config_keys() {
-        let ui: BTreeSet<&str> = crate::k8s::next_ui_config().iter().map(|(k, _)| *k).collect();
+        let ui: BTreeSet<&str> = crate::k8s::next_ui_config()
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
         let stack: BTreeSet<&str> = crate::k8s::otel_dashboards_config()
             .iter()
             .map(|(k, _)| *k)
@@ -3600,7 +3772,10 @@ mod tests {
     fn collector_scrapes_every_component_a_board_reads() {
         let cfg = collector_config(D, &ScrapeTargets::default(), "u:hash");
         for job in ["otel-collector", "opensearch", "data-prepper", "cortex"] {
-            assert!(cfg.contains(&format!("job_name: {job}")), "{job} not scraped");
+            assert!(
+                cfg.contains(&format!("job_name: {job}")),
+                "{job} not scraped"
+            );
         }
         // Data Prepper does not serve the default path.
         assert!(cfg.contains("metrics_path: /metrics/prometheus"));
@@ -3623,7 +3798,13 @@ mod tests {
     fn password_only_in_secret() {
         let pw = "s3cr3t-unlikely-token";
         let user = "admin";
-        for o in manifests(&d(), user, pw, &ScrapeTargets::default(), &EndpointAccess::default()) {
+        for o in manifests(
+            &d(),
+            user,
+            pw,
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        ) {
             let body = serde_json::to_string(&o.manifest).unwrap();
             if o.kind == "Secret" {
                 assert!(body.contains(pw), "the Secret must carry the password");
@@ -3640,8 +3821,20 @@ mod tests {
 
     #[test]
     fn config_hash_changes_with_password() {
-        let one = manifests(&d(), "admin", "pw-one", &ScrapeTargets::default(), &EndpointAccess::default());
-        let two = manifests(&d(), "admin", "pw-two", &ScrapeTargets::default(), &EndpointAccess::default());
+        let one = manifests(
+            &d(),
+            "admin",
+            "pw-one",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        );
+        let two = manifests(
+            &d(),
+            "admin",
+            "pw-two",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        );
         let hash = |v: &[K8sObject], part: &str| -> String {
             v.iter()
                 .find(|o| o.kind == "Deployment" && o.name.ends_with(part))
@@ -3682,25 +3875,48 @@ mod tests {
     #[test]
     fn resource_cost_matches_manifests() {
         let cost = resource_cost();
-        let objs = manifests(&d(), "u", "p", &ScrapeTargets::default(), &EndpointAccess::default());
+        let objs = manifests(
+            &d(),
+            "u",
+            "p",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        );
 
         let mut cpu = 0u64;
         let mut mem = 0u64;
         let mut disk = 0u64;
         for o in &objs {
             if o.kind == "Deployment" {
-                let r = o.manifest.pointer("/spec/template/spec/containers/0/resources/requests").unwrap();
+                let r = o
+                    .manifest
+                    .pointer("/spec/template/spec/containers/0/resources/requests")
+                    .unwrap();
                 cpu += parse_cpu_millis(r["cpu"].as_str().unwrap());
                 mem += parse_mem_mib(r["memory"].as_str().unwrap());
             }
             if o.kind == "PersistentVolumeClaim" {
-                let s = o.manifest.pointer("/spec/resources/requests/storage").unwrap().as_str().unwrap();
+                let s = o
+                    .manifest
+                    .pointer("/spec/resources/requests/storage")
+                    .unwrap()
+                    .as_str()
+                    .unwrap();
                 disk += s.trim_end_matches("Gi").parse::<u64>().unwrap();
             }
         }
-        assert_eq!(cost.cpu_millis, cpu, "advertised CPU must equal summed requests");
-        assert_eq!(cost.mem_mib, mem, "advertised memory must equal summed requests");
-        assert_eq!(cost.disk_gib, disk, "advertised disk must equal summed PVCs");
+        assert_eq!(
+            cost.cpu_millis, cpu,
+            "advertised CPU must equal summed requests"
+        );
+        assert_eq!(
+            cost.mem_mib, mem,
+            "advertised memory must equal summed requests"
+        );
+        assert_eq!(
+            cost.disk_gib, disk,
+            "advertised disk must equal summed PVCs"
+        );
     }
 
     fn parse_cpu_millis(s: &str) -> u64 {
@@ -3719,7 +3935,13 @@ mod tests {
 
     #[test]
     fn pvcs_pin_longhorn() {
-        for o in manifests(&d(), "u", "p", &ScrapeTargets::default(), &EndpointAccess::default()) {
+        for o in manifests(
+            &d(),
+            "u",
+            "p",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        ) {
             if o.kind == "PersistentVolumeClaim" {
                 assert_eq!(
                     o.manifest["spec"]["storageClassName"].as_str().unwrap(),
@@ -3732,7 +3954,13 @@ mod tests {
 
     #[test]
     fn every_deployment_has_a_service_and_recreate_strategy() {
-        let objs = manifests(&d(), "u", "p", &ScrapeTargets::default(), &EndpointAccess::default());
+        let objs = manifests(
+            &d(),
+            "u",
+            "p",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        );
         for part in COMPONENTS {
             let dep = objs
                 .iter()
@@ -3740,11 +3968,14 @@ mod tests {
             assert!(dep.is_some(), "no Deployment for component {part}");
             // RWO volumes cannot be handed between two live pods.
             assert_eq!(
-                dep.unwrap().manifest["spec"]["strategy"]["type"].as_str().unwrap(),
+                dep.unwrap().manifest["spec"]["strategy"]["type"]
+                    .as_str()
+                    .unwrap(),
                 "Recreate"
             );
             assert!(
-                objs.iter().any(|o| o.kind == "Service" && o.name == obj_name(D, part)),
+                objs.iter()
+                    .any(|o| o.kind == "Service" && o.name == obj_name(D, part)),
                 "no Service for component {part}"
             );
         }
@@ -3760,7 +3991,10 @@ mod tests {
         // that could list services and never fill in their numbers.
         let p = data_prepper_pipelines(&d(), "u", "p");
         assert!(p.contains("otel_apm_service_map"));
-        assert!(!p.contains("- service_map:"), "the v1 processor emits no RED metrics");
+        assert!(
+            !p.contains("- service_map:"),
+            "the v1 processor emits no RED metrics"
+        );
         assert!(p.contains("index_type: otel-v2-apm-service-map"));
         assert!(SERVICE_MAP_PATTERN.starts_with("otel-v2-"));
 
@@ -3779,7 +4013,10 @@ mod tests {
         // raw OTLP stream `serviceName` is absent and the processor drops every
         // span silently — measured, and the single reason this stack shipped
         // once with no RED metrics at all.
-        let smap = p.split("service-map-pipeline:").nth(1).expect("service-map-pipeline");
+        let smap = p
+            .split("service-map-pipeline:")
+            .nth(1)
+            .expect("service-map-pipeline");
         let source = smap.split("processor:").next().unwrap();
         assert!(
             source.contains("traces-raw-pipeline"),
@@ -3805,7 +4042,13 @@ mod tests {
         // Its sink gives up permanently after a bounded retry, leaving the pod
         // at 0/1 forever with the OTLP port never bound — so the wait belongs
         // before the process starts, not in its own retry loop.
-        let objs = manifests(&d(), "u", "p", &ScrapeTargets::default(), &EndpointAccess::default());
+        let objs = manifests(
+            &d(),
+            "u",
+            "p",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        );
         let dp = objs
             .iter()
             .find(|o| o.kind == "Deployment" && o.name.ends_with("-data-prepper"))
@@ -3819,9 +4062,14 @@ mod tests {
         assert!(cmd.contains("_cluster/health"));
         assert!(cmd.contains("green|yellow"));
         // The password reaches it from the Secret, never inline.
-        assert!(!cmd.contains("$ES_PASSWORD:"), "credential must not be interpolated into the command");
+        assert!(
+            !cmd.contains("$ES_PASSWORD:"),
+            "credential must not be interpolated into the command"
+        );
         assert_eq!(
-            init["env"][1]["valueFrom"]["secretKeyRef"]["name"].as_str().unwrap(),
+            init["env"][1]["valueFrom"]["secretKeyRef"]["name"]
+                .as_str()
+                .unwrap(),
             obj_name(D, "dp")
         );
 
@@ -3838,13 +4086,22 @@ mod tests {
         // Without this the Service routes to a pod whose OTLP listener has not
         // bound yet, the collector gets `connection refused`, and the first
         // traces after an install arrive minutes late or not at all.
-        let objs = manifests(&d(), "u", "p", &ScrapeTargets::default(), &EndpointAccess::default());
+        let objs = manifests(
+            &d(),
+            "u",
+            "p",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        );
         let dp = objs
             .iter()
             .find(|o| o.kind == "Deployment" && o.name.ends_with("-data-prepper"))
             .unwrap();
         let probe = &dp.manifest["spec"]["template"]["spec"]["containers"][0]["readinessProbe"];
-        assert_eq!(probe["tcpSocket"]["port"].as_u64().unwrap(), DP_OTLP_PORT as u64);
+        assert_eq!(
+            probe["tcpSocket"]["port"].as_u64().unwrap(),
+            DP_OTLP_PORT as u64
+        );
 
         // Nothing else gains a probe it did not have.
         for o in objs.iter().filter(|o| o.kind == "Deployment") {
@@ -3865,12 +4122,18 @@ mod tests {
         // dynamic mapping — Data Prepper installs it at startup and never
         // reinstalls it later. So the migration is gated on replacing a stack
         // that predates the documented pipeline.
-        assert!(!needs_span_migration(None), "a first install has nothing stale");
+        assert!(
+            !needs_span_migration(None),
+            "a first install has nothing stale"
+        );
         assert!(
             !needs_span_migration(Some(STACK_VERSION)),
             "re-installing the same version must not clear the template it needs"
         );
-        assert!(needs_span_migration(Some("1")), "an older stack must be migrated");
+        assert!(
+            needs_span_migration(Some("1")),
+            "an older stack must be migrated"
+        );
     }
 
     #[test]
@@ -3914,11 +4177,16 @@ mod tests {
             kube_state_metrics: std::env::var("VELOX_DUMP_KSM").ok(),
             node_exporter: std::env::var("VELOX_DUMP_NE").ok(),
         };
-        let items: Vec<serde_json::Value> =
-            manifests(&Deployment::for_test(&d, crate::k8s::ns(), None), &u, &p, &targets, &EndpointAccess::default())
-            .into_iter()
-            .map(|o| o.manifest)
-            .collect();
+        let items: Vec<serde_json::Value> = manifests(
+            &Deployment::for_test(&d, crate::k8s::ns(), None),
+            &u,
+            &p,
+            &targets,
+            &EndpointAccess::default(),
+        )
+        .into_iter()
+        .map(|o| o.manifest)
+        .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(

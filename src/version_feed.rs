@@ -189,7 +189,9 @@ async fn discover() -> Result<Vec<String>> {
 async fn list_tags(repo: &str) -> Result<Vec<String>> {
     let http = client()?;
     let mut out = Vec::new();
-    let mut url = format!("https://hub.docker.com/v2/repositories/{repo}/tags?page_size=100&ordering=last_updated");
+    let mut url = format!(
+        "https://hub.docker.com/v2/repositories/{repo}/tags?page_size=100&ordering=last_updated"
+    );
     // Two pages is 200 tags — far past every 3.x release, and bounded so a
     // paginated registry can never turn this into an endless walk.
     for _ in 0..2 {
@@ -201,7 +203,11 @@ async fn list_tags(repo: &str) -> Result<Vec<String>> {
             .json()
             .await
             .context("registry tag listing was not JSON")?;
-        for r in body.get("results").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        for r in body
+            .get("results")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
             if let Some(n) = r.get("name").and_then(|v| v.as_str()) {
                 out.push(n.to_string());
             }
@@ -238,7 +244,9 @@ pub async fn image_tag_exists(repo: &str, tag: &str) -> Result<bool> {
         .and_then(|v| v.as_str())
         .context("registry auth returned no token")?;
     let resp = http
-        .head(format!("https://registry-1.docker.io/v2/{repo}/manifests/{tag}"))
+        .head(format!(
+            "https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
+        ))
         .bearer_auth(token)
         .header(
             "Accept",

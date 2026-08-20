@@ -192,7 +192,9 @@ OPTIONS (init):
 
     /// Parse `init` flags. Returns `Ok(None)` when `-h/--help` was requested,
     /// `Err(msg)` on a bad/missing argument value.
-    pub(crate) fn parse_init_opts(args: &[String]) -> std::result::Result<Option<InitOpts>, String> {
+    pub(crate) fn parse_init_opts(
+        args: &[String],
+    ) -> std::result::Result<Option<InitOpts>, String> {
         let mut opts = InitOpts::default();
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -222,7 +224,10 @@ OPTIONS (init):
         Ok(Some(opts))
     }
 
-    fn take_value(it: &mut std::slice::Iter<'_, String>, flag: &str) -> std::result::Result<String, String> {
+    fn take_value(
+        it: &mut std::slice::Iter<'_, String>,
+        flag: &str,
+    ) -> std::result::Result<String, String> {
         it.next()
             .cloned()
             .filter(|v| !v.is_empty())

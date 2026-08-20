@@ -77,7 +77,9 @@ pub fn pg_enabled() -> bool {
 /// Pure flag parse, split out for tests (the `resolve_ns` idiom, #67).
 fn flag_on(v: Option<String>) -> bool {
     matches!(
-        v.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        v.as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
 }
@@ -146,7 +148,10 @@ pub async fn ensure_pg_secret(client: &Client) -> Result<()> {
         KEY_SUPERUSER_PW.to_string(),
         crate::k8s::random_chars(ALPHABET, 32)?,
     );
-    string_data.insert(KEY_APP_PW.to_string(), crate::k8s::random_chars(ALPHABET, 32)?);
+    string_data.insert(
+        KEY_APP_PW.to_string(),
+        crate::k8s::random_chars(ALPHABET, 32)?,
+    );
     let secret = Secret {
         metadata: kube::api::ObjectMeta {
             name: Some(PG_SECRET.to_string()),
@@ -358,7 +363,10 @@ mod tests {
         assert_eq!(cfg.dbname, "other");
         assert_eq!(cfg.user, "app");
         // Blank falls back to the default instead of an empty host.
-        assert_eq!(resolve_config(s("  "), None, None, None).unwrap().host, DEFAULT_HOST);
+        assert_eq!(
+            resolve_config(s("  "), None, None, None).unwrap().host,
+            DEFAULT_HOST
+        );
         assert!(resolve_config(None, s("not-a-port"), None, None).is_err());
     }
 
@@ -367,7 +375,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         let mut last = "";
         for &(version, sql) in MIGRATIONS {
-            assert!(seen.insert(version), "duplicate migration version {version}");
+            assert!(
+                seen.insert(version),
+                "duplicate migration version {version}"
+            );
             assert!(version > last, "migrations out of order at {version}");
             assert!(!sql.trim().is_empty(), "migration {version} is empty");
             // The ledger belongs to the runner; a migration re-creating it
@@ -415,7 +426,10 @@ mod tests {
             assert_eq!(second, 0, "re-run must be a no-op");
             for table in ["users", "tenants", "tenant_users", "quotas", "audit"] {
                 let row = pg
-                    .query_one("SELECT to_regclass($1)::text", &[&format!("public.{table}")])
+                    .query_one(
+                        "SELECT to_regclass($1)::text",
+                        &[&format!("public.{table}")],
+                    )
                     .await
                     .unwrap();
                 assert!(

@@ -256,7 +256,10 @@ fn pipeline_and_template_are_frozen_rust_output() {
             continue;
         };
         let vars = test_vars(recipe);
-        for (file, want) in [("pipeline.json", pipeline), ("index-template.json", template)] {
+        for (file, want) in [
+            ("pipeline.json", pipeline),
+            ("index-template.json", template),
+        ] {
             let raw = read(&dir, recipe, file);
             let rendered = integrations::render(&raw, &vars)
                 .unwrap_or_else(|e| panic!("{recipe}/{file}: {e}"));
