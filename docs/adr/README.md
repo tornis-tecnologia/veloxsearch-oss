@@ -12,9 +12,13 @@ convention is that a comment explains *why* and names the decision it came from
 to follow to understand the code. If a comment cites an ADR and does not tell
 you enough, that is a documentation bug worth reporting.
 
-Several ADRs predate the open-source release and were recorded in the project's
-internal decision log. The table below carries what each one settled; the full
-original text is being migrated into this directory as individual files.
+The full decision log predates the open-source release and is not published: it
+carries infrastructure and client detail that has to come out first. The table
+below is the part that is safe and useful — what each number settled — and
+individual ADRs will be migrated into this directory as they are redacted.
+
+New decisions are written here from the start, so this gap closes rather than
+grows.
 
 ## Proposing a new decision
 

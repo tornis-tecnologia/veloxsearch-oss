@@ -18,7 +18,7 @@ The premises map onto the requirements: **P1** is the storage side of **R3**,
 > **Reference ADRs:** ADR-014 (zero-prerequisite self-bootstrap), ADR-022
 > (vendored-manifest + server-side-apply install machinery), ADR-027 (generic
 > one-manifest install + self-revoking bootstrap RBAC), ADR-031 (PVC-backed
-> storage + Longhorn self-bootstrap). See `DECISIONS.md` (GitLab source only — not in the public export).
+> storage + Longhorn self-bootstrap). See [`adr/README.md`](adr/README.md).
 
 ---
 
@@ -263,5 +263,5 @@ revoked.
 | **P2** operator/cert-manager auto-install + deploy gating | R2, R6, R7 | ADR-014, ADR-022 | `src/bootstrap.rs:570, 877` |
 | **P3** dedicated namespace per deployment | R2 (RBAC) | ADR-020, ADR-027 | `src/k8s.rs:22, 50, 537` |
 
-See `DECISIONS.md` (GitLab source only — not in the public export) for the full ADR text and
+See [`adr/README.md`](adr/README.md) for what each ADR decided, and
 [`REQUIREMENTS.md`](REQUIREMENTS.md) for the platform contract.

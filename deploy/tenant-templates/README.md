@@ -31,4 +31,4 @@ still owed (ADR-051).
 
 Design, rationale, worked quota defaults, enforcement caveats (CNIs without
 NetworkPolicy support silently no-op), and the legacy-namespace migration path:
-**ADR-044** (see [`docs/DECISIONS.md`](../../docs/DECISIONS.md)).
+**ADR-044** (see [`docs/adr/README.md`](../../docs/adr/README.md)).

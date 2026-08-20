@@ -47,6 +47,10 @@ are called out explicitly.
   longer a one-way export and `main` is no longer force-pushed.
 
 ### Removed
+- `docs/DECISIONS.md` — the full ADR log was exported by mistake; `docs/INSTALL.md`
+  in the same snapshot said it was withheld "pending a redaction pass because it
+  carries live client infrastructure detail", and it does. `docs/adr/README.md`
+  carries what each ADR decided, with none of that detail.
 - `style/main.scss` — dead since the Leptos-to-React migration, referenced by
   nothing.
 - Internal operational content that was never meant to be published: a

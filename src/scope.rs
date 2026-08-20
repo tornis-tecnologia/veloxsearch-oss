@@ -69,7 +69,7 @@ use std::collections::BTreeMap;
 /// (`veloxsearch.ai/size`, `/purpose`, `/auth-kind`). ADR-041/044 write it as
 /// `veloxsearch.io/tenant`; that is an erratum in the ADR text — this
 /// installation has never had a `veloxsearch.io` label and one product must not
-/// carry two label domains. Noted in DECISIONS.md.
+/// carry two label domains. Noted in docs/adr/README.md (ADR-044).
 pub const LABEL_TENANT: &str = "veloxsearch.ai/tenant";
 
 /// Marks objects this control plane owns, so cluster-wide sweeps (and the
