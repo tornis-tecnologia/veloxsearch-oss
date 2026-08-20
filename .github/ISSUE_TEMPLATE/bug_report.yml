@@ -1,0 +1,91 @@
+name: Bug report
+description: Something behaves differently from what the docs say
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: the supported-platform contract is
+        [docs/REQUIREMENTS.md](https://github.com/tornis-tecnologia/veloxsearch-oss/blob/main/docs/REQUIREMENTS.md)
+        (R1–R8). A cluster outside that envelope is a gap in the contract, which
+        is still worth reporting — just say so.
+
+        **Never report a security vulnerability here.** Use a
+        [private advisory](https://github.com/tornis-tecnologia/veloxsearch-oss/security/advisories/new).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. kubectl apply -f deploy/install.yaml
+        2. Open the UI, create the admin account
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: VeloxSearch version
+      description: The image tag, or the commit if you built from source.
+      placeholder: "0.7.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: distro
+    attributes:
+      label: Kubernetes distribution
+      options:
+        - k3s
+        - k0s
+        - minikube
+        - kubeadm (vanilla)
+        - EKS / GKE / AKS
+        - Other (say which below)
+    validations:
+      required: true
+
+  - type: input
+    id: k8s-version
+    attributes:
+      label: Kubernetes version
+      description: Output of `kubectl version --short`.
+      placeholder: "v1.30.4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: cluster-shape
+    attributes:
+      label: Cluster shape
+      description: |
+        Node count, and the output of:
+        `kubectl get storageclass` and `kubectl get nodes -o wide`
+      render: shell
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Control-plane logs
+      description: "`kubectl -n veloxsearch-system logs deploy/veloxsearch --tail=200`"
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked that this is not already reported
+          required: true
+        - label: I redacted any credentials, tokens or internal hostnames from the output above
+          required: true

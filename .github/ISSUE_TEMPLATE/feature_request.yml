@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose a capability VeloxSearch does not have
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Open-ended ideas are usually better as a
+        [Discussion](https://github.com/tornis-tecnologia/veloxsearch-oss/discussions).
+        Use this form when you have a concrete proposal.
+
+        Anything that changes a boundary — the ownership model, the signing
+        path, the platform contract, the API shape — needs an ADR before the
+        implementation. See [GOVERNANCE.md](https://github.com/tornis-tecnologia/veloxsearch-oss/blob/main/GOVERNANCE.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do today, and what stops you? Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What should happen instead. Be specific about the UI or API surface if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including "do nothing" — why is it not enough?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Control plane (Rust)
+        - Frontend (React)
+        - Log integrations
+        - Install / deploy
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Participation
+      options:
+        - label: I would be willing to work on this

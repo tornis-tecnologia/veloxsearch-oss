@@ -1,0 +1,147 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a PR cancels the previous run: the older result is never the
+# one anyone acts on, and the runners are shared.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail fast on a warning anywhere, not only where `-D warnings` is passed.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # Cheapest job first so an obvious omission fails in seconds, not minutes.
+  headers:
+    name: SPDX headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every source file carries the licence header
+        run: ./.github/scripts/check-headers.sh
+
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    services:
+      # The migration runner and the tenant/scope tests are `#[ignore]`d without
+      # a database. Providing one here is what makes them run at all — skipping
+      # them in CI would leave the only Postgres-touching code untested.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: t
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the integration registry
+        # The golden gates (src/registry_golden.rs) compare the in-binary recipe
+        # catalog against the canonical packages in the registry repo, and they
+        # are a HARD FAILURE in CI rather than a skip (#108): a lane without the
+        # checkout would go green while proving nothing.
+        uses: actions/checkout@v4
+        with:
+          repository: tornis-tecnologia/veloxsearch-registry
+          path: .registry
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        env:
+          VELOX_REGISTRY_PATH: ${{ github.workspace }}/.registry
+        run: cargo test --all-targets
+
+      - name: cargo test (ignored — needs Postgres)
+        env:
+          VELOX_PG_TEST_URL: postgres://postgres:t@127.0.0.1:5432/postgres
+          VELOX_REGISTRY_PATH: ${{ github.workspace }}/.registry
+        # Two flags, both load-bearing:
+        #  --skip dump_manifests: a dev tool that happens to wear #[ignore], not
+        #    a test — it asserts it is running against a real cluster namespace.
+        #  --test-threads=1: these tests share ONE database and truncate it
+        #    between cases, so running them concurrently makes them clobber each
+        #    other. Serial is the correct execution model here, not a workaround.
+        run: cargo test --all-targets -- --ignored --skip dump_manifests --test-threads=1
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      # `check`, not `test`: the claim is that the declared MSRV still compiles
+      # the crate. Behaviour is the `rust` job's business.
+      - run: cargo check --all-targets
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: The build actually produced the SPA
+        run: test -f build/index.html
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # Builds the binary, the SPA and the image. Never --push: publishing is a
+      # release action, not a pull-request one.
+      - run: deploy/build-image.sh --profile release
+
+  supply-chain:
+    name: Licences and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

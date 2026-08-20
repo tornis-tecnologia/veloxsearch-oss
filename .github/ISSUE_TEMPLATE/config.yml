@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/tornis-tecnologia/veloxsearch-oss/security/advisories/new
+    about: Report privately through a security advisory. Never open a public issue for a vulnerability.
+  - name: Question or idea
+    url: https://github.com/tornis-tecnologia/veloxsearch-oss/discussions
+    about: Usage questions and open-ended proposals belong in Discussions.
+  - name: New log integration
+    url: https://github.com/tornis-tecnologia/veloxsearch-registry
+    about: Integrations are data packages and live in the registry repository.
