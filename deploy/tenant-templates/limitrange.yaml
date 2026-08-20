@@ -1,0 +1,22 @@
+# Per-tenant LimitRange (ADR-044). A namespace with a cpu/memory ResourceQuota
+# REJECTS pods whose containers omit requests; operator-built OpenSearch pods
+# carry resources from the CR (ADR-035 Guaranteed QoS) but auxiliary pods may
+# not. These defaults make the quota safe to enforce.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: velox-tenant-limits
+  namespace: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        cpu: 500m
+        memory: 512Mi

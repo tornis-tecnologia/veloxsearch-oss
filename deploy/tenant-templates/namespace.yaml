@@ -1,0 +1,15 @@
+# Per-tenant namespace (ADR-044). Vendored template: VELOX_* tokens are
+# replaced at provision time by the control plane (the ADR-022 include_str! +
+# token-replace precedent, cf. bootstrap.rs operator_bundle()).
+#
+# VELOX_TENANT_NS   = velox-t-<slug>  (tenants.namespace, ADR-041)
+# VELOX_TENANT_SLUG = the tenant's URL/label-safe slug
+# VELOX_TENANT_ID   = tenants.id (the owner-label value, ADR-044 amendment)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG

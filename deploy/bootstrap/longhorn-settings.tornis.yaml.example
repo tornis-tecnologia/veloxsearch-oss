@@ -1,0 +1,79 @@
+# Longhorn disk-headroom settings for the EXISTING tornis production cluster.
+#
+# ⚠️  OPERATOR-GATED. NOT applied by anything: not by CI, not by
+# `kubectl apply -f deploy/ci/`, not by src/bootstrap.rs. The `.yaml.example`
+# suffix keeps it out of every directory apply on purpose. Applying it is a
+# deliberate, sequenced act — read the ORDERING section before you do.
+#
+# deploy/bootstrap/longhorn.yaml fixes NEW installs. It cannot fix this
+# cluster: Longhorn here was installed from a Helm release (v1.11.1) that the
+# repo does not own, and install-time defaults are ignored once the Setting
+# objects already exist. Changing live values means writing the Setting CRs
+# below.
+#
+# ── What is actually wrong (measured 2026-08-05, read-only) ────────────────
+#
+#   setting                                       live   upstream   effect
+#   storage-over-provisioning-percentage           200        100    2x thin
+#   storage-minimal-available-percentage            10         25    late stop
+#   storage-reserved-percentage-for-default-disk    30         30    ok
+#
+# Both loosened values came from an imperative patch a human ran once and
+# nobody recorded — the 200% line was literally an instruction in
+# deploy/ci/README.md (removed by this MR). Their combined effect:
+#
+#   per node: 147.4 GiB disk - 44.2 GiB reserved = 103.2 GiB schedulable
+#   ceiling at 200%:                              206.4 GiB
+#   actually scheduled:                           205.0 GiB   (99.3% of ceiling)
+#
+# The cluster is one replica away from its own ceiling on every node. vm3 then
+# reached 1.66 GiB available — about 9x BELOW the 14.7 GiB that the 10%
+# minimal-available floor was supposed to protect, because that floor only
+# gates NEW scheduling and does nothing about growth of replicas already
+# placed.
+#
+# ── ORDERING — this is the part that matters ──────────────────────────────
+#
+# DO NOT APPLY WHILE vm3 IS FULL. Dropping over-provisioning 200 -> 100 while
+# 205 GiB is scheduled against a new 103 GiB ceiling marks every disk
+# unschedulable at once. It deletes nothing — Longhorn does not evict replicas
+# to satisfy a lowered ceiling — but it blocks the replica REBUILDS that
+# recovery depends on, which is exactly the wrong moment to take that away.
+#
+# Correct sequence:
+#   1. Operator: give vm3 headroom (attach a data disk, as vm1 got 2026-08-03),
+#      or reclaim the ~60 GiB of Prometheus PVC snapshots + the leaked replica
+#      directory after a per-volume redundancy check.
+#      -> org/runbooks/node-disk-pressure.md. This is issue #107's operator item.
+#   2. Confirm every volume is `healthy` (none `degraded`/`unknown`) and all
+#      three nodes are Schedulable.
+#   3. Apply THIS file.
+#   4. Re-check: no volume should become `degraded`, no PVC should go Pending.
+#
+# ROLLBACK: one command per setting, values are the current live ones —
+#   kubectl -n longhorn-system patch settings.longhorn.io \
+#     storage-over-provisioning-percentage --type=merge -p '{"value":"200"}'
+#   kubectl -n longhorn-system patch settings.longhorn.io \
+#     storage-minimal-available-percentage --type=merge -p '{"value":"10"}'
+# Takes effect immediately; no restart, no data movement.
+#
+# NOTE ON 100%: with over-provisioning at 100 the cluster may not have room for
+# every current volume's nominal size. That is the honest position — the
+# capacity was never really there; 200% only hid it. If step 4 shows PVCs
+# stuck Pending, the answer is more disk, not a higher multiplier.
+---
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata: { name: storage-over-provisioning-percentage, namespace: longhorn-system }
+value: "100"
+---
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata: { name: storage-minimal-available-percentage, namespace: longhorn-system }
+value: "25"
+---
+# Already 30 live; written so the value is recorded rather than assumed.
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata: { name: storage-reserved-percentage-for-default-disk, namespace: longhorn-system }
+value: "30"

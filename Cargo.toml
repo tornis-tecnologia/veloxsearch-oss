@@ -1,0 +1,110 @@
+[package]
+name = "veloxsearch"
+version = "0.7.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Wizard-style admin interface that automates OpenSearch observability setup on Kubernetes"
+repository = "https://gitlab.com/tornis-desenvolvimento/veloxsearch"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+axum = "0.8.0"
+# SPA static-file serving (ServeDir + index.html fallback) for the React build.
+tower-http = { version = "0.6", features = ["fs"], optional = true }
+# `net`/`time` are used directly by the auth-provider reachability probe
+# (ADR-045) — named explicitly rather than relying on another crate's features.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+futures = { version = "0.3" }
+serde_yaml = { version = "0.9", optional = true }
+
+# Server-only (Kubernetes / OpenSearch) dependencies.
+kube = { version = "0.99", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"], optional = true }
+rustls = { version = "0.23", optional = true }
+hmac = { version = "0.12", optional = true }
+bcrypt = { version = "0.17", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+k8s-openapi = { version = "0.24", features = ["v1_30"], optional = true }
+# Build raw API-server requests for the kubelet Summary API (nodes/proxy), which
+# kube-rs exposes via `Client::request` but has no typed helper for.
+http = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+anyhow = { version = "1", optional = true }
+# OS CSPRNG for per-cluster admin password generation (security: no hardcoded default).
+getrandom = { version = "0.3", optional = true }
+# Control-plane datastore bring-up (ADR-041, #92): connection + the plain-SQL
+# migration runner only. Deliberately the bare driver — the query layer
+# (sqlx vs. diesel) is a later, separate decision.
+tokio-postgres = { version = "0.7", optional = true }
+# Directory client for the ADR-045 LDAP probe: the pre-save test binds as the
+# configured bind DN and runs the user/role searches, which TCP reachability
+# alone cannot confirm (MR4, #56). rustls to match every other TLS user here —
+# no native-tls/openssl in the image.
+# aws-lc-rs, not ring: `main.rs` installs aws_lc_rs as the process-wide rustls
+# provider, and a second provider here would be dead weight in the image.
+# Transactional email for the control-plane account flows (#79): signup
+# verification and password-reset links. The bare protocol is not worth
+# hand-rolling (EHLO/STARTTLS/AUTH/MIME quoting), and delivery is OPTIONAL —
+# with no `VELOX_SMTP_HOST` the mailer logs the link instead and this crate is
+# never dialled. rustls + aws-lc-rs to match the process-wide provider
+# `main.rs` installs; `rustls-tls` is deliberately NOT used because it drags in
+# ring as a second provider.
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "builder",
+    "hostname",
+    "tokio1",
+    "tokio1-rustls",
+    "aws-lc-rs",
+    "webpki-roots",
+], optional = true }
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-aws-lc-rs"], optional = true }
+# Parse the operator-supplied private CA (`pemtrustedcas_content`) into the
+# rustls root store the LDAP probe dials with, so an LDAPS directory behind an
+# internal CA probes the same way the cluster will reach it.
+rustls-pemfile = { version = "2", optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+# Registry package signatures (ADR-039 / spec/signing.md, #75): the `value`
+# field of a manifest's signature block is base64.
+base64 = { version = "0.22", optional = true }
+# ed25519 verification of registry packages. NOT a new crypto stack: aws-lc-rs
+# is already linked into the binary as the process-wide rustls provider
+# (`main.rs`), so this is a direct name for a dependency we already ship —
+# same reasoning that picked it over ring for the LDAP probe above.
+aws-lc-rs = { version = "1.17", default-features = false, features = ["aws-lc-sys"], optional = true }
+
+[features]
+default = ["ssr"]
+# The server feature: gates the Kubernetes/OpenSearch layer + HTTP handlers.
+# (Kept as a feature so the bare DTOs in `api` can still be compiled alone.)
+ssr = [
+    "dep:tower-http",
+    "dep:serde_yaml",
+    "dep:kube",
+    "dep:k8s-openapi",
+    "dep:http",
+    "dep:rustls",
+    "dep:hmac",
+    "dep:bcrypt",
+    "dep:sha2",
+    "dep:hex",
+    "dep:reqwest",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:anyhow",
+    "dep:getrandom",
+    "dep:tokio-postgres",
+    "dep:ldap3",
+    "dep:rustls-pemfile",
+    "dep:rustls-native-certs",
+    "dep:lettre",
+    "dep:base64",
+    "dep:aws-lc-rs",
+]

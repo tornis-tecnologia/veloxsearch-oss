@@ -1,0 +1,511 @@
+# VeloxSearch — generic single-file install (ADR-027).
+#
+# Zero-credential, one command — the image is a PUBLIC Docker Hub image
+# (docker.io/tornistecnologia/veloxsearch-oss:latest), pulled anonymously, so there is
+# no registry secret to create and no `velox init` pre-step:
+#
+#   kubectl apply -f install.yaml
+#   kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
+#   → open http://localhost:3000  (first run: create the admin account; the app
+#     then checks your cluster against docs/REQUIREMENTS.md and self-installs
+#     cert-manager + the OpenSearch operator)
+#
+# Requirements: see docs/REQUIREMENTS.md (Kubernetes ≥1.30, default StorageClass,
+# ≥8Gi schedulable headroom, amd64, registry egress). A default catch-all Ingress
+# IS created (bottom of this file): on clusters with a default IngressClass (e.g.
+# fresh k3s → bundled traefik) the app is reachable at http://<node-ip>/ with no
+# DNS and no port-forward; on clusters without an ingress controller the object
+# is inert and port-forward remains the fallback. Delete it on shared clusters
+# where a catch-all route is unwanted (see comment on the Ingress).
+#
+# Private fallback: registry.gitlab.com (authenticated pull) stays available for
+# locked-down environments — see docs/INSTALLER.md.
+#
+# Offline / air-gapped alternative: side-load the image instead of pulling, and
+# set imagePullPolicy: IfNotPresent:
+#   sudo ctr -n k8s.io images import veloxsearch.tar      # k3s/containerd
+#   sudo k0s ctr -n k8s.io images import veloxsearch.tar  # k0s
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: veloxsearch-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: veloxsearch
+  namespace: veloxsearch-system
+# No imagePullSecrets: the default image is public (docker.io/tornistecnologia/
+# veloxsearch-oss), pulled anonymously — zero credentials. For the private
+# fallback (registry.gitlab.com) attach a `velox-pull` secret here; see
+# docs/INSTALLER.md.
+---
+# Two-phase RBAC (ADR-002):
+#  - veloxsearch-runtime: day-to-day permissions, enumerated below.
+#  - veloxsearch-bootstrap: cluster-admin ONLY for the one-time self-bootstrap
+#    (cert-manager + operator: CRDs, webhooks, broad ClusterRoles). The app
+#    DELETES THIS BINDING ITSELF once bootstrap completes (ADR-027); re-apply
+#    this file if you ever need to re-bootstrap (e.g. component upgrade).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: veloxsearch-runtime
+rules:
+  # OpenSearch deployments: full lifecycle + cluster-wide discovery listing.
+  - apiGroups: ["opensearch.org"]
+    resources: ["opensearchclusters"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Scheduled snapshot policies (ADR-049): one CR per deployment that
+  # configured a snapshot repository. The CRD ships with the operator.
+  - apiGroups: ["opensearch.org"]
+    resources: ["opensearchsnapshotpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Workload discovery + operator/StatefulSet readiness (read-only, all ns).
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # Pod/namespace reads: discovery + parity with the velox-agent ClusterRole
+  # we grant Fluent Bit (RBAC forbids granting perms we don't hold).
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Telemetry discovery (#65), read-only, all namespaces:
+  #   services   - the generic scan that recognises Prometheus / Hubble / OTEL
+  #                on a cluster VeloxSearch did not provision.
+  #   configmaps - the sidecar provisioning manifest
+  #                (kube-system/sidecar-provisioning-manifest), the fast path
+  #                on a cluster that WAS provisioned by sidecar.
+  # Both degrade to "found nothing" if refused, so an older binding keeps
+  # working; it just loses the telemetry list.
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  # Events read: granted to the k8s-events agent (same no-escalate parity).
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # velox-agents namespace creation (idempotent ensure).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "patch"]
+  # Conformity probe (REQUIREMENTS.md): CRDs present? version? storage? nodes?
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Capacity panel (cluster-capacity): live node CPU/mem from metrics-server,
+  # host root-fs disk via the kubelet Summary API (nodes/proxy), and the
+  # Longhorn persistent pool. All read-only — degrades to "n/d" if absent.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+  - apiGroups: ["longhorn.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Fluent Bit agent RBAC (no `escalate`: can only grant perms held above).
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+# Namespaced day-to-day perms in the app's own namespace: per-deployment admin
+# Secrets, dashboards Ingress (ingress mode only), managed credentials (ADR-023),
+# access config ConfigMap (ADR-027).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: veloxsearch-runtime
+  namespace: veloxsearch-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Data volumes: read drives the Overview PVC meter (ADR-031); delete reclaims
+  # them when a deployment is deleted. StatefulSet volumeClaimTemplates PVCs
+  # have no ownerReference, so nothing else ever collects them and the Longhorn
+  # scheduling budget leaks until provisioning breaks.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # The OpenSearch API route needs Traefik to speak HTTPS to a backend using the
+  # operator's internal CA, which is a ServersTransport. Applied best-effort:
+  # a cluster on another ingress controller never creates one, and the absence
+  # of this CRD must not block a deployment.
+  - apiGroups: ["traefik.io"]
+    resources: ["serverstransports", "middlewares", "ingressroutes"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+# Collection agents live in velox-agents (pre-created so the Role can bind).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velox-agents
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: veloxsearch-runtime
+  namespace: velox-agents
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "serviceaccounts"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # daemonsets: log tailers; deployments: the single-replica events watcher.
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # The OTel observability stack (ADR-053) puts its five components in this same
+  # namespace: services (the OTLP/Cortex/Alertmanager endpoints), secrets (the
+  # Data Prepper pipeline carries the deployment's OpenSearch password, so it is
+  # never a ConfigMap), and PVCs (Cortex blocks + Alertmanager state).
+  - apiGroups: [""]
+    resources: ["services", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # Cortex and Alertmanager ship with no authentication at all, so the policy
+  # restricting who may reach them is part of the stack, not optional polish.
+  # Ingresses publish the OTLP and Alertmanager routes, so an application
+  # outside the cluster can ship telemetry; both are authenticated by the
+  # components themselves (ADR-053 rev. 3).
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: veloxsearch-runtime
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: veloxsearch-runtime
+subjects:
+  - kind: ServiceAccount
+    name: veloxsearch
+    namespace: veloxsearch-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: veloxsearch-runtime
+  namespace: veloxsearch-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: veloxsearch-runtime
+subjects:
+  - kind: ServiceAccount
+    name: veloxsearch
+    namespace: veloxsearch-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: veloxsearch-runtime
+  namespace: velox-agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: veloxsearch-runtime
+subjects:
+  - kind: ServiceAccount
+    name: veloxsearch
+    namespace: veloxsearch-system
+---
+# Bootstrap powers (ADR-014/022). The app revokes this itself after a
+# successful bootstrap — no manual cleanup step (ADR-027).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: veloxsearch-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: veloxsearch
+    namespace: veloxsearch-system
+---
+# Pod environment (ADR-034): non-secret runtime knobs live here, owned by this
+# manifest. (The app's own runtime config — access mode, base domain — lives in
+# the app-managed `veloxsearch-config` ConfigMap, created in-app; ADR-027.)
+# Secrets never go here: credentials are app-managed K8s Secrets (ADR-023/030)
+# or, for operator-provisioned ones, sourced from a vault — see deploy/secrets/.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: veloxsearch-env
+  namespace: veloxsearch-system
+data:
+  RUST_LOG: "info"
+  # Port-forward serves plain http://localhost — Secure cookies would break
+  # login. Set to "1" if you put the app behind HTTPS/ingress.
+  VELOX_COOKIE_SECURE: "0"
+  # Control-plane Postgres bring-up flag (ADR-041, #92) — default OFF. Flip to
+  # "1" AFTER first-run bootstrap: the Postgres PVC pins the `longhorn`
+  # StorageClass (ADR-043), which bootstrap installs, so before that the DB pod
+  # is Pending by design. When "1" the app runs the control-plane migrations to
+  # head before serving and fails closed if it cannot. Nothing reads the store
+  # yet — auth/ownership wire up in later cards (#93/#94).
+  VELOX_PG_ENABLED: "0"
+  # Integration registry (ADR-039 / ADR-047, #75). Defaults to the public raw
+  # URL of tornis-desenvolvimento/veloxsearch-registry on `main`; override to
+  # pin a ref, point at a mirror, or — for an air-gapped install — at a local
+  # checkout with `file:///srv/veloxsearch-registry`. Signature verification is
+  # identical on every route: the trusted key is compiled into the binary.
+  # VELOX_REGISTRY_URL: "https://gitlab.com/tornis-desenvolvimento/veloxsearch-registry/-/raw/main"
+  # While the registry repo is private, a read-only token is needed to see the
+  # catalog. Put it in a Secret, not here (this ConfigMap is non-secret config,
+  # ADR-034), and mount it as VELOX_REGISTRY_TOKEN. Without it the app degrades
+  # to the built-in bootstrap catalog instead of failing (ADR-047).
+  # Self-serve accounts (#79, ADR-041) — default OFF. Requires
+  # VELOX_PG_ENABLED="1": there is nothing to store users in otherwise. When
+  # "0" the four account endpoints answer 404 and admin login is the only way
+  # in, exactly as before. See docs/auth/accounts.md.
+  VELOX_MULTITENANT_AUTH: "0"
+  # Account mail (verification + password-reset links). VELOX_SMTP_HOST is the
+  # switch: while it is empty the app LOGS each link at warn level instead of
+  # sending it, which is how the flow is exercised without a relay. Port
+  # defaults follow the TLS mode (587 starttls / 465 tls / 25 none).
+  # VELOX_SMTP_PASSWORD is a SECRET and is NOT here — it comes from the
+  # optional `veloxsearch-smtp` Secret referenced by the Deployment below.
+  VELOX_SMTP_HOST: ""
+  VELOX_SMTP_TLS: "starttls"
+  VELOX_SMTP_USER: ""
+  VELOX_MAIL_FROM: "VeloxSearch <no-reply@veloxsearch.ai>"
+  # The base URL the emailed links are built from — set this to how users
+  # actually reach the panel, or the links point at localhost.
+  VELOX_PUBLIC_URL: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: veloxsearch
+  namespace: veloxsearch-system
+  labels: { app: veloxsearch }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: veloxsearch }
+  template:
+    metadata:
+      labels: { app: veloxsearch }
+    spec:
+      serviceAccountName: veloxsearch
+      containers:
+        - name: veloxsearch
+          image: docker.io/tornistecnologia/veloxsearch-oss:latest
+          imagePullPolicy: Always
+          # Container hardening (#118). The image already runs as uid 10001, but
+          # an image USER is a default a cluster can override; this makes it a
+          # REQUIREMENT the kubelet enforces, and is what lets the pod be
+          # admitted to a namespace running the `restricted` Pod Security
+          # Standard — which strangers' clusters increasingly do by default.
+          #
+          # readOnlyRootFilesystem is safe here because the server writes
+          # nothing to disk: state lives in Postgres and the cluster, and the
+          # only fs writes in the tree are in test helpers. If a future feature
+          # needs scratch space, mount an emptyDir at that path rather than
+          # reopening the root filesystem.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - containerPort: 3000
+          # Non-secret config from the veloxsearch-env ConfigMap (ADR-034).
+          envFrom:
+            - configMapRef:
+                name: veloxsearch-env
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # The only secret in the account-mail config (#79). Optional, so an
+            # install that never sends mail needs no Secret at all; provision
+            # it from the vault per ADR-034 (deploy/secrets/) when SMTP is used.
+            - name: VELOX_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: veloxsearch-smtp
+                  key: password
+                  optional: true
+          # No env credentials: first boot offers /setup (ADR-023).
+          readinessProbe:
+            httpGet: { path: /login, port: 3000 }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { memory: "128Mi", cpu: "100m" }
+            limits: { memory: "512Mi", cpu: "500m" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: veloxsearch
+  namespace: veloxsearch-system
+spec:
+  selector: { app: veloxsearch }
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+# ── Control-plane Postgres (ADR-041, #92) ────────────────────────────────────
+# Small single-instance Postgres for multi-user control-plane state (users/
+# tenants/quotas/audit); deployment state stays in the OpenSearchCluster CRs.
+# Zero-credential like the rest of this file: the pod references the
+# `veloxsearch-postgres-credentials` Secret, which the APP generates on its
+# first boot (ADR-023 pattern, src/db.rs) — so on a fresh install this pod
+# waits in CreateContainerConfigError for a few seconds until the app is up,
+# then starts. Its PVC pins the `longhorn` StorageClass (ADR-043): before the
+# first-run bootstrap installs Longhorn, the pod is Pending by design.
+#
+# initdb hook: runs ONCE on an empty data dir. Creates the scoped
+# NON-superuser application role (`velox`) owning its own database — the app
+# never connects as the postgres superuser (ADR-041 least-privilege, mirroring
+# the ADR-036 pattern). Passwords arrive via env from the Secret; psql's
+# :'var' quoting keeps them out of SQL-injection reach.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: veloxsearch-postgres-init
+  namespace: veloxsearch-system
+data:
+  01-app-role.sh: |
+    #!/bin/sh
+    set -eu
+    psql -v ON_ERROR_STOP=1 -v app_pw="$VELOX_PG_APP_PASSWORD" \
+         --username "${POSTGRES_USER:-postgres}" --dbname postgres <<'EOSQL'
+    CREATE ROLE velox LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'app_pw';
+    CREATE DATABASE velox OWNER velox;
+    EOSQL
+---
+# Headless governing Service; also the app's connection target (src/db.rs
+# defaults VELOX_PG_HOST to this name).
+apiVersion: v1
+kind: Service
+metadata:
+  name: veloxsearch-postgres
+  namespace: veloxsearch-system
+spec:
+  clusterIP: None
+  selector: { app: veloxsearch-postgres }
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: veloxsearch-postgres
+  namespace: veloxsearch-system
+  labels: { app: veloxsearch-postgres }
+spec:
+  serviceName: veloxsearch-postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: veloxsearch-postgres }
+  template:
+    metadata:
+      labels: { app: veloxsearch-postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            # Superuser password: used only inside this pod (entrypoint +
+            # initdb). The app connects as the scoped `velox` role instead.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: veloxsearch-postgres-credentials
+                  key: superuser-password
+            - name: VELOX_PG_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: veloxsearch-postgres-credentials
+                  key: app-password
+            # Subdirectory so initdb tolerates the volume root's lost+found.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { memory: "64Mi", cpu: "50m" }
+            limits: { memory: "256Mi", cpu: "250m" }
+      volumes:
+        - name: initdb
+          configMap:
+            name: veloxsearch-postgres-init
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # ADR-043: Longhorn is the only storage — pinned, never the cluster
+        # default, so a foreign default class can't silently take the volume.
+        storageClassName: longhorn
+        resources:
+          requests:
+            storage: 2Gi
+---
+# Default Ingress (zero-assumption, ADR-027 follow-up):
+#  - no `host`: matches any hostname/IP — works on a fresh k3s at http://<node-ip>/
+#    with no DNS required (traefik answers via the bundled ServiceLB; note k3s's
+#    klipper-lb uses iptables DNAT, so :80/:443 never appear in `ss -lntp`).
+#  - no `ingressClassName`: rides the cluster's DEFAULT IngressClass (k3s marks
+#    its bundled traefik as default). Clusters with no ingress controller simply
+#    leave this object inert — port-forward (header above) still works.
+#  - shared clusters where a catch-all route is unwanted:
+#      kubectl -n veloxsearch-system delete ingress veloxsearch
+#    then configure ingress mode in-app with a proper host + class.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: veloxsearch
+  namespace: veloxsearch-system
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: veloxsearch
+                port:
+                  number: 80

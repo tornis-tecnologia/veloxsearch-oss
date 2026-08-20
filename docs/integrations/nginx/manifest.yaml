@@ -1,0 +1,75 @@
+# VeloxSearch integration package — nginx access logs.
+#
+# Derived verbatim from the current in-binary recipe so the schema is proven
+# against a real integration (ADR-039 extraction is mechanical, not a rewrite):
+#   - src/recipes.rs::configure_nginx  -> assets.pipeline + assets.index_template
+#   - src/recipes.rs::dashboard_objects("_"/nginx) -> assets.saved_objects ids
+#   - src/recipes.rs::ensure_index_pattern -> index-pattern id == `index`
+#   - src/agents.rs::fluent_bit_conf (nginx branch) -> assets.agent_config
+#   - src/discovery.rs::match_recipe ("nginx" -> "Nginx") -> discovery
+#
+# Validates against ../manifest.schema.json.
+schema_version: "1.0"
+
+id: nginx
+version: 1.0.0
+
+title:
+  en: Nginx
+  es: Nginx
+  pt: Nginx
+summary:
+  en: Access logs from nginx containers — parsed, indexed, and dashboarded.
+  es: Registros de acceso de contenedores nginx — analizados, indexados y con panel.
+  pt: Logs de acesso de contêineres nginx — analisados, indexados e com painel.
+
+# recipe_index("nginx") == NGINX_INDEX
+index: nginx-logs
+# dashboard_id("nginx")
+dashboard: velox-nginx-overview
+
+# First core release that ships the fixed integration apply-engine (#70).
+# Current core is 0.6.2; the engine lands in the next minor.
+min_core_version: 0.7.0
+
+# discovery.rs::match_recipe: image substring "nginx" -> display kind "Nginx".
+# Only image_contains is evaluated by the current core; it is the exact
+# predicate the recipe uses today.
+discovery:
+  kind: Nginx
+  any_of:
+    - image_contains: nginx
+
+# Filenames of the four assets shipped alongside this manifest.
+assets:
+  pipeline: pipeline.json               # PUT {os_host}/_ingest/pipeline/nginx
+  index_template: index-template.json   # PUT {os_host}/_index_template/nginx-logs
+  saved_objects: saved-objects.ndjson   # _bulk_create into tenant {tenant}
+  agent_config: agent.conf.tmpl         # Fluent Bit config (interpolated)
+
+# Everything configure_nginx + the saved objects create, so uninstall is clean.
+teardown:
+  ingest_pipeline: nginx                # configure_nginx PUTs pipeline id `nginx`
+  index_template: nginx-logs            # configure_nginx PUTs template id `nginx-logs`
+  index_pattern: nginx-logs             # ensure_index_pattern id == index
+  saved_objects:                        # dashboard + every viz it references
+    - velox-nginx-overview
+    - velox-nginx-reqs
+    - velox-nginx-clients
+    - velox-nginx-errors
+    - velox-nginx-timeline
+    - velox-nginx-status
+    - velox-nginx-bytes
+    - velox-nginx-top
+    - velox-nginx-ips
+    - velox-nginx-agents
+
+# ed25519 signature over the canonical package digest (see ../signing.md).
+# NOTE: the `value` below is an illustrative, structurally-valid placeholder
+# (64 zero-through-63 bytes, base64) — NOT a real signature. The real value is
+# produced by the registry publish step against the operator-held signing key
+# (custody is an open OPERATOR DECISION — see signing.md).
+signature:
+  algorithm: ed25519
+  key_id: velox-registry-2026
+  value: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw==

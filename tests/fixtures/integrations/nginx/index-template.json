@@ -1,0 +1,16 @@
+{
+  "index_patterns": ["nginx-logs*"],
+  "template": {
+    "settings": { "index.default_pipeline": "nginx" },
+    "mappings": {
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "clientip": { "type": "ip" },
+        "response": { "type": "integer" },
+        "bytes": { "type": "long" },
+        "verb": { "type": "keyword" },
+        "request": { "type": "keyword" }
+      }
+    }
+  }
+}

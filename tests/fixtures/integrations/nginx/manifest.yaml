@@ -1,0 +1,56 @@
+# TEST FIXTURE — not a canonical shipped package.
+#
+# A minimal nginx integration package used ONLY to exercise the #73 apply-engine
+# (src/integrations.rs). Derived from the in-binary recipe so it mirrors what the
+# engine must reproduce:
+#   - src/recipes.rs::configure_nginx      -> pipeline.json + index-template.json
+#   - src/recipes.rs::dashboard_objects()  -> saved-objects.ndjson ids
+#   - src/agents.rs::fluent_bit_conf (nginx) -> agent.conf.tmpl
+# and it matches the shape of docs/integrations/nginx/manifest.yaml.
+#
+# The CANONICAL, signed packages are produced by #74 (recipe extraction); this
+# file is deliberately kept under tests/ so it never collides with #72's
+# registry layout.
+schema_version: "1.0"
+
+id: nginx
+version: 1.0.0
+
+title:
+  en: Nginx
+summary:
+  en: Access logs from nginx containers — parsed, indexed, and dashboarded.
+
+index: nginx-logs
+dashboard: velox-nginx-overview
+
+min_core_version: 0.7.0
+
+assets:
+  pipeline: pipeline.json
+  index_template: index-template.json
+  saved_objects: saved-objects.ndjson
+  agent_config: agent.conf.tmpl
+
+teardown:
+  ingest_pipeline: nginx
+  index_template: nginx-logs
+  index_pattern: nginx-logs
+  saved_objects:
+    - velox-nginx-overview
+    - velox-nginx-reqs
+    - velox-nginx-clients
+    - velox-nginx-errors
+    - velox-nginx-timeline
+    - velox-nginx-status
+    - velox-nginx-bytes
+    - velox-nginx-top
+    - velox-nginx-ips
+    - velox-nginx-agents
+
+# Structurally-valid placeholder signature (NOT real) — verification is #71/#72,
+# upstream of the engine this fixture exercises.
+signature:
+  algorithm: ed25519
+  key_id: velox-registry-2026
+  value: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw==

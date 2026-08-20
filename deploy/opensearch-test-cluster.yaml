@@ -1,0 +1,63 @@
+# Minimal OpenSearchCluster for the vertical slice.
+# This is what the wizard backend will eventually generate programmatically
+# (parameterized by sizing + purpose). Hardcoded here to de-risk the
+# operator <-> CR <-> OpenSearch integration first.
+apiVersion: opensearch.org/v1
+kind: OpenSearchCluster
+metadata:
+  name: velox-test
+  namespace: veloxsearch-test
+spec:
+  general:
+    serviceName: velox-test
+    version: "3.7.0"
+    httpPort: 9200
+    setVMMaxMapCount: true
+  # OpenSearch 3.0 enforces a strict admin-password regex (upper/lower/digit/special),
+  # so supply our own compliant admin secret. TLS generate:true is REQUIRED — without
+  # it the operator decides it is "not managing security" and never initializes the
+  # security index, leaving the node stuck at "Security not initialized" / never Ready.
+  security:
+    tls:
+      transport:
+        generate: true
+      http:
+        generate: true
+    config:
+      adminCredentialsSecret:
+        name: velox-test-admin-credentials
+  dashboards:
+    enable: true
+    version: "3.7.0"
+    replicas: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "200m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+  nodePools:
+    # 3 master-eligible nodes: a single-node operator cluster loses quorum when
+    # the temporary bootstrap pod is removed (no master → 503). 3 nodes keep
+    # quorum and match a realistic observability deployment.
+    - component: nodes
+      replicas: 3
+      diskSize: "5Gi"
+      jvm: "-Xms1g -Xmx1g"
+      roles:
+        - "cluster_manager"
+        - "data"
+        - "ingest"
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "500m"
+        limits:
+          memory: "3Gi"
+          cpu: "1"
+      # emptyDir (ephemeral) for the spike: avoids the Longhorn Immediate-binding
+      # race that left the operator's bootstrap pod stuck FailedScheduling, which
+      # deadlocked master election. Real wizard clusters will use a PVC instead.
+      persistence:
+        emptyDir: {}

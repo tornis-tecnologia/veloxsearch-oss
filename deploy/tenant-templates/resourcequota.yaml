@@ -1,0 +1,29 @@
+# Per-tenant ResourceQuota (ADR-044). Rendered from the tenant's ADR-041
+# `quotas` row — the quota object is a cache; Postgres is authoritative. When
+# the row changes, the control plane re-renders and re-applies (SSA).
+#
+# Worked default (quotas row: max_deployments=1, max_nodes=3, 50Gi):
+#   pods 8 · requests.cpu 4 · limits.cpu 7 · requests.memory 10Gi ·
+#   limits.memory 12Gi · requests.storage 50Gi · persistentvolumeclaims 6 ·
+#   count/opensearchclusters.opensearch.org 1
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: velox-tenant-quota
+  namespace: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG
+spec:
+  hard:
+    pods: "VELOX_QUOTA_PODS"
+    requests.cpu: "VELOX_QUOTA_CPU_REQ"
+    limits.cpu: "VELOX_QUOTA_CPU_LIM"
+    requests.memory: "VELOX_QUOTA_MEM_REQ"
+    limits.memory: "VELOX_QUOTA_MEM_LIM"
+    requests.storage: "VELOX_QUOTA_STORAGE"
+    persistentvolumeclaims: "VELOX_QUOTA_PVCS"
+    # Cluster-side echo of the #84 admission gate: even a gate bypass cannot
+    # create more OpenSearchCluster CRs than the tenant's max_deployments.
+    count/opensearchclusters.opensearch.org: "VELOX_QUOTA_DEPLOYMENTS"

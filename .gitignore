@@ -1,0 +1,16 @@
+# Rust
+/target
+/dist
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+
+# Python (tests/)
+__pycache__/
+.pytest_cache/
+.venv
+
+# Editor / OS
+.DS_Store
+*.swp

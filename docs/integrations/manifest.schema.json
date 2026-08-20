@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veloxsearch.ai/schemas/integration-manifest-1.0.json",
+  "title": "VeloxSearch integration manifest",
+  "description": "Schema for `manifest.yaml`, the declarative descriptor of an integration package (ADR-039). A package is pure data applied by the fixed core engine; this manifest names the assets, the index/dashboard they target, how the source is discovered, and what an uninstall must remove. The core validates every package against this schema on load and refuses any that does not conform. See docs/integrations/interpolation.md for the closed variable set assets may use and docs/integrations/signing.md for the signature block.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "version",
+    "title",
+    "summary",
+    "index",
+    "dashboard",
+    "min_core_version",
+    "assets",
+    "teardown",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "description": "Version of THIS manifest schema the package targets, so the engine can reject packages written against a schema it does not understand. Independent of the package's own `version`.",
+      "type": "string",
+      "const": "1.0"
+    },
+    "id": {
+      "description": "Stable package identifier. Also the ingest-pipeline id the core PUTs and the {recipe_id} interpolation value. DNS-label-safe; matches today's recipe ids (nginx, postgres, k8s-audit, ...).",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$",
+      "minLength": 1,
+      "maxLength": 63
+    },
+    "version": {
+      "description": "Package version, semver. Each integration is versioned independently; re-applying a newer version is the same idempotent PUT/overwrite operation as install (ADR-039 'Versioning').",
+      "$ref": "#/$defs/semver"
+    },
+    "title": {
+      "description": "Human display name shown in the Integrations tab, localized. `en` is required; `es` and `pt` are strongly recommended (the product targets en/es/pt buyers).",
+      "$ref": "#/$defs/i18n"
+    },
+    "summary": {
+      "description": "One-line description shown on the catalog card, localized (mirrors `catalog.json`'s summary). Same i18n shape as `title` — `en` required, `es`/`pt` recommended.",
+      "$ref": "#/$defs/i18n"
+    },
+    "index": {
+      "description": "The OpenSearch index this package writes to (recipe_index() today, e.g. 'nginx-logs'). The index-template's index_patterns and the agent's Index directive both derive from it, and it is the {index} interpolation value.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "minLength": 1
+    },
+    "dashboard": {
+      "description": "Saved-object id (slug) of the out-of-the-box dashboard the package installs (dashboard_id() today, e.g. 'velox-nginx-overview'). This id also appears in `teardown.saved_objects`. It is the deep-link the Integrations tab opens after install.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "minLength": 1
+    },
+    "min_core_version": {
+      "description": "Minimum core (veloxsearch) version whose apply-engine can install this package, semver. The catalog surfaces it; the core refuses packages it is too old to apply.",
+      "$ref": "#/$defs/semver"
+    },
+    "discovery": {
+      "description": "OPTIONAL declarative predicate for detecting a candidate source in the customer's cluster (feeds #65's suggestion layer). Grounded in discovery.rs::match_recipe, which today matches a container image substring and yields a display kind. Omit for packages that are not workload-detected (kubernetes, ssh, k8s-audit, k8s-events monitor the cluster/nodes themselves, not a discovered image). Expressed as DATA only — never a code path.",
+      "$ref": "#/$defs/discovery"
+    },
+    "assets": {
+      "description": "Filenames of the asset files shipped in the package directory, by logical role. `saved_objects` and `agent_config` are always present; `pipeline` and `index_template` are omitted by packages that need neither (e.g. kubernetes: dynamic mapping, no pipeline).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["saved_objects", "agent_config"],
+      "properties": {
+        "pipeline": {
+          "description": "Ingest-pipeline JSON, PUT to {os_host}/_ingest/pipeline/{id}. Grounded in configure_*'s pipeline PUT.",
+          "$ref": "#/$defs/asset_file"
+        },
+        "index_template": {
+          "description": "Index-template JSON, PUT to {os_host}/_index_template/<template-id>. Grounded in configure_*'s template PUT.",
+          "$ref": "#/$defs/asset_file"
+        },
+        "saved_objects": {
+          "description": "NDJSON of OpenSearch-Dashboards saved objects (index-pattern + dashboard + visualizations), POSTed to /api/saved_objects/_bulk_create?overwrite=true into the deployment's tenant. Grounded in ensure_dashboard/ensure_index_pattern.",
+          "$ref": "#/$defs/asset_file"
+        },
+        "agent_config": {
+          "description": "Fluent Bit config template, interpolated then applied as the collector ConfigMap. Grounded in agents.rs::fluent_bit_conf. May use only the closed interpolation set.",
+          "$ref": "#/$defs/asset_file"
+        }
+      }
+    },
+    "teardown": {
+      "description": "Explicit inventory of everything this package creates in the customer's OpenSearch, so uninstall removes exactly these and leaves nothing orphaned (ADR-039 'Uninstall becomes real' — today disable() only removes the agent). `ingest_pipeline`/`index_template` are optional to mirror `assets`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_pattern", "saved_objects"],
+      "properties": {
+        "ingest_pipeline": {
+          "description": "Id of the ingest pipeline to DELETE ({os_host}/_ingest/pipeline/<id>). Present iff assets.pipeline is.",
+          "type": "string",
+          "minLength": 1
+        },
+        "index_template": {
+          "description": "Id of the index template to DELETE ({os_host}/_index_template/<id>). Present iff assets.index_template is.",
+          "type": "string",
+          "minLength": 1
+        },
+        "index_pattern": {
+          "description": "Saved-object id of the index-pattern to DELETE (equals `index` today; ensure_index_pattern uses the index name as the object id).",
+          "type": "string",
+          "minLength": 1
+        },
+        "saved_objects": {
+          "description": "Saved-object ids to DELETE: the dashboard plus every visualization it references. Must include `dashboard`.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "signature": {
+      "description": "Detached-inline signature over the canonical package digest (see signing.md). The core rejects any package without a valid signature from a trusted key BEFORE applying anything — this is the entire security boundary, because packages are data.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "value"],
+      "properties": {
+        "algorithm": {
+          "description": "Signature algorithm. Fixed to ed25519 for v1 (see signing.md recommendation).",
+          "type": "string",
+          "enum": ["ed25519"]
+        },
+        "key_id": {
+          "description": "Identifier of the public key in the core's built-in trusted keyring used to verify `value`. Unknown key_id => reject.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "minLength": 1
+        },
+        "value": {
+          "description": "Base64 (standard, padded) ed25519 signature over the canonical package digest defined in signing.md.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]+={0,2}$",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "semver": {
+      "description": "Semantic Versioning 2.0.0 core + optional pre-release/build (regex from semver.org).",
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+    },
+    "i18n": {
+      "description": "Localized string map. `en` required; `es`/`pt` optional but recommended. No other locales (closed set for the product's target markets).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["en"],
+      "properties": {
+        "en": { "type": "string", "minLength": 1 },
+        "es": { "type": "string", "minLength": 1 },
+        "pt": { "type": "string", "minLength": 1 }
+      }
+    },
+    "asset_file": {
+      "description": "A relative filename inside the package directory (no path separators, no traversal).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "minLength": 1
+    },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "any_of"],
+      "properties": {
+        "kind": {
+          "description": "Human display label for the detected source (match_recipe's display string, e.g. 'Nginx', 'MySQL / MariaDB'). Shown in the discovery/suggestion UI.",
+          "type": "string",
+          "minLength": 1
+        },
+        "any_of": {
+          "description": "A source is a candidate for this package if ANY predicate matches (mirrors match_recipe returning the first needle hit). Each entry is exactly one predicate.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/discovery_predicate" }
+        }
+      }
+    },
+    "discovery_predicate": {
+      "description": "Exactly one detection predicate. `image_contains` is the only form the current core evaluates (discovery.rs); `image_matches`, `labels`, and `ports` are reserved declarative forms for #65's expansion — all pure data, no code.",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "image_contains": {
+          "description": "Case-insensitive substring test against a workload container image (today's match_recipe behaviour).",
+          "type": "string",
+          "minLength": 1
+        },
+        "image_matches": {
+          "description": "Reserved (#65): anchored regular expression against a container image.",
+          "type": "string",
+          "minLength": 1
+        },
+        "labels": {
+          "description": "Reserved (#65): all key/value pairs must be present on the workload's pod template labels.",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string" }
+        },
+        "ports": {
+          "description": "Reserved (#65): all listed container ports must be declared by the workload.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        }
+      }
+    }
+  }
+}

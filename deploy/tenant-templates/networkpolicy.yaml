@@ -1,0 +1,152 @@
+# Per-tenant NetworkPolicy set (ADR-044): default-deny ingress AND egress,
+# then exactly the five enumerated flows. Anything not matched — notably
+# tenant→tenant and tenant→control-plane — dies at the default deny.
+#
+# Tokens:
+#   VELOX_TENANT_NS        = velox-t-<slug>
+#   VELOX_TENANT_SLUG      = tenant slug
+#   VELOX_CONTROL_PLANE_NS = app namespace (ns(): veloxsearch-test on Tornis
+#                            prod, veloxsearch-system on generic installs)
+#   VELOX_INGRESS_NS       = ingress-controller namespace (Traefik)
+#   VELOX_AGENTS_NS        = collection-agent namespace (src/agents.rs AGENT_NS)
+#   VELOX_MINIO_NS         = snapshot MinIO platform namespace (ADR-042)
+#
+# Enforcement is the CNI's job: k3s' embedded netpol controller enforces these;
+# a CNI without policy support accepts them and enforces NOTHING. Only the
+# ADR-026 conformance probe (tenant A pod → tenant B :9200 must time out)
+# counts as evidence — see ADR-044.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velox-default-deny
+  namespace: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# (1) Intra-namespace: OpenSearch transport 9300 between nodes, dashboards→9200.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velox-allow-intra-namespace
+  namespace: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - podSelector: {}
+---
+# (2) Control plane → tenant: SSE status polling, profile/ISM apply, and the
+# operator's user/securityconfig management (operator shares the app namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velox-allow-from-control-plane
+  namespace: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: VELOX_CONTROL_PLANE_NS
+      ports:
+        - port: 9200
+          protocol: TCP
+        - port: 5601
+          protocol: TCP
+---
+# (3) Ingress controller → tenant: <name>.veloxsearch.ai dashboards + API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velox-allow-from-ingress
+  namespace: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: VELOX_INGRESS_NS
+      ports:
+        - port: 5601
+          protocol: TCP
+        - port: 9200
+          protocol: TCP
+---
+# (4) Collection agents → tenant: agents.rs ships to {deployment}.{ns}.svc:9200.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velox-allow-from-agents
+  namespace: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: VELOX_AGENTS_NS
+      ports:
+        - port: 9200
+          protocol: TCP
+---
+# (5) Tenant egress: DNS to kube-system, snapshots to the ADR-042 MinIO.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velox-allow-egress-dns-snapshots
+  namespace: VELOX_TENANT_NS
+  labels:
+    veloxsearch.ai/managed-by: veloxsearch
+    veloxsearch.ai/tenant: VELOX_TENANT_ID
+    veloxsearch.ai/tenant-slug: VELOX_TENANT_SLUG
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: VELOX_MINIO_NS
+      ports:
+        - port: 9000
+          protocol: TCP

@@ -1,0 +1,11 @@
+{"type":"index-pattern","id":"nginx-logs","attributes":{"title":"{index}*","timeFieldName":"@timestamp"}}
+{"type":"visualization","id":"velox-nginx-reqs","attributes":{"title":"Requests"}}
+{"type":"visualization","id":"velox-nginx-clients","attributes":{"title":"Unique clients"}}
+{"type":"visualization","id":"velox-nginx-errors","attributes":{"title":"Errors (4xx/5xx) over time"}}
+{"type":"visualization","id":"velox-nginx-timeline","attributes":{"title":"Requests over time by status"}}
+{"type":"visualization","id":"velox-nginx-status","attributes":{"title":"Status codes"}}
+{"type":"visualization","id":"velox-nginx-bytes","attributes":{"title":"Traffic (bytes) over time"}}
+{"type":"visualization","id":"velox-nginx-top","attributes":{"title":"Top requests"}}
+{"type":"visualization","id":"velox-nginx-ips","attributes":{"title":"Top clients"}}
+{"type":"visualization","id":"velox-nginx-agents","attributes":{"title":"Top user agents"}}
+{"type":"dashboard","id":"velox-nginx-overview","attributes":{"title":"Nginx Overview"}}
