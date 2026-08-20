@@ -240,9 +240,9 @@ OPTIONS (init):
     }
 
     async fn apply(manifest: &Manifest, opts: &InitOpts) -> Result<()> {
-        // kube-rs uses rustls; with both aws-lc-rs and ring in the tree it can't
-        // auto-pick a provider — install one explicitly before any TLS use
-        // (mirrors src/main.rs).
+        // Install the process-wide rustls provider before any TLS use. The
+        // binary links no provider by default on purpose, so this is required
+        // rather than defensive (mirrors src/main.rs).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let client = veloxsearch::k8s::client().await?;

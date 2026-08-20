@@ -13,7 +13,7 @@ keywords = ["kubernetes", "opensearch", "observability", "operator", "logging"]
 categories = ["command-line-utilities", "web-programming"]
 # The MSRV the `msrv` CI job pins and verifies on every PR. Bump it in the same
 # commit that starts depending on a newer toolchain feature, never silently.
-rust-version = "1.87"
+rust-version = "1.88"
 # Not published to crates.io: the deliverable is a container image + the
 # one-file install manifest, and the crate compiles in cluster manifests
 # (`include_str!` over deploy/) that make no sense as a registry artifact.
@@ -51,7 +51,16 @@ hmac = { version = "0.12", optional = true }
 bcrypt = { version = "0.17", optional = true }
 sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+# `rustls-tls-webpki-roots-no-provider`, NOT `rustls-tls`: reqwest's plain
+# `rustls-tls` resolves to `__rustls-ring`, which links ring as a SECOND crypto
+# provider beside the aws-lc-rs one `main.rs` installs process-wide — the exact
+# trap the `lettre` note below describes. The `-no-provider` variant keeps the
+# same webpki root store and defers to the installed default provider.
+# `cargo deny check bans` fails if ring ever comes back (deny.toml).
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots-no-provider",
+    "json",
+], optional = true }
 k8s-openapi = { version = "0.24", features = ["v1_30"], optional = true }
 # Build raw API-server requests for the kubelet Summary API (nodes/proxy), which
 # kube-rs exposes via `Client::request` but has no typed helper for.
@@ -91,7 +100,12 @@ ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-aw
 # Parse the operator-supplied private CA (`pemtrustedcas_content`) into the
 # rustls root store the LDAP probe dials with, so an LDAPS directory behind an
 # internal CA probes the same way the cluster will reach it.
-rustls-pemfile = { version = "2", optional = true }
+#
+# `rustls-pki-types`, not `rustls-pemfile`: the latter is unmaintained and
+# archived (RUSTSEC-2025-0134), and its last release was a thin wrapper around
+# exactly this crate's `PemObject` trait. Not a new dependency either — rustls
+# already pulls it in.
+rustls-pki-types = { version = "1.14", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 # Registry package signatures (ADR-039 / docs/integrations/signing.md, #75): the `value`
 # field of a manifest's signature block is base64.
@@ -124,7 +138,7 @@ ssr = [
     "dep:getrandom",
     "dep:tokio-postgres",
     "dep:ldap3",
-    "dep:rustls-pemfile",
+    "dep:rustls-pki-types",
     "dep:rustls-native-certs",
     "dep:lettre",
     "dep:base64",

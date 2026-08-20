@@ -233,7 +233,10 @@ fn ldap_tls_config(extra_ca: &str) -> anyhow::Result<std::sync::Arc<rustls::Clie
     let pem = extra_ca.trim();
     if !pem.is_empty() {
         let mut added = 0usize;
-        for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
+        // `PemObject` is the maintained home of the parser `rustls-pemfile`
+        // used to wrap (RUSTSEC-2025-0134); same bytes, same iteration.
+        use rustls_pki_types::pem::PemObject;
+        for cert in rustls_pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
             roots
                 .add(cert.context("the CA certificate is not valid PEM")?)
                 .context("the CA certificate could not be added to the trust store")?;

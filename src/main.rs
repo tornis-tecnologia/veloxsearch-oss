@@ -6,8 +6,10 @@ async fn main() {
     use axum::Router;
     use tower_http::services::{ServeDir, ServeFile};
 
-    // kube-rs uses rustls; with both aws-lc-rs and ring in the tree, rustls
-    // can't auto-pick a provider — install one explicitly before any TLS use.
+    // Install the process-wide rustls provider before any TLS use. Required,
+    // not defensive: reqwest is built on the `-no-provider` rustls feature
+    // precisely so ring is not linked as a second provider, which leaves
+    // installing one the caller's job (see the reqwest note in Cargo.toml).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     tracing_subscriber::fmt()

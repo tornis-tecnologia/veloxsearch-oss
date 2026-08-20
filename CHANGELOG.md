@@ -59,6 +59,20 @@ are called out explicitly.
   hostnames.
 
 ### Fixed
+- `ring` was being linked as a second rustls crypto provider beside `aws-lc-rs`,
+  contradicting what `Cargo.toml` claimed in three places: `reqwest`'s
+  `rustls-tls` feature resolves to `__rustls-ring`. Switched to
+  `rustls-tls-webpki-roots-no-provider`, which keeps the same root store and
+  defers to the provider `main.rs` and `velox` install explicitly. Drops `ring`,
+  `quinn`, `quinn-proto`, `quinn-udp` and four more crates from the image.
+- `rustls-pemfile` is unmaintained and archived (RUSTSEC-2025-0134). The CA
+  parsing in the LDAP probe now uses `rustls-pki-types`' `PemObject` — the
+  maintained home of the same parser, and already in the tree.
+- `anyhow` bumped to 1.0.104 for RUSTSEC-2026-0190 (unsoundness in
+  `Error::downcast_mut`, which this codebase never calls).
+- The declared MSRV was wrong: the dependency tree requires 1.88, not 1.85.
+  Clippy's MSRV lint only checks this crate's own API use, so only the `msrv`
+  CI job catches it.
 - Documentation links that pointed at files absent from the export
   (`DEPLOY.md`, `deploy/build-image.sh`, `docs/SECRETS.md`,
   `docs/INSTALLER.md`, `spec/signing.md`).
