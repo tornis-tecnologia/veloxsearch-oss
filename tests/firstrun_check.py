@@ -11,8 +11,8 @@ screen is swapped by React state off `GET /api/auth_state`
 (first_run -> setup). Drive it by the rendered widgets, never by paths.
 
 Usage:
-  firstrun_check.py <base> <user> <pw> pass   [shot.png]   # ct1-style cluster
-  firstrun_check.py <base> <user> <pw> reject [shot.png]   # ct2-style cluster
+  firstrun_check.py <base> <user> <pw> pass   [shot.png]   # cluster that satisfies R1-R8
+  firstrun_check.py <base> <user> <pw> reject [shot.png]   # cluster that fails a requirement
 
 Console must stay free of hydration/panic errors throughout (ADR-024:
 curl can't see those). Assumes a genuinely fresh cluster — if the cluster

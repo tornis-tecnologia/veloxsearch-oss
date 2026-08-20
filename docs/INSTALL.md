@@ -49,8 +49,8 @@ absent — see R3).
 | Platform | Default StorageClass | Longhorn self-bootstrap? | Ingress out of the box | Conformance status |
 |---|---|---|---|---|
 | **minikube** | `standard` (`k8s.io/minikube-hostpath`) — node-local | **Yes** — node-local default ⇒ Longhorn installs (R3) | No (addon: `minikube addons enable ingress`) | Documented, **expected** (not in the conformance fleet) |
-| **k0s** (bare, `--single`) | none | **Yes** — absent default ⇒ Longhorn installs (R3) | No (port-forward only, R8) | **Verified ✓** — `ct2-k0s-bare` (k0s v1.35.4) |
-| **k3s** | `local-path` (`rancher.io/local-path`) — node-local | **Yes** — node-local default ⇒ Longhorn installs (R3) | Traefik present, but install defaults to port-forward | **Verified ✓** — `ct1-k3s-greenfield` (k3s v1.35.5); also live prod (3-node, real `longhorn` default ⇒ bootstrap no-ops) |
+| **k0s** (bare, `--single`) | none | **Yes** — absent default ⇒ Longhorn installs (R3) | No (port-forward only, R8) | **Verified ✓** — `k0s-bare` (k0s v1.35.4) |
+| **k3s** | `local-path` (`rancher.io/local-path`) — node-local | **Yes** — node-local default ⇒ Longhorn installs (R3) | Traefik present, but install defaults to port-forward | **Verified ✓** — `k3s-greenfield` (k3s v1.35.5); also a 3-node k3s cluster (real `longhorn` default ⇒ bootstrap no-ops) |
 | **vanilla k8s** (kubeadm/EKS/GKE/AKS) | depends on the cluster | **Conditional** — a real CSI default is used as-is; a node-local/absent default ⇒ Longhorn installs | depends on the cluster | Documented, **expected** (kubeadm/EKS/GKE/AKS untested) |
 
 **How the storage decision works (R3 / ADR-031).** The wizard inspects your
@@ -67,7 +67,7 @@ default StorageClass:
 > rather than leaving PVCs `Pending`. On Debian/Ubuntu:
 > `sudo apt-get install -y open-iscsi && sudo systemctl enable --now iscsid`.
 
-**Verified vs expected.** Only **k3s (ct1)** and **k0s (ct2)** have a live
+**Verified vs expected.** Only **k3s** and **k0s** have a live
 conformance fixture that drives the whole journey end-to-end (install → first-run
 → bootstrap → create deployment → data in dashboards). **minikube** and **vanilla
 k8s** are documented from the same contract and the `default_storage()` branch
@@ -139,7 +139,7 @@ Build or obtain the image tarball, then import it into each platform's container
 runtime. To produce the tar from a local build:
 
 ```bash
-deploy/build-image.sh                       # builds veloxsearch:0.7.0 (see DEPLOY.md)
+deploy/build-image.sh --tag veloxsearch:0.7.0   # see DEPLOY.md
 docker save veloxsearch:0.7.0 -o veloxsearch.tar
 ```
 
@@ -196,7 +196,7 @@ minikube gotchas:
 - For **ingress mode** instead of port-forward: `minikube addons enable ingress`,
   then keep `minikube tunnel` running so the IngressClass `nginx` gets an address.
 
-### 3b. k3s (verified — ct1)
+### 3b. k3s (verified — `k3s-greenfield`)
 
 ```bash
 # kubeconfig: k3s writes /etc/rancher/k3s/k3s.yaml
@@ -215,13 +215,13 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # open http://localhost:3000  → first run: /setup
 ```
 
-Conformance-verified on `ct1-k3s-greenfield` (k3s v1.35.5, single node): install →
+Conformance-verified on `k3s-greenfield` (k3s v1.35.5, single node): install →
 all R1–R8 ✓ → cert-manager + operator auto-installed → Longhorn bootstrapped from
 the local-path default → deployment green with 3 OpenSearch pods co-scheduled on
 one node. The live 3-node prod cluster has a real `longhorn` default, so the
 bootstrap no-ops there.
 
-### 3c. k0s (verified — ct2)
+### 3c. k0s (verified — `k0s-bare`)
 
 ```bash
 # kubeconfig:
@@ -242,7 +242,7 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # open http://localhost:3000  → first run: /setup
 ```
 
-Conformance-verified on `ct2-k0s-bare` (k0s v1.35.4, single node): absent-default
+Conformance-verified on `k0s-bare` (k0s v1.35.4, single node): absent-default
 Longhorn bootstrap path + port-forward-only honesty (no IngressClass ⇒ the UI
 offers only port-forward).
 
@@ -357,9 +357,5 @@ immediately; no restart needed.
 See [`REQUIREMENTS.md`](REQUIREMENTS.md) for the full platform contract,
 [`PREMISES.md`](PREMISES.md) for the three operational premises behind the
 self-bootstrap (Longhorn / operator auto-install + per-deployment namespace),
-`DEPLOY.md` for the prod build/side-load/roll runbook, and `DECISIONS.md` for
-the ADRs referenced above. Those two live in the GitLab source repository and
-are deliberately not part of the public export — `DEPLOY.md` is an internal
-runbook, and the ADR log is pending a redaction pass because it carries live
-client infrastructure detail. ADR numbers are cited inline throughout these
-docs so the reasoning is still traceable once it is published.
+[`DEPLOY.md`](DEPLOY.md) for the prod build/side-load/roll runbook, and
+[`adr/README.md`](adr/README.md) for the ADRs referenced above.

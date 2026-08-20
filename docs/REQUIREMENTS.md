@@ -33,29 +33,28 @@ auto-installed (R3), how cert-manager/the operator are auto-installed and gated
 
 | Cluster | Purpose | Distro | Shape | Last verified |
 |---|---|---|---|---|
-| Tornis prod K3S | daily driver | k3s v1.30.4, 3 nodes | **real `longhorn` (`driver.longhorn.io`) default** → Longhorn bootstrap no-ops, node pools claim it; PVC-backed | 2026-06-11 (browser_check, pre-PVC); Phase-8 PVC re-verify **pending fleet run** |
-| **ct1-k3s-greenfield** | must **pass** everything | k3s v1.35.5, 1 node | local-path (node-local) default → **bootstraps Longhorn** → PVCs Bound → PVC-backed journey (ADR-031) | pre-PVC: 2026-06-11; PVC path **expected (#16), pending fleet run** |
-| **ct2-k0s-bare** | absent-default Longhorn bootstrap + port-forward honesty | k0s v1.35.4, 1 node | no default SC → **bootstraps Longhorn** → PVCs Bound; no ingress → port-forward-only (R8). Resized to clear R4 | was R3 hard-fail (2026-06-11); PVC path **expected (#16), pending fleet run** |
-| **ct3-k3s-undersized** | **refusal honesty**: R4 + R7 hard-fail end-to-end | k3s, 1 node, 4Gi RAM | undersized (4Gi < R4 floor) **and** a foreign OpenSearch operator pre-installed in namespace `opensearch` (R7 brownfield) → conformity reports `r4`=fail + `r7`=fail → installer refuses, no half-install | fixture added #34, corrected to the real CRD names + a running operator in `#115`; **refusal run pending fleet** (no cluster access in either lane) |
+| 3-node k3s | multi-node, real distributed storage | k3s v1.30.4, 3 nodes | **real `longhorn` (`driver.longhorn.io`) default** → Longhorn bootstrap no-ops, node pools claim it; PVC-backed | 2026-06-11 (browser_check, pre-PVC); Phase-8 PVC re-verify **pending fleet run** |
+| **k3s-greenfield** | must **pass** everything | k3s v1.35.5, 1 node | local-path (node-local) default → **bootstraps Longhorn** → PVCs Bound → PVC-backed journey (ADR-031) | pre-PVC: 2026-06-11; PVC path **expected (#16), pending fleet run** |
+| **k0s-bare** | absent-default Longhorn bootstrap + port-forward honesty | k0s v1.35.4, 1 node | no default SC → **bootstraps Longhorn** → PVCs Bound; no ingress → port-forward-only (R8). Resized to clear R4 | was R3 hard-fail (2026-06-11); PVC path **expected (#16), pending fleet run** |
+| **`k3s-undersized`** | **refusal honesty**: R4 + R7 hard-fail end-to-end | k3s, 1 node, 4Gi RAM | undersized (4Gi < R4 floor) **and** a foreign OpenSearch operator pre-installed in namespace `opensearch` (R7 brownfield) → conformity reports `r4`=fail + `r7`=fail → installer refuses, no half-install | fixture added #34, corrected to the real CRD names + a running operator in `#115`; **refusal run pending fleet** (no cluster access in either lane) |
 
 Expected-compatible but untested: minikube (node-local `standard` default → Longhorn bootstrap), vanilla kubeadm, k0s + a StorageClass, EKS/GKE/AKS. Per-platform install steps for minikube/k0s/k3s/k8s live in [`INSTALL.md`](INSTALL.md).
 
 > **Refusal/honesty coverage (#34).** ADR-031 turned R3 from a hard fail into a remediation
-> (bootstrap Longhorn), so ct2 was repurposed off the old R3 hard-fail test — leaving the
-> refusal paths without a live fixture. **ct3-k3s-undersized** restores live coverage for
+> (bootstrap Longhorn), so `k0s-bare` was repurposed off the old R3 hard-fail test — leaving the
+> refusal paths without a live fixture. **`k3s-undersized`** restores live coverage for
 > **R4** (undersized: 4Gi < the 8Gi floor, fail band `<6Gi`) and **R7** (brownfield: a
 > foreign OpenSearch operator running in namespace `opensearch`, the condition
 > `check_requirements()` actually hard-fails on — a foreign cert-manager is only a `warn`,
 > and so are operator CRDs with no controller behind them). Both fire in one probe
 > pass, so the unsupported-cluster refusal is exercised end-to-end. **R5 (arm64)** still has
-> no live fixture and can't get one on the amd64 Proxmox fleet (no arm64 template); it
+> no live fixture and can't get one on the amd64 fleet (no arm64 image); it
 > remains covered by `src/bootstrap.rs` unit tests + this manual note. Outstanding live
-> acceptance for ct3: `tofu apply` the fixture and confirm the wizard refuses with the
-> R4/R7 messages above.
+> acceptance for `k3s-undersized`: provision the fixture and confirm the wizard refuses
+> with the R4/R7 messages above.
 
 ## Explicitly out of scope for v1 (→ "broaden support" phase)
 
 - Brownfield clusters (foreign cert-manager versions, existing operators, conflicting CRDs)
 - Kubernetes < 1.30; arm64; air-gapped/registry-mirror installs
 - Choosing a non-default StorageClass in the UI; OpenShift; Windows nodes
-- Public pullable image (registry decision drawered — Rodrigo's call on making the project public)

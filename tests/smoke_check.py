@@ -4,8 +4,8 @@
 The browser journey (firstrun_check.py) drives the FULL bootstrap — admin
 creation, the conformity gate, then cert-manager + the OpenSearch operator
 self-install — which needs a cluster that clears the R4 floor (>=8Gi
-allocatable, REQUIREMENTS.md). That is a Proxmox-fleet conformance concern
-(conformance/, ct1/ct2/ct4), not something an in-CI minikube can satisfy.
+allocatable, REQUIREMENTS.md). That is a conformance-fleet concern
+(the conformance fleet: k3s-greenfield, k0s-bare, …), not something an in-CI minikube can satisfy.
 
 This script is the deliberately lightweight *smoke subset* the minikube lane
 runs instead: it proves `kubectl apply -f deploy/install.yaml` brings the app
