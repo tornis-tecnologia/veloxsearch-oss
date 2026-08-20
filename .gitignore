@@ -14,3 +14,10 @@ __pycache__/
 # Editor / OS
 .DS_Store
 *.swp
+
+# Private signing keys must never be committed (see keys/README.md).
+*.priv.pem
+keys/*.pem
+keys/*.key
+CLAUDE.md
+

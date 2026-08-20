@@ -13,9 +13,9 @@
 //!     `&Deployment`, `Deployment` has no constructor outside `scope.rs`, and
 //!     the only producers are `Scope::adopt` (behind `resolve`/`require`) and
 //!     `Scope::claim` (create only). A handler that skipped the check would
-//!     have nothing to pass, so it would not compile. `tests/route_scoping.rs`
-//!     pins the complementary half: no route can even be *mounted* without a
-//!     declared policy.
+//!     have nothing to pass, so it would not compile. The mount-time gate in
+//!     `api::routes` (the `p()` helper) pins the complementary half: no route
+//!     can even be *mounted* without a declared policy.
 //!  2. **The decision refuses cross-tenant access** — proved here, table-driven
 //!     over `api::ROUTES`, so a route added to the tenant-scoped set is covered
 //!     the moment it is declared.
@@ -61,7 +61,7 @@ fn legacy_cluster() -> LocatedCluster {
 
 /// Every route that names a deployment, straight from the audit table — so a
 /// new tenant-scoped route joins this test by being declared, and cannot be
-/// added without a declaration at all (see `tests/route_scoping.rs`).
+/// added without a declaration at all (the mount-time gate in `api::routes`).
 fn tenant_scoped_routes() -> Vec<&'static str> {
     ROUTES
         .iter()
@@ -151,7 +151,7 @@ fn no_label_value_lets_a_tenant_match_another_tenants_cr() {
 /// this is the ONLY scope that exists on `develop` today. It must behave
 /// exactly like the single-admin app: the app namespace, no label selector,
 /// and every deployment — including the unlabeled ones that already exist on
-/// Tornis prod — still reachable.
+/// An existing production namespace — still reachable.
 #[test]
 fn admin_scope_is_the_pre_80_behaviour() {
     assert!(!crate::tenants::enabled(), "flag must default to OFF");

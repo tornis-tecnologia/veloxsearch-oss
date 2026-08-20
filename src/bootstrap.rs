@@ -40,7 +40,7 @@ const LONGHORN_BUNDLE: &str = include_str!(concat!(
 /// The operator bundle was helm-rendered into `veloxsearch-test`; every
 /// occurrence of that token semantically means "the operator's namespace", so
 /// retargeting it to wherever the app actually runs is a plain token replace
-/// (no-op on Tornis prod, ADR-027).
+/// (a no-op on a cluster that already has it, ADR-027).
 fn operator_bundle() -> String {
     OPERATOR_BUNDLE.replace("veloxsearch-test", ns())
 }
@@ -1876,7 +1876,7 @@ mod tests {
         assert_eq!(missing_package_from_status("vm2", &status), None);
         let status =
             json!({ "status": { "conditions": [ { "type": "Ready", "status": "True" } ] } });
-        assert_eq!(missing_package_from_status("vm3", &status), None);
+        assert_eq!(missing_package_from_status("node-3", &status), None);
     }
 
     #[test]
@@ -1917,6 +1917,6 @@ mod tests {
                 ]}}
             }
         });
-        assert_eq!(node_issue_from_status("vm3", &status), None);
+        assert_eq!(node_issue_from_status("node-3", &status), None);
     }
 }

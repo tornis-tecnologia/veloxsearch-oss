@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use crate::scope::{Deployment, LocatedCluster, Scope};
 
 /// The off-cluster fallback namespace (#67). Deliberately a namespace that does
-/// NOT exist in any real deployment — never `veloxsearch-test` (Tornis prod) or
+/// NOT exist in any real deployment — never `veloxsearch-test` or
 /// any other namespace holding customer data. A dev box whose kubeconfig still
 /// points at a live cluster then lands on this inert namespace, so `ns()` cannot
 /// silently drive production; the `ensure_namespace_exists` guard turns every
@@ -3118,7 +3118,7 @@ pub async fn dashboard_credentials(dep: &Deployment) -> Result<(String, String)>
 /// Reset the OpenSearch admin password for one deployment.
 ///
 /// The admin user is `is_reserved: true` in the operator-seeded security config,
-/// so it CANNOT be changed via the security REST API (verified live on ct1 —
+/// so it CANNOT be changed via the security REST API (verified live on a single-node k3s cluster —
 /// both `/api/account` and `/api/internalusers/admin` return 403 "reserved").
 /// The operator seeds the admin hash from the `adminCredentialsSecret`, so the
 /// reset path is: rewrite that Secret, then force the operator to reconcile and
@@ -5379,7 +5379,11 @@ mod tests {
     fn tenant_bundle_opens_exactly_the_adr044_ports_per_peer() {
         let b = rendered();
         let layout = test_layout();
-        // (policy name, peer namespace, ports it may reach)
+        // (policy name, peer namespace, ports it may reach). Spelled out as a
+        // literal tuple type rather than hidden behind an alias: the shape IS
+        // the assertion, and a reader checking ADR-044 against this table
+        // should not have to jump to a type definition to see it.
+        #[allow(clippy::type_complexity)]
         let expected: [(&str, &str, &[(&str, i64)]); 4] = [
             (
                 "velox-allow-from-control-plane",
@@ -5927,7 +5931,7 @@ mod tests {
             DEV_FALLBACK_NS
         );
         // Off-cluster, nothing set: the inert dev fallback, and explicitly NOT
-        // the Tornis prod namespace — this is the whole point of #67.
+        // a real production namespace — this is the whole point of #67.
         let fb = resolve_ns(None, None).unwrap_err();
         assert_eq!(fb, DEV_FALLBACK_NS);
         assert_ne!(

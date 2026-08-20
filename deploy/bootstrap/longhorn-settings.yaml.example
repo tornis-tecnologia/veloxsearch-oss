@@ -1,0 +1,87 @@
+# Longhorn disk-headroom settings for an EXISTING cluster.
+#
+# ⚠️  OPERATOR-GATED. Nothing applies this file: not CI, not src/bootstrap.rs,
+# not any directory apply. The `.yaml.example` suffix keeps it out of
+# `kubectl apply -f deploy/bootstrap/` on purpose. Applying it is a deliberate,
+# sequenced act — read the ORDERING section first.
+#
+# ── When you need this ─────────────────────────────────────────────────────
+#
+# deploy/bootstrap/longhorn.yaml carries safe defaults for installs VeloxSearch
+# performs itself. It cannot fix a cluster where Longhorn was installed by
+# something else (a Helm release, a distro addon, a previous operator): once
+# the `Setting` objects exist, install-time defaults are ignored. Changing live
+# values means writing the Setting CRs below.
+#
+# Check what your cluster actually has:
+#
+#   kubectl -n longhorn-system get settings.longhorn.io \
+#     storage-over-provisioning-percentage \
+#     storage-minimal-available-percentage \
+#     storage-reserved-percentage-for-default-disk \
+#     -o custom-columns=NAME:.metadata.name,VALUE:.value
+#
+# The two that commonly drift loose, and why it bites:
+#
+#   storage-over-provisioning-percentage — how much thin provisioning Longhorn
+#     will schedule against a disk. Raised above 100 (200 is a popular
+#     "temporary" fix), it lets the sum of nominal volume sizes exceed real
+#     disk. Nothing breaks until the volumes actually grow into their nominal
+#     size — then a node fills and replicas on it fault.
+#
+#   storage-minimal-available-percentage — the free-space floor that stops
+#     Longhorn scheduling NEW replicas onto a disk. Lowering it does not protect
+#     a disk from growth of replicas ALREADY placed, so it is not the safety net
+#     it looks like. A node can pass this check and still run out of space.
+#
+# Together they produce the failure this file exists to undo: a cluster
+# scheduled to ~100% of an inflated ceiling, with the floor too low to react in
+# time.
+#
+# ── ORDERING — this is the part that matters ───────────────────────────────
+#
+# DO NOT APPLY WHILE A NODE IS ALREADY FULL. Dropping over-provisioning from
+# 200 to 100 while more is scheduled than the new ceiling allows marks every
+# disk unschedulable at once. It deletes nothing — Longhorn does not evict
+# replicas to satisfy a lowered ceiling — but it blocks the replica REBUILDS
+# that recovery depends on, which is exactly the wrong moment to lose them.
+#
+# Correct sequence:
+#   1. Give the pressured node headroom first: attach a data disk, or reclaim
+#      space (stale snapshots, leaked replica directories) after a per-volume
+#      redundancy check.
+#   2. Confirm every volume is `healthy` (none `degraded` or `unknown`) and
+#      every node is Schedulable:
+#        kubectl -n longhorn-system get volumes.longhorn.io \
+#          -o custom-columns=NAME:.metadata.name,STATE:.status.state,ROBUSTNESS:.status.robustness
+#   3. Apply THIS file.
+#   4. Re-check: no volume should become `degraded`, no PVC should go Pending.
+#
+# ROLLBACK — one command per setting; substitute the values you recorded in
+# step 0. Takes effect immediately, no restart, no data movement:
+#
+#   kubectl -n longhorn-system patch settings.longhorn.io \
+#     storage-over-provisioning-percentage --type=merge -p '{"value":"200"}'
+#   kubectl -n longhorn-system patch settings.longhorn.io \
+#     storage-minimal-available-percentage --type=merge -p '{"value":"10"}'
+#
+# NOTE ON 100%: at 100 the cluster may not have room for every current volume's
+# nominal size. That is the honest position — the capacity was never there;
+# over-provisioning only hid it. If step 4 leaves PVCs Pending, the answer is
+# more disk, not a higher multiplier.
+---
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata: { name: storage-over-provisioning-percentage, namespace: longhorn-system }
+value: "100"
+---
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata: { name: storage-minimal-available-percentage, namespace: longhorn-system }
+value: "25"
+---
+# Longhorn's own default; written so the value is recorded rather than assumed.
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata: { name: storage-reserved-percentage-for-default-disk, namespace: longhorn-system }
+value: "30"

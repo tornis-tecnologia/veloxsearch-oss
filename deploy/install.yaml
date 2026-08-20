@@ -1,7 +1,7 @@
 # VeloxSearch — generic single-file install (ADR-027).
 #
 # Zero-credential, one command — the image is a PUBLIC Docker Hub image
-# (docker.io/tornistecnologia/veloxsearch-oss:latest), pulled anonymously, so there is
+# (docker.io/tornistecnologia/veloxsearch-oss), pulled anonymously, so there is
 # no registry secret to create and no `velox init` pre-step:
 #
 #   kubectl apply -f install.yaml
@@ -18,8 +18,8 @@
 # is inert and port-forward remains the fallback. Delete it on shared clusters
 # where a catch-all route is unwanted (see comment on the Ingress).
 #
-# Private fallback: registry.gitlab.com (authenticated pull) stays available for
-# locked-down environments — see docs/INSTALLER.md.
+# Private fallback: an authenticated pull from your own registry stays available
+# for locked-down environments — see docs/INSTALLER.md.
 #
 # Offline / air-gapped alternative: side-load the image instead of pulling, and
 # set imagePullPolicy: IfNotPresent:
@@ -36,10 +36,10 @@ kind: ServiceAccount
 metadata:
   name: veloxsearch
   namespace: veloxsearch-system
-# No imagePullSecrets: the default image is public (docker.io/tornistecnologia/
-# veloxsearch-oss), pulled anonymously — zero credentials. For the private
-# fallback (registry.gitlab.com) attach a `velox-pull` secret here; see
-# docs/INSTALLER.md.
+# No imagePullSecrets: the default image is public
+# (docker.io/tornistecnologia/veloxsearch-oss), pulled anonymously — zero
+# credentials. To pull from a private mirror instead, attach a `velox-pull`
+# secret here; see docs/INSTALLER.md.
 ---
 # Two-phase RBAC (ADR-002):
 #  - veloxsearch-runtime: day-to-day permissions, enumerated below.
@@ -263,14 +263,14 @@ data:
   # yet — auth/ownership wire up in later cards (#93/#94).
   VELOX_PG_ENABLED: "0"
   # Integration registry (ADR-039 / ADR-047, #75). Defaults to the public raw
-  # URL of tornis-desenvolvimento/veloxsearch-registry on `main`; override to
-  # pin a ref, point at a mirror, or — for an air-gapped install — at a local
-  # checkout with `file:///srv/veloxsearch-registry`. Signature verification is
-  # identical on every route: the trusted key is compiled into the binary.
-  # VELOX_REGISTRY_URL: "https://gitlab.com/tornis-desenvolvimento/veloxsearch-registry/-/raw/main"
-  # While the registry repo is private, a read-only token is needed to see the
-  # catalog. Put it in a Secret, not here (this ConfigMap is non-secret config,
-  # ADR-034), and mount it as VELOX_REGISTRY_TOKEN. Without it the app degrades
+  # URL of tornis-tecnologia/veloxsearch-registry on `main`; override to pin a
+  # ref, point at a mirror, or — for an air-gapped install — at a local checkout
+  # with `file:///srv/veloxsearch-registry`. Signature verification is identical
+  # on every route: the trusted key is compiled into the binary.
+  # VELOX_REGISTRY_URL: "https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-registry/main"
+  # VELOX_REGISTRY_TOKEN is only needed for a PRIVATE mirror of the registry;
+  # the public one needs none. Put it in a Secret, not here (this ConfigMap is
+  # non-secret config, ADR-034). Without a reachable registry the app degrades
   # to the built-in bootstrap catalog instead of failing (ADR-047).
   # Self-serve accounts (#79, ADR-041) — default OFF. Requires
   # VELOX_PG_ENABLED="1": there is nothing to store users in otherwise. When
@@ -308,8 +308,12 @@ spec:
       serviceAccountName: veloxsearch
       containers:
         - name: veloxsearch
-          image: docker.io/tornistecnologia/veloxsearch-oss:latest
-          imagePullPolicy: Always
+          # Pinned to the release this manifest ships with, never `:latest`:
+          # `kubectl apply` of a floating tag makes the running version a
+          # function of when the pod last restarted. The release job rewrites
+          # this line, so the manifest and the binary are always one artifact.
+          image: docker.io/tornistecnologia/veloxsearch-oss:0.7.0
+          imagePullPolicy: IfNotPresent
           # Container hardening (#118). The image already runs as uid 10001, but
           # an image USER is a default a cluster can override; this makes it a
           # REQUIREMENT the kubelet enforces, and is what lets the pod be

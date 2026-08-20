@@ -12,7 +12,7 @@
 //!    registry repo may be private (bearer token via `VELOX_REGISTRY_TOKEN`)
 //!    and because ADR-039 keeps the format transport-agnostic: an air-gapped
 //!    buyer points the same client at a local checkout.
-//! 2. **Trust** ([`verify_package`]) — `spec/signing.md` followed literally:
+//! 2. **Trust** ([`verify_package`]) — `docs/integrations/signing.md` followed literally:
 //!    canonical package digest (JCS over a sorted `[relpath, sha256]` list) and
 //!    an ed25519 signature checked against a keyring **compiled into the core**
 //!    (`keys/velox-registry-2026.pub`, vendored here). Fail closed: unsigned,
@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 /// plain raw path and not the Packages API: it is the one URL shape that works
 /// identically for a public repo, a private repo with a token, and a mirror.
 pub const DEFAULT_REGISTRY_URL: &str =
-    "https://gitlab.com/tornis-desenvolvimento/veloxsearch-registry/-/raw/main";
+    "https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-registry/main";
 
 /// How long a fetched catalog is served without re-asking the registry.
 const DEFAULT_TTL: Duration = Duration::from_secs(900);
@@ -74,7 +74,7 @@ const PLACEHOLDER_SIG_PREFIX: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh
 /// Bootstrap floor (ADR-047): the ids a brand-new, **egress-less** install can
 /// still see and install, served from the in-binary recipe catalog. Exactly the
 /// baseline monitor — the integration ADR-018 turns on for every deployment
-/// anyway — so the core stays honest about Rodrigo's "integrations must not
+/// anyway — so the core stays honest about the rule that "integrations must not
 /// ship pre-loaded": the shelf is empty except the floor the product cannot
 /// function without.
 pub const BOOTSTRAP_IDS: &[&str] = &["kubernetes"];
@@ -421,7 +421,7 @@ fn asset_filenames(manifest_yaml: &str) -> Result<Vec<String>> {
 }
 
 // ---------------------------------------------------------------------------
-// Trust — canonical digest + ed25519 verification (spec/signing.md)
+// Trust — canonical digest + ed25519 verification (docs/integrations/signing.md)
 // ---------------------------------------------------------------------------
 
 /// RFC 8785 (JCS) serialization of the manifest subset that occurs in
@@ -478,7 +478,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// The canonical package digest — the 32 bytes that get signed
-/// (`spec/signing.md` §1): the manifest hashed **without** its `signature` key
+/// (`docs/integrations/signing.md` §1): the manifest hashed **without** its `signature` key
 /// and JCS-canonicalized, every other file hashed raw, the
 /// `[relpath, "sha256:…"]` entries sorted bytewise and JCS-serialized, then
 /// SHA-256 of that. Independent of YAML formatting and file order, so the
@@ -522,7 +522,7 @@ struct SignedManifest {
 }
 
 /// Verify a fetched package against the compiled-in keyring, **fail closed**
-/// (`spec/signing.md` §3). The three named rejects are distinguishable in the
+/// (`docs/integrations/signing.md` §3). The three named rejects are distinguishable in the
 /// error text: *unsigned* (no signature block / placeholder), *unknown key*
 /// (`key_id` not in the keyring), *tampered* (digest mismatch).
 ///

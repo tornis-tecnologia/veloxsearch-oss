@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn accepts_corporate_addresses() {
         for email in [
-            "ricardo@maguscorp.com.br",
+            "alice@acmecorp.com.br",
             "ops@veloxsearch.ai",
             "someone@live.acme-corp.io",
             "someone@outlook-consulting.com",

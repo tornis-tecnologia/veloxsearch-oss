@@ -1358,6 +1358,12 @@ fn readiness_probe(part: &str) -> serde_json::Value {
     })
 }
 
+// Ten arguments, on purpose: this renders one Kubernetes Deployment and every
+// argument is a distinct axis of that object (identity, image, resources, args,
+// ports, probes, …). Bundling them into a struct would only move the same ten
+// fields one level out and add a second place to keep in sync — the call sites
+// are few and each passes all of them.
+#[allow(clippy::too_many_arguments)]
 fn deployment_obj(
     dep: &Deployment,
     part: &str,

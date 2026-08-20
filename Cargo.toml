@@ -4,8 +4,30 @@ version = "0.7.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Wizard-style admin interface that automates OpenSearch observability setup on Kubernetes"
-repository = "https://gitlab.com/tornis-desenvolvimento/veloxsearch"
+repository = "https://github.com/tornis-tecnologia/veloxsearch-oss"
+homepage = "https://github.com/tornis-tecnologia/veloxsearch-oss"
+documentation = "https://github.com/tornis-tecnologia/veloxsearch-oss/tree/main/docs"
+readme = "README.md"
+authors = ["Tornis Desenvolvimento <tornis@tornis.com.br>"]
+keywords = ["kubernetes", "opensearch", "observability", "operator", "logging"]
+categories = ["command-line-utilities", "web-programming"]
+# The MSRV the `msrv` CI job pins and verifies on every PR. Bump it in the same
+# commit that starts depending on a newer toolchain feature, never silently.
+rust-version = "1.87"
+# Not published to crates.io: the deliverable is a container image + the
+# one-file install manifest, and the crate compiles in cluster manifests
+# (`include_str!` over deploy/) that make no sense as a registry artifact.
 publish = false
+
+# Lints. The two `doc_*` allows are deliberate: this codebase's doc-comments
+# carry hand-aligned tables and continuation blocks (per-recipe log formats in
+# `recipes.rs`, the auth precedence list in `auth.rs`) whose columns ARE the
+# readability. Reflowing them to satisfy a rustdoc-markdown nicety would trade a
+# real property for a cosmetic one. Everything else stays at clippy's default,
+# and CI runs with `-D warnings`.
+[lints.clippy]
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
 
 [lib]
 crate-type = ["rlib"]
@@ -71,7 +93,7 @@ ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-aw
 # internal CA probes the same way the cluster will reach it.
 rustls-pemfile = { version = "2", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
-# Registry package signatures (ADR-039 / spec/signing.md, #75): the `value`
+# Registry package signatures (ADR-039 / docs/integrations/signing.md, #75): the `value`
 # field of a manifest's signature block is base64.
 base64 = { version = "0.22", optional = true }
 # ed25519 verification of registry packages. NOT a new crypto stack: aws-lc-rs

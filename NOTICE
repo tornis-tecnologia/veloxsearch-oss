@@ -1,0 +1,31 @@
+VeloxSearch
+Copyright (C) 2026 Tornis Desenvolvimento
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License, version 3 only, as
+published by the Free Software Foundation. See the LICENSE file for the full
+text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+details.
+
+--------------------------------------------------------------------------
+Bundled third-party material
+--------------------------------------------------------------------------
+
+deploy/bootstrap/ vendors upstream installation manifests that are applied
+verbatim by the first-run bootstrap. They are redistributed under their own
+licenses, not under the AGPL:
+
+  * cert-manager.yaml  — cert-manager, Apache License 2.0
+                         https://github.com/cert-manager/cert-manager
+  * operator.yaml      — OpenSearch Kubernetes Operator, Apache License 2.0
+                         https://github.com/opensearch-project/opensearch-k8s-operator
+  * longhorn.yaml      — Longhorn, Apache License 2.0
+                         https://github.com/longhorn/longhorn
+
+Rust and npm dependencies are not vendored; their licenses are enforced by the
+`supply-chain` CI job (see deny.toml) and resolved from Cargo.lock and
+frontend/package-lock.json.

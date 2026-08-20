@@ -186,7 +186,7 @@ impl Record {
     /// (and expected) to re-run items whose success it could not confirm.
     pub fn mark_done(&mut self, item: &Item, now: &str) {
         let key = item.key();
-        if !self.done.iter().any(|k| *k == key) {
+        if !self.done.contains(&key) {
             self.done.push(key);
         }
         self.updated_at = now.to_string();

@@ -8,8 +8,8 @@
 # as cert-manager.yaml / operator.yaml are.
 #
 # NOT byte-verbatim any more: the `longhorn-default-setting` ConfigMap below
-# carries ONE local divergence — explicit disk-headroom settings added after
-# incident 2026-08-04 (see the comment there and ADR-046). It is the only edit
+# carries ONE local divergence — explicit disk-headroom settings added after a
+# node ran out of disk (see the comment there and ADR-046). It is the only edit
 # in this file; re-vendoring a newer upstream bundle must carry it over.
 #
 # The embedded "longhorn"
@@ -95,11 +95,11 @@ metadata:
     app.kubernetes.io/version: v1.8.1
 data:
   # LOCAL DIVERGENCE from the upstream bundle (the only one in this file).
-  # Post-incident 2026-08-04: vm3's root disk reached 0B free because Longhorn
-  # replicas grew unbounded on the same 148G disk that carries etcd. The two
-  # settings below are upstream defaults, but stating them EXPLICITLY is the
-  # point: on the tornis cluster both had been loosened by hand, out of band,
-  # and nothing recorded that it had happened.
+  # Post-incident: a node's root disk reached 0B free because Longhorn replicas
+  # grew unbounded on the same disk that carries etcd. The two settings below
+  # are upstream defaults, but stating them EXPLICITLY is the point: on the
+  # affected cluster both had been loosened by hand, out of band, and nothing
+  # recorded that it had happened.
   #   over-provisioning 200 (vs 100)  -> replicas may be scheduled to 2x real
   #                                      free space; the cluster reached 99.3%
   #                                      of that ceiling.
@@ -107,7 +107,7 @@ data:
   #                                      10% of the disk remained.
   # Written here so a fresh install (including a customer's) is safe by
   # default and any future loosening is a visible diff, not folklore.
-  # See ADR-046 and org/incidents/2026-08-04-vm3-longhorn-disk-full.md.
+  # See ADR-046 for the incident this came from.
   # When re-vendoring a newer upstream longhorn.yaml, carry this block over.
   default-setting.yaml: |-
     priority-class: longhorn-critical

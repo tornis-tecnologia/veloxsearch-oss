@@ -3,7 +3,7 @@
 //! Access configuration (ADR-027): how users reach each deployment's
 //! dashboards. Persisted in ConfigMap `veloxsearch-config` in the app
 //! namespace; an absent ConfigMap means port-forward — the zero-assumption
-//! default for generic installs. Tornis prod ships the ConfigMap with
+//! default for generic installs. An existing production install ships the ConfigMap with
 //! `ingress` / `veloxsearch.ai`, so its behavior is unchanged.
 
 use anyhow::{Context, Result};

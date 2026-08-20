@@ -4,7 +4,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 // The Axum backend to proxy /api/* to during `npm run dev` (issue #68).
-// Defaults to the dev bind CONTRIBUTING.md §4.3 documents
+// Defaults to the dev bind docs/DEVELOPMENT.md documents
 // (`VELOX_SITE_ADDR=127.0.0.1:3000`); override with VITE_API_TARGET.
 const apiTarget = process.env.VITE_API_TARGET || "http://127.0.0.1:3000";
 
