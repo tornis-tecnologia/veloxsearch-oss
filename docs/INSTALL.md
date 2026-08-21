@@ -17,7 +17,7 @@ already have, and it covers two distinct actions you should not conflate:
   anonymously:
 
   ```bash
-  kubectl apply -f https://get.veloxsearch.ai/install.yml
+  kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
   ```
 
 Both land the same thing: `velox init` server-side-applies the same manifest, waits
@@ -110,7 +110,7 @@ manifest directly; it creates its own `veloxsearch-system` namespace, ServiceAcc
 and RBAC, and the kubelet pulls the public image:
 
 ```bash
-kubectl apply -f https://get.veloxsearch.ai/install.yml
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 ```
 
 ### 2b. Private mirror (authenticated pull) — alternative
@@ -125,7 +125,7 @@ kubectl -n veloxsearch-system create secret docker-registry velox-pull \
   --docker-server=registry.gitlab.com \
   --docker-username=<deploy-token-username> \
   --docker-password=<deploy-token>
-kubectl apply -f https://get.veloxsearch.ai/install.yml
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 ```
 
 The one-command equivalent is `velox init --pull-token <token>` (with
@@ -341,11 +341,46 @@ immediately; no restart needed.
 
 ---
 
+## 5b. Which manifest URL to use, and verifying what you pulled
+
+Three places serve an install manifest. They are not equivalent:
+
+| Source | What it is |
+| --- | --- |
+| `releases/latest/download/install.yaml` | **Use this.** A release artifact with the image pinned to a **digest**. Immutable: the same URL applied twice gives the same bytes and the same image |
+| `releases/download/v0.7.1/install.yaml` | The same, pinned to one version instead of following the newest |
+| `deploy/install.yaml` on `main` | The source the release is built from. The image is a version **tag**, not a digest, and `main` moves. Right for development, wrong for a cluster you care about |
+| `https://get.veloxsearch.ai/install.yml` | A convenience redirect maintained by hand, outside this repository's release process. **It can lag behind the current release** — prefer the release artifact when the version matters |
+
+### Verifying the image
+
+The image is signed at release time with [cosign](https://github.com/sigstore/cosign),
+keyless: there is no signing key to steal, only a short-lived certificate bound
+to the workflow that built it, recorded in the public Rekor transparency log.
+Verifying is checking *which workflow, in which repository* produced the image:
+
+```bash
+cosign verify docker.io/tornistecnologia/veloxsearch-oss:0.7.1 \
+  --certificate-identity-regexp '^https://github\.com/tornis-tecnologia/veloxsearch-oss/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+A signature that verifies proves the image came out of this repository's release
+workflow. It does **not** prove the image is free of bugs — provenance is not
+quality.
+
+Integration packages are signed separately, with an ed25519 key whose public
+half is compiled into the binary; that check is not optional and not yours to
+run — the control plane refuses an unsigned or tampered package before applying
+it. See [`integrations/signing.md`](integrations/signing.md).
+
+---
+
 ## 6. Status / honesty note
 
 - **Default path:** the manifest references a **public image**, so the `velox` CLI
   (`curl … | sh` then `velox init`) — or, with no client binary,
-  `kubectl apply -f https://get.veloxsearch.ai/install.yml` — pulls it with **zero
+  `kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml` — pulls it with **zero
   credentials**, no namespace or pull secret to pre-create (§2a).
 - **Air-gapped:** the **side-load + `kubectl apply`** path (§2c, §3) still works
   for clusters with no registry egress, and is what the conformance fleet runs.

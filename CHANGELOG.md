@@ -9,6 +9,19 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- `velox sign` and `velox verify`, plus `catalog::sign_package`. Signing a
+  package had no supported procedure at all: the packages in the registry were
+  signed by a throwaway test that no longer exists. `sign` verifies before it
+  writes, so a package that would not check out never reaches the disk, and
+  `--key -` reads the key from stdin so it need not touch it either.
+- `release.yml` — merging a version bump on `main` now publishes: re-verify at
+  the release commit, build and push the image, sign it with cosign **keyless**
+  (no key to leak or rotate), then tag and publish a release with a
+  digest-pinned `install.yaml` attached. Nothing in the pipeline writes to
+  `main`.
+- `registry-sync.yml` — a recipe change on `main` regenerates the registry's
+  package assets and opens a pull request there, unsigned. Drift between the
+  core's recipes and the registry was previously only ever *detected*.
 - Open-source project structure: `LICENSE` (AGPL-3.0-only), `NOTICE`,
   `CONTRIBUTING`, `CODE_OF_CONDUCT`, `SECURITY`, `GOVERNANCE`, this changelog,
   and bilingual (en / pt-BR) README and contributing guides.
@@ -28,6 +41,12 @@ are called out explicitly.
   exported.
 
 ### Changed
+- **Breaking (operators):** the install manifest to apply is now the release
+  artifact, `releases/latest/download/install.yaml`, with the image pinned to a
+  **digest**. `deploy/install.yaml` on `main` keeps a version tag and is the
+  source the release is built from — applying it gives you whatever is on HEAD.
+  `https://get.veloxsearch.ai/install.yml` is maintained by hand outside this
+  repository and can lag behind the current release.
 - **Breaking (operators):** the default image moved from
   `docker.io/ricardodacosta/veloxsearch:latest` to
   `docker.io/tornistecnologia/veloxsearch-oss:<version>`, and
