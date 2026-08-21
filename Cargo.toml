@@ -109,7 +109,7 @@ rustls-pki-types = { version = "1.14", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 # Registry package signatures (ADR-039 / docs/integrations/signing.md, #75): the `value`
 # field of a manifest's signature block is base64.
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 # ed25519 verification of registry packages. NOT a new crypto stack: aws-lc-rs
 # is already linked into the binary as the process-wide rustls provider
 # (`main.rs`), so this is a direct name for a dependency we already ship —
