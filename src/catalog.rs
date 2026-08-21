@@ -1298,14 +1298,31 @@ mod tests {
     /// would silently invalidate every package already in the wild.
     ///
     /// Needs both the registry checkout and the private key, so it is opt-in.
+    ///
+    /// Skips — never fails — when the key is absent, including in CI. That is
+    /// the opposite of the registry gate's rule (`registry_golden`, #108),
+    /// deliberately: a CI lane can and does clone the registry, but the signing
+    /// key is not in CI and is never going to be (`keys/README.md`). A test
+    /// that demanded it would only ever be a broken lane. This one runs where
+    /// it is meaningful — on the machine that actually signs.
     #[test]
     #[ignore = "needs the registry checkout and the private key (set VELOX_SIGNING_KEY_FILE)"]
     fn re_signing_a_published_package_reproduces_its_signature() {
         let Some(root) = checkout() else { return };
-        let key_pem = std::fs::read_to_string(
-            std::env::var("VELOX_SIGNING_KEY_FILE").expect("VELOX_SIGNING_KEY_FILE"),
-        )
-        .expect("reading the signing key");
+        let Ok(key_file) = std::env::var("VELOX_SIGNING_KEY_FILE") else {
+            crate::registry_golden::to_stderr(
+                "\n==============================================================\n\
+                 SKIPPED re-signing gate: VELOX_SIGNING_KEY_FILE is not set.\n\
+                 The signing key is not in CI and never will be; run this where\n\
+                 you actually sign:\n\
+                 VELOX_REGISTRY_PATH=… VELOX_SIGNING_KEY_FILE=… \\\n\
+                 cargo test -- --ignored re_signing\n\
+                 ==============================================================\n",
+            );
+            return;
+        };
+        let key_pem = std::fs::read_to_string(&key_file)
+            .unwrap_or_else(|e| panic!("reading the signing key from {key_file}: {e}"));
 
         for id in ["nginx", "kubernetes", "kafka"] {
             let dir = root.join("integrations").join(id);
