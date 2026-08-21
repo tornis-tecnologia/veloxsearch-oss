@@ -16,7 +16,7 @@ ele rodando, e te dão um assistente no lugar de uma pasta de YAML.
 [![kubernetes ≥ 1.30](https://img.shields.io/badge/kubernetes%20%E2%89%A5%201.30-326ce5?logo=kubernetes&logoColor=white)](docs/REQUIREMENTS.md)
 [![DCO](https://img.shields.io/badge/DCO-required-8e44ad)](CONTRIBUTING.md)
 
-*Read in English: [README.md](README.md)*
+*Read in English: [README.md](README.md) · Leer en español: [README.es.md](README.es.md)*
 
 </div>
 

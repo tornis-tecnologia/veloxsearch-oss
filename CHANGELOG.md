@@ -9,6 +9,10 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- `README.es.md` — a Spanish README, at full parity with the English one (same
+  sections, tables and examples). The three READMEs cross-link. Note that the
+  UI itself is still pt + en: the Spanish README says so rather than implying
+  otherwise, and points at `frontend/i18n.jsx` as the self-contained way in.
 - `velox sign` and `velox verify`, plus `catalog::sign_package`. Signing a
   package had no supported procedure at all: the packages in the registry were
   signed by a throwaway test that no longer exists. `sign` verifies before it

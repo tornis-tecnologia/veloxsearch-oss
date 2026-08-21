@@ -16,7 +16,7 @@ and give you a wizard instead of a folder of YAML.
 [![kubernetes ≥ 1.30](https://img.shields.io/badge/kubernetes%20%E2%89%A5%201.30-326ce5?logo=kubernetes&logoColor=white)](docs/REQUIREMENTS.md)
 [![DCO](https://img.shields.io/badge/DCO-required-8e44ad)](CONTRIBUTING.md)
 
-*Leia em português: [README.pt-BR.md](README.pt-BR.md)*
+*Leia em português: [README.pt-BR.md](README.pt-BR.md) · Leer en español: [README.es.md](README.es.md)*
 
 </div>
 
