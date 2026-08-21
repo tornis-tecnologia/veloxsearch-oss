@@ -3,7 +3,7 @@
 [![CI](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-*[Leia em português](README.pt-BR.md)*
+*[Leia em português](README.pt-BR.md) · [Leer en español](README.es.md)*
 
 **Turns a bare Kubernetes cluster into a managed OpenSearch platform.** A Rust
 control plane and React UI that install OpenSearch, keep it running, and give
