@@ -97,11 +97,13 @@ pub async fn cluster_capacity() -> Result<ClusterCapacity> {
             }
         }
 
-        let host_disk = host_disk(&client, &name).await.map(|(total, used, _avail)| ResUse {
-            total,
-            used: Some(used),
-            requested: None,
-        });
+        let host_disk = host_disk(&client, &name)
+            .await
+            .map(|(total, used, _avail)| ResUse {
+                total,
+                used: Some(used),
+                requested: None,
+            });
 
         let storage = longhorn.get(&name).map(|&(max, avail)| ResUse {
             total: max,
@@ -327,7 +329,10 @@ async fn longhorn_disks(client: &Client) -> Result<BTreeMap<String, (u64, u64)>>
                 .and_then(|d| d.as_object())
             {
                 for disk in disks.values() {
-                    max += disk.get("storageMaximum").and_then(|x| x.as_u64()).unwrap_or(0);
+                    max += disk
+                        .get("storageMaximum")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
                     avail += disk
                         .get("storageAvailable")
                         .and_then(|x| x.as_u64())
@@ -431,12 +436,22 @@ mod tests {
     fn fit_picks_binding_constraint() {
         // 4 vCPU / 4Gi free, 100Gi pool. small = 500m/2Gi/5Gi per node ×3.
         // cpu: 4000/(500*3)=2; mem: 4Gi/(2Gi*3)=0; disk: 100Gi/(5Gi*3)=6 → mem-bound, 0.
-        let f = deployment_fit("small", 4000, 4 * 1024 * 1024 * 1024, Some(100 * 1024 * 1024 * 1024));
+        let f = deployment_fit(
+            "small",
+            4000,
+            4 * 1024 * 1024 * 1024,
+            Some(100 * 1024 * 1024 * 1024),
+        );
         assert_eq!(f.count, 0);
         assert_eq!(f.limited_by, "mem");
 
         // Plenty of cpu+mem, tiny disk pool → disk-bound.
-        let f = deployment_fit("small", 100_000, 200u64 * 1024 * 1024 * 1024, Some(20 * 1024 * 1024 * 1024));
+        let f = deployment_fit(
+            "small",
+            100_000,
+            200u64 * 1024 * 1024 * 1024,
+            Some(20 * 1024 * 1024 * 1024),
+        );
         assert_eq!(f.limited_by, "disk");
         assert_eq!(f.count, 1); // 20Gi / (5Gi*3) = 1
     }

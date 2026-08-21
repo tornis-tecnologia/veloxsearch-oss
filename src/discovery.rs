@@ -206,15 +206,24 @@ mod tests {
     /// substring of the other, so ordering can't shadow either match.
     #[test]
     fn match_recipe_mariadb_and_mysql_share_recipe() {
-        assert_eq!(match_recipe("mariadb:11"), Some(("MySQL / MariaDB", Some("mysql"))));
-        assert_eq!(match_recipe("mysql:8"), Some(("MySQL / MariaDB", Some("mysql"))));
+        assert_eq!(
+            match_recipe("mariadb:11"),
+            Some(("MySQL / MariaDB", Some("mysql")))
+        );
+        assert_eq!(
+            match_recipe("mysql:8"),
+            Some(("MySQL / MariaDB", Some("mysql")))
+        );
     }
 
     /// Pre-existing entries still resolve, and an unknown image yields nothing.
     #[test]
     fn match_recipe_existing_and_unknown() {
         assert_eq!(match_recipe("nginx:1.27"), Some(("Nginx", Some("nginx"))));
-        assert_eq!(match_recipe("postgres:16"), Some(("PostgreSQL", Some("postgres"))));
+        assert_eq!(
+            match_recipe("postgres:16"),
+            Some(("PostgreSQL", Some("postgres")))
+        );
         assert_eq!(match_recipe("busybox:latest"), None);
     }
 }

@@ -1,0 +1,7 @@
+# Stock rustfmt. The one deliberate choice here is to make no choices: this
+# codebase is comment-dense and read far more than it is written, so the value
+# of formatting is that nobody argues about it, not that it is tuned.
+#
+# `edition` must match Cargo.toml — rustfmt does not read it from there when
+# invoked on individual files (rust-analyzer, editors on save).
+edition = "2021"

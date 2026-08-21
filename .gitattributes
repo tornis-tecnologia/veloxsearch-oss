@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+# Vendored upstream installation manifests: 2.3 MB of generated YAML that would
+# otherwise dominate the repository's language statistics and every diff view.
+deploy/bootstrap/cert-manager.yaml linguist-vendored
+deploy/bootstrap/operator.yaml     linguist-vendored
+deploy/bootstrap/longhorn.yaml     linguist-vendored
+
+# Lockfiles are generated: keep them out of diffs and language stats, but they
+# stay tracked and reviewed.
+Cargo.lock                      linguist-generated
+frontend/package-lock.json      linguist-generated
+
+# The public signing key is one base64 line; never let a merge tool touch it.
+keys/*.pub -diff -merge

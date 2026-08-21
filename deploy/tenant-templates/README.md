@@ -31,4 +31,4 @@ still owed (ADR-051).
 
 Design, rationale, worked quota defaults, enforcement caveats (CNIs without
 NetworkPolicy support silently no-op), and the legacy-namespace migration path:
-**ADR-044** (the ADR log lives in the GitLab source repository; it is not part of the public export yet, pending a redaction pass).
+**ADR-044** (see [`docs/adr/README.md`](../../docs/adr/README.md)).

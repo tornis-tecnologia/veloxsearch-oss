@@ -1,0 +1,12 @@
+# Every PR gets a maintainer review by default.
+*                       @tornis-tecnologia/maintainers
+
+# Security boundaries — these get a closer read (see CONTRIBUTING.md § Review).
+/src/scope.rs           @tornis-tecnologia/maintainers
+/src/scope/             @tornis-tecnologia/maintainers
+/src/auth.rs            @tornis-tecnologia/maintainers
+/src/catalog.rs         @tornis-tecnologia/maintainers
+/src/integrations.rs    @tornis-tecnologia/maintainers
+/keys/                  @tornis-tecnologia/maintainers
+/deploy/install.yaml    @tornis-tecnologia/maintainers
+/.github/workflows/     @tornis-tecnologia/maintainers

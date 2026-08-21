@@ -43,15 +43,16 @@ mod imp {
     /// The image-pull Secret must live here so the `veloxsearch` SA can use it.
     const NAMESPACE: &str = "veloxsearch-system";
 
-    /// Default registry host for the pull Secret. The registry choice is still
-    /// pending (ADR-025) — this is a sensible default, NOT a hardcoded
-    /// assumption: override with `--registry`. GitLab's container registry is
-    /// `registry.gitlab.com`.
-    const DEFAULT_REGISTRY: &str = "registry.gitlab.com";
+    /// Default registry host for the pull Secret — the one the public release
+    /// image lives on (`docker.io/tornistecnologia/veloxsearch-oss`). Note that
+    /// the public image needs NO pull Secret at all; this default only matters
+    /// when `--pull-token` is given, i.e. when pulling from a private mirror.
+    /// Override with `--registry`.
+    const DEFAULT_REGISTRY: &str = "docker.io";
 
     /// Default registry username for the pull Secret. Override with `--pull-user`
-    /// to match your registry's pull/deploy-token username (e.g. a GitLab deploy
-    /// token has its own generated username).
+    /// to match your registry's pull/deploy-token username (many registries
+    /// generate their own username for a read-only deploy token).
     const DEFAULT_PULL_USER: &str = "veloxsearch";
 
     /// Default name of the created image-pull Secret. Must match the
@@ -76,8 +77,8 @@ OPTIONS (init):
     --pull-user <USER>         Registry username for the pull Secret
                                [default: veloxsearch].
     --registry <HOST>          Registry host the Secret authenticates to
-                               [default: registry.gitlab.com]. Registry choice is
-                               still pending (ADR-025) — override to match yours.
+                               [default: docker.io]. Only relevant with
+                               --pull-token; override to match your mirror.
     --pull-secret-name <NAME>  Name of the created Secret [default: velox-pull].
     --dry-run                  Parse and print what would be applied (manifest
                                objects + the pull Secret) without touching a
@@ -192,7 +193,9 @@ OPTIONS (init):
 
     /// Parse `init` flags. Returns `Ok(None)` when `-h/--help` was requested,
     /// `Err(msg)` on a bad/missing argument value.
-    pub(crate) fn parse_init_opts(args: &[String]) -> std::result::Result<Option<InitOpts>, String> {
+    pub(crate) fn parse_init_opts(
+        args: &[String],
+    ) -> std::result::Result<Option<InitOpts>, String> {
         let mut opts = InitOpts::default();
         let mut it = args.iter();
         while let Some(a) = it.next() {
@@ -222,7 +225,10 @@ OPTIONS (init):
         Ok(Some(opts))
     }
 
-    fn take_value(it: &mut std::slice::Iter<'_, String>, flag: &str) -> std::result::Result<String, String> {
+    fn take_value(
+        it: &mut std::slice::Iter<'_, String>,
+        flag: &str,
+    ) -> std::result::Result<String, String> {
         it.next()
             .cloned()
             .filter(|v| !v.is_empty())
@@ -230,13 +236,13 @@ OPTIONS (init):
     }
 
     fn strip_eq(arg: &str) -> String {
-        arg.splitn(2, '=').nth(1).unwrap_or("").to_string()
+        arg.split_once('=').map(|x| x.1).unwrap_or("").to_string()
     }
 
     async fn apply(manifest: &Manifest, opts: &InitOpts) -> Result<()> {
-        // kube-rs uses rustls; with both aws-lc-rs and ring in the tree it can't
-        // auto-pick a provider — install one explicitly before any TLS use
-        // (mirrors src/main.rs).
+        // Install the process-wide rustls provider before any TLS use. The
+        // binary links no provider by default on purpose, so this is required
+        // rather than defensive (mirrors src/main.rs).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let client = veloxsearch::k8s::client().await?;
@@ -546,7 +552,7 @@ OPTIONS (init):
         fn no_pull_token_means_no_secret() {
             let opts = parse_init_opts(&argv(&[])).unwrap().unwrap();
             assert!(opts.pull_token.is_none());
-            assert_eq!(opts.registry, "registry.gitlab.com");
+            assert_eq!(opts.registry, "docker.io");
             assert_eq!(opts.pull_user, "veloxsearch");
             assert_eq!(opts.pull_secret_name, "velox-pull");
         }
@@ -581,7 +587,7 @@ OPTIONS (init):
 
         #[test]
         fn pull_secret_object_is_well_formed() {
-            let s = pull_secret_object("registry.gitlab.com", "u", "t", "velox-pull");
+            let s = pull_secret_object("registry.example.com", "u", "t", "velox-pull");
             assert_eq!(s["kind"], "Secret");
             assert_eq!(s["type"], "kubernetes.io/dockerconfigjson");
             assert_eq!(s["metadata"]["namespace"], "veloxsearch-system");
@@ -589,7 +595,7 @@ OPTIONS (init):
             let dockercfg: serde_json::Value =
                 serde_json::from_str(s["stringData"][".dockerconfigjson"].as_str().unwrap())
                     .unwrap();
-            let entry = &dockercfg["auths"]["registry.gitlab.com"];
+            let entry = &dockercfg["auths"]["registry.example.com"];
             assert_eq!(entry["username"], "u");
             assert_eq!(entry["password"], "t");
             assert_eq!(entry["auth"], base64_std(b"u:t"));

@@ -160,7 +160,10 @@ pub struct Record {
 impl Record {
     /// A fresh record for work that is about to start.
     pub fn started(now: &str) -> Self {
-        Self { updated_at: now.to_string(), ..Self::default() }
+        Self {
+            updated_at: now.to_string(),
+            ..Self::default()
+        }
     }
 
     /// Hand a fresh attempt schedule to an existing record: a save that defers
@@ -183,7 +186,7 @@ impl Record {
     /// (and expected) to re-run items whose success it could not confirm.
     pub fn mark_done(&mut self, item: &Item, now: &str) {
         let key = item.key();
-        if !self.done.iter().any(|k| *k == key) {
+        if !self.done.contains(&key) {
             self.done.push(key);
         }
         self.updated_at = now.to_string();
@@ -302,7 +305,10 @@ pub struct ProvisioningState {
 impl ProvisioningState {
     /// Nothing is outstanding.
     pub fn complete() -> Self {
-        Self { state: "complete", ..Self::default() }
+        Self {
+            state: "complete",
+            ..Self::default()
+        }
     }
 }
 
@@ -313,7 +319,11 @@ impl ProvisioningState {
 /// *removing* the record, and it is also every deployment that predates this
 /// change — which is the reason absence means complete rather than unknown: the
 /// alternative would flip the whole existing estate to "incomplete" on deploy.
-pub fn state_from(purpose: &str, monitors: &[String], annotation: Option<&str>) -> ProvisioningState {
+pub fn state_from(
+    purpose: &str,
+    monitors: &[String],
+    annotation: Option<&str>,
+) -> ProvisioningState {
     let Some(raw) = annotation else {
         return ProvisioningState::complete();
     };
@@ -333,7 +343,11 @@ pub fn state_from(purpose: &str, monitors: &[String], annotation: Option<&str>) 
         return ProvisioningState::complete();
     }
     ProvisioningState {
-        state: if record.exhausted { "failed" } else { "pending" },
+        state: if record.exhausted {
+            "failed"
+        } else {
+            "pending"
+        },
         profile_pending: pending.iter().any(|i| matches!(i, Item::Profile(_))),
         monitors_pending: pending
             .iter()
@@ -388,10 +402,16 @@ mod tests {
     fn a_pending_dashboards_default_alone_reads_as_complete() {
         let item = Item::DashboardsDefault(DARK_MODE.to_string());
         let mut rec = Record::default();
-        rec.mark_done(&Item::Profile("observability".into()), "2026-08-18T00:00:00Z");
+        rec.mark_done(
+            &Item::Profile("observability".into()),
+            "2026-08-18T00:00:00Z",
+        );
         let raw = render(&rec);
         let st = state_from("observability", &[], Some(&raw));
-        assert_eq!(st.state, "complete", "only a cosmetic default was outstanding");
+        assert_eq!(
+            st.state, "complete",
+            "only a cosmetic default was outstanding"
+        );
         assert!(!st.profile_pending);
         assert!(st.monitors_pending.is_empty());
         let _ = item;
@@ -431,7 +451,10 @@ mod tests {
     /// Planning the same monitor twice would install it twice.
     #[test]
     fn plan_drops_blank_and_repeated_monitor_ids() {
-        let p = work(plan("observability", &monitors(&["nginx", " nginx ", "", "kubernetes"])));
+        let p = work(plan(
+            "observability",
+            &monitors(&["nginx", " nginx ", "", "kubernetes"]),
+        ));
         assert_eq!(
             p,
             vec![
@@ -447,7 +470,10 @@ mod tests {
     #[test]
     fn applied_items_stop_being_pending() {
         let mut r = Record::started("t0");
-        assert_eq!(work(r.pending("observability", &monitors(&["nginx"]))).len(), 2);
+        assert_eq!(
+            work(r.pending("observability", &monitors(&["nginx"]))).len(),
+            2
+        );
         r.mark_done(&Item::Profile("observability".into()), "t1");
         r.mark_done(&Item::Monitor("nginx".into()), "t2");
         assert!(work(r.pending("observability", &monitors(&["nginx"]))).is_empty());
@@ -474,7 +500,10 @@ mod tests {
         let mut r = Record::started("t0");
         r.mark_done(&Item::Profile("observability".into()), "t1");
         assert!(work(r.pending("observability", &[])).is_empty());
-        assert_eq!(work(r.pending("search", &[])), vec![Item::Profile("search".into())]);
+        assert_eq!(
+            work(r.pending("search", &[])),
+            vec![Item::Profile("search".into())]
+        );
     }
 
     /// Removing a monitor in the edit tab while a retry is pending must not
@@ -483,7 +512,10 @@ mod tests {
     #[test]
     fn deselecting_a_monitor_withdraws_it_from_the_pending_work() {
         let r = Record::started("t0");
-        assert_eq!(work(r.pending("observability", &monitors(&["nginx"]))).len(), 2);
+        assert_eq!(
+            work(r.pending("observability", &monitors(&["nginx"]))).len(),
+            2
+        );
         let pending = work(r.pending("observability", &[]));
         assert_eq!(pending, vec![Item::Profile("observability".into())]);
     }
@@ -505,7 +537,10 @@ mod tests {
     fn a_corrupt_record_reads_as_nothing_applied_rather_than_failing() {
         let r = parse(Some("{not json"));
         assert_eq!(r, Record::default());
-        assert_eq!(work(r.pending("observability", &monitors(&["nginx"]))).len(), 2);
+        assert_eq!(
+            work(r.pending("observability", &monitors(&["nginx"]))).len(),
+            2
+        );
     }
 
     /// Absence is the terminal state, and it is also every deployment created
@@ -597,7 +632,10 @@ mod tests {
         assert!(!r.exhausted);
         assert!(r.last_error.is_empty());
         assert_eq!(r.done, vec!["monitor:kubernetes".to_string()]);
-        assert!(settle_budget(r.attempts).is_some(), "a retry has attempts to spend");
+        assert!(
+            settle_budget(r.attempts).is_some(),
+            "a retry has attempts to spend"
+        );
     }
 
     /// The edit tab writes the monitors annotation on save. Before ADR-052 the
@@ -621,8 +659,15 @@ mod tests {
     /// says so out loud rather than letting background tasks accumulate.
     #[test]
     fn the_settle_schedule_is_bounded_and_widens() {
-        assert_eq!(settle_budget(0), Some(600), "the first attempt keeps ADR-050's 600s");
-        assert!(SETTLE_BUDGETS.windows(2).all(|w| w[0] <= w[1]), "budgets never shrink");
+        assert_eq!(
+            settle_budget(0),
+            Some(600),
+            "the first attempt keeps ADR-050's 600s"
+        );
+        assert!(
+            SETTLE_BUDGETS.windows(2).all(|w| w[0] <= w[1]),
+            "budgets never shrink"
+        );
         assert_eq!(settle_budget(SETTLE_BUDGETS.len() as u32), None);
         let total: u64 = SETTLE_BUDGETS.iter().sum();
         assert_eq!(total, 6900, "≈1h55m of settle waiting before giving up");
@@ -645,6 +690,9 @@ mod tests {
         assert_eq!(retry_delay(0), 0);
         assert_eq!(retry_delay(1), 30);
         assert_eq!(retry_delay(2), 60);
-        assert!((0..1000).all(|n| retry_delay(n) <= MAX_RETRY_DELAY), "no overflow, capped");
+        assert!(
+            (0..1000).all(|n| retry_delay(n) <= MAX_RETRY_DELAY),
+            "no overflow, capped"
+        );
     }
 }

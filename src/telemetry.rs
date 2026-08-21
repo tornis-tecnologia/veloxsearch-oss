@@ -651,7 +651,13 @@ mod tests {
     /// rename here silently empties the wizard's telemetry block, so pin it.
     #[test]
     fn telemetry_source_wire_shape_is_what_the_wizard_reads() {
-        let mut s = src("prometheus", "monitoring", "kps-prometheus", 9090, ORIGIN_MANIFEST);
+        let mut s = src(
+            "prometheus",
+            "monitoring",
+            "kps-prometheus",
+            9090,
+            ORIGIN_MANIFEST,
+        );
         s.component = Some("kube-prometheus-stack".into());
         s.version = Some("65.1.1".into());
         s.recipe = Some("prometheus".into());
@@ -662,8 +668,15 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "address", "component", "kind", "namespace", "origin", "port", "recipe",
-                "service", "version"
+                "address",
+                "component",
+                "kind",
+                "namespace",
+                "origin",
+                "port",
+                "recipe",
+                "service",
+                "version"
             ]
         );
         assert_eq!(v["address"], "kps-prometheus.monitoring.svc:9090");

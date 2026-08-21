@@ -18,9 +18,9 @@
 //! `recipes.rs` stays authoritative and unchanged; this module only adds a
 //! reusable engine and lets `disable()` reuse the same teardown.
 
+use crate::scope::Deployment;
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
-use crate::scope::Deployment;
 
 /// The closed, engine-owned interpolation variable set (`docs/integrations/
 /// interpolation.md`, ADR-039). Exactly these eight names may appear as
@@ -477,7 +477,9 @@ pub async fn apply_package(deployment: &Deployment, pkg: &Package) -> Result<()>
     let objs = saved_objects_bulk(&saved_objects)?;
     let dash = crate::recipes::dashboards_base(deployment);
     let mut req = c
-        .post(format!("{dash}/api/saved_objects/_bulk_create?overwrite=true"))
+        .post(format!(
+            "{dash}/api/saved_objects/_bulk_create?overwrite=true"
+        ))
         .basic_auth(&u, Some(&p))
         .header("osd-xsrf", "true");
     if let Some(t) = &scope {
@@ -680,7 +682,10 @@ mod tests {
         let err = render("HTTP_Passwd {cluster_admin_ssh}", &v).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("cluster_admin_ssh"), "unhelpful error: {msg}");
-        assert!(msg.contains("closed variable set"), "unhelpful error: {msg}");
+        assert!(
+            msg.contains("closed variable set"),
+            "unhelpful error: {msg}"
+        );
     }
 
     /// Grok syntax and JSON structural braces are NOT tokens — they pass through
@@ -717,7 +722,10 @@ mod tests {
         assert_eq!(pkg.manifest.id, "nginx");
         assert_eq!(pkg.manifest.index, "nginx-logs");
         assert!(pkg.pipeline.is_some(), "nginx ships a pipeline");
-        assert!(pkg.index_template.is_some(), "nginx ships an index template");
+        assert!(
+            pkg.index_template.is_some(),
+            "nginx ships an index template"
+        );
     }
 
     /// THE round-trip property: everything a clean install of the nginx package
@@ -733,7 +741,10 @@ mod tests {
         let orphaned: Vec<_> = created.difference(&removed).collect();
         assert!(orphaned.is_empty(), "install leaves orphans: {orphaned:?}");
         let phantom: Vec<_> = removed.difference(&created).collect();
-        assert!(phantom.is_empty(), "teardown removes uncreated: {phantom:?}");
+        assert!(
+            phantom.is_empty(),
+            "teardown removes uncreated: {phantom:?}"
+        );
         assert_eq!(created, removed);
         // The index-pattern + dashboard + 9 visualizations + pipeline + template.
         assert_eq!(created.len(), 13, "unexpected resource count");
@@ -761,8 +772,15 @@ mod tests {
         let Some(dir) = nginx_fixture() else { return };
         let pkg = Package::load_from_dir(&dir).expect("load nginx fixture");
         let rendered = render(&pkg.saved_objects, &nginx_vars()).unwrap();
-        assert!(rendered.contains(r#""title":"nginx-logs*""#), "index-pattern title unrendered");
+        assert!(
+            rendered.contains(r#""title":"nginx-logs*""#),
+            "index-pattern title unrendered"
+        );
         let objs = saved_objects_bulk(&rendered).expect("ndjson stays valid JSON");
-        assert_eq!(objs.len(), 11, "11 saved objects (index-pattern + dashboard + 9 viz)");
+        assert_eq!(
+            objs.len(),
+            11,
+            "11 saved objects (index-pattern + dashboard + 9 viz)"
+        );
     }
 }

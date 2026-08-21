@@ -1,13 +1,14 @@
 # Integration package signing & verification
 
-**Status:** spec proposed by #71 · **Key custody: OPEN — operator decision required (see last section).**
+**Status:** accepted · **Key custody: the maintainers hold the private half; see [`keys/README.md`](../../keys/README.md).**
 
 Packages are **data, not code**, so there is no sandbox to escape — **verification is
 the entire security boundary** between the registry and a customer's cluster
 (ADR-039, "Trust"). This document pins *what* is signed, *how* (algorithm + a
-deterministic canonicalization), and the *verification path* the core enforces. It
-deliberately does **not** decide who holds the signing key or where it lives — that
-is a business/operations decision flagged to the operator and still open.
+deterministic canonicalization), and the *verification path* the core enforces.
+Who holds the signing key, and the rotation procedure, are settled in [`keys/README.md`](../../keys/README.md): the
+private half is held by the project maintainers, is never in this repository nor
+in the container image, and is used only by the registry's publishing tooling.
 
 ---
 
@@ -133,32 +134,46 @@ Corresponding rejects, restated as the three states the card names:
 
 ---
 
-## 4. OPERATOR DECISION REQUIRED
+## 4. Key governance
 
-The mechanism above is complete **except** for who holds the key and how the trust
-anchor is governed. These are business/operations calls, not engineering ones, and
-are **explicitly left open** for the operator:
+The mechanism above is complete. This section records how the trust anchor is
+governed — decisions that are operational, not engineering, and that were open
+until the open-source release settled them.
 
-1. **Signing-key custody.** Where does the ed25519 **private** key live, and who
-   can use it? Candidates, in rough order of assurance:
-   `cloud KMS / HSM (non-exportable)` › `hardware token (YubiKey)` ›
-   `offline air-gapped signer laptop` › `CI secret in the registry pipeline`
-   (weakest — key touches CI). **No default is assumed here.**
-2. **Publish authorization.** Is a single signature enough, or does a registry
-   publish require **dual control** (two approvers / two keys)?
-3. **Rotation & revocation policy.** Cadence for rotating `key_id`; how a
-   compromised key is retired. With Option A this is "drop the key_id in the next
-   core release" — the operator must accept that release cadence as the revocation
-   latency, or ask for a fetched revocation list (added scope).
-4. **Single org key vs per-publisher keys.** One first-party key today. If
-   third-party publishers are ever allowed, the keyring becomes multi-tenant and
-   Option B (Sigstore) should be reconsidered — an operator direction, not a code
-   default.
-5. **Keyring delivery.** Confirmed-by-default here as **compiled into the core**
-   (offline-native). If the operator wants out-of-band keyring updates without a
-   core release, that is added scope to design.
+1. **Signing-key custody.** The ed25519 private key is held by the project
+   maintainers, outside this repository and outside the container image. It is
+   used only by the registry's publishing tooling, when a maintainer signs a
+   package for release. A contributor never needs it: proposing an integration
+   is a pull request against the registry repository. Custody, and the exact
+   format of the public half, are documented in
+   [`keys/README.md`](../../keys/README.md).
 
-Until (1) is answered, the registry can be built and packages can be *shaped* and
-*validated*, but no production package can be *signed for release*. The example
-`nginx/manifest.yaml` carries a structurally-valid placeholder `value`, not a real
-signature, for exactly this reason.
+   The assurance ladder is worth stating, because the current position is not
+   the top of it: `cloud KMS / HSM (non-exportable)` › `hardware token` ›
+   `offline signer` › `CI secret` (weakest — the key touches CI). Moving up it
+   is a change to publishing tooling, not to the verification path, so it can
+   happen without a core release.
+
+2. **Publish authorization.** A single maintainer signature. Dual control (two
+   approvers, two keys) is not implemented; it would be a change to the registry
+   pipeline, not to this spec.
+
+3. **Rotation and revocation.** Rotating or retiring a `key_id` is a **core
+   release** — the same review gate as anything else that touches a cluster. The
+   procedure, including the overlap window that keeps already-published packages
+   verifying, is in [`keys/README.md`](../../keys/README.md).
+
+   The consequence is explicit: **release cadence is the revocation latency.**
+   A fetched revocation list would shorten it and is deliberately not
+   implemented, because it would put a network dependency inside the one code
+   path that must work with no network.
+
+4. **One key, not per-publisher keys.** There is a single first-party key. The
+   registry is maintainer-published; third-party publishers are not supported.
+   If they ever are, the keyring becomes multi-tenant and a transparency-log
+   approach (Sigstore) should be reconsidered against this one.
+
+5. **Keyring delivery: compiled into the core.** Verification works in a fully
+   egress-less install and cannot be redirected by a compromised registry.
+   Out-of-band keyring updates without a core release are not supported, and
+   that is the trade this option was chosen for.

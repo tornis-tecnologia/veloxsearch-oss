@@ -17,8 +17,8 @@
 //! changed on a live deployment) we additionally best-effort attach/detach.
 
 use crate::recipes::{http, os_base, recipe_index, K8S_INDEX, NGINX_INDEX, RECIPES, SSH_INDEX};
-use anyhow::{bail, Context, Result};
 use crate::scope::Deployment;
+use anyhow::{bail, Context, Result};
 
 /// Single retention policy per deployment; the purpose decides its age limit.
 const POLICY_ID: &str = "velox-retention";
@@ -242,22 +242,35 @@ const SSH_ALIASES: &[(&str, &str)] = &[
 async fn ensure_detectors(deployment: &Deployment) -> Result<()> {
     // nginx access logs → web threat rules, aliased onto the grok'd web fields.
     ensure_detector(
-        deployment, "velox-nginx-threats", "others_web",
-        &format!("{NGINX_INDEX}*"), NGINX_ALIASES,
+        deployment,
+        "velox-nginx-threats",
+        "others_web",
+        &format!("{NGINX_INDEX}*"),
+        NGINX_ALIASES,
     )
     .await?;
     // ssh/auth logs (#7 security source) → linux system-activity/auth rules,
     // aliased onto the parsed auth fields. This is where the SSH brute-force /
     // failed-login rules get fields to fire on.
     ensure_detector(
-        deployment, "velox-ssh-threats", "linux",
-        &format!("{SSH_INDEX}*"), SSH_ALIASES,
+        deployment,
+        "velox-ssh-threats",
+        "linux",
+        &format!("{SSH_INDEX}*"),
+        SSH_ALIASES,
     )
     .await?;
     // Raw container logs: the line stays unparsed in `log`/`message`, so there
     // are no security fields to alias — auto mode. Efficacy here grows only once
     // container lines are parsed; the detector is correct plumbing meanwhile.
-    ensure_detector(deployment, "velox-k8s-threats", "linux", &format!("{K8S_INDEX}*"), &[]).await
+    ensure_detector(
+        deployment,
+        "velox-k8s-threats",
+        "linux",
+        &format!("{K8S_INDEX}*"),
+        &[],
+    )
+    .await
     // NOTE (#8): the k8s-audit source (#7, `k8s-audit-logs`) is intentionally NOT
     // given a detector — SA 3.0.0 has no `kubernetes` log type (research §3a), so
     // no pre-packaged Sigma rules target API-server audit events; forcing `linux`
@@ -367,7 +380,9 @@ async fn ensure_detector(
     // exists the backing config index is absent and the search errors — treat
     // any failure as "not found" and let create be the source of truth.
     let existing_id = match c
-        .post(format!("{base}/_plugins/_security_analytics/detectors/_search"))
+        .post(format!(
+            "{base}/_plugins/_security_analytics/detectors/_search"
+        ))
         .basic_auth(&u, Some(&p))
         .json(&serde_json::json!({
             "query": { "nested": { "path": "detector", "query": {
@@ -387,7 +402,9 @@ async fn ensure_detector(
 
     let resp = match existing_id {
         Some(id) => c
-            .put(format!("{base}/_plugins/_security_analytics/detectors/{id}"))
+            .put(format!(
+                "{base}/_plugins/_security_analytics/detectors/{id}"
+            ))
             .basic_auth(&u, Some(&p))
             .json(&detector)
             .send()
@@ -449,7 +466,10 @@ mod tests {
 
         // hot rotates, then transitions into snapshot.
         let hot = &states[0];
-        assert!(hot["actions"][0].get("rollover").is_some(), "hot must rollover");
+        assert!(
+            hot["actions"][0].get("rollover").is_some(),
+            "hot must rollover"
+        );
         assert_eq!(hot["transitions"][0]["state_name"], "snapshot");
 
         // snapshot backs up to the velox repo, then transitions into delete.
@@ -459,7 +479,10 @@ mod tests {
 
         // delete is terminal and fires at the requested retention age.
         let del = &states[2];
-        assert!(del["actions"][0].get("delete").is_some(), "delete must delete");
+        assert!(
+            del["actions"][0].get("delete").is_some(),
+            "delete must delete"
+        );
         assert!(del["transitions"].as_array().unwrap().is_empty());
         assert_eq!(snap["transitions"][0]["conditions"]["min_index_age"], "30d");
     }
@@ -470,7 +493,10 @@ mod tests {
     fn retention_age_is_the_delete_trigger() {
         let p = retention_policy("90d");
         let states = p["policy"]["states"].as_array().unwrap();
-        assert_eq!(states[1]["transitions"][0]["conditions"]["min_index_age"], "90d");
+        assert_eq!(
+            states[1]["transitions"][0]["conditions"]["min_index_age"],
+            "90d"
+        );
     }
 
     #[test]
@@ -518,7 +544,9 @@ mod tests {
         // field regardless of what else the log type accepts.
         for table in [NGINX_ALIASES, SSH_ALIASES] {
             assert!(
-                table.iter().any(|(a, p)| *a == "timestamp" && *p == "@timestamp"),
+                table
+                    .iter()
+                    .any(|(a, p)| *a == "timestamp" && *p == "@timestamp"),
                 "alias table must keep timestamp→@timestamp"
             );
         }

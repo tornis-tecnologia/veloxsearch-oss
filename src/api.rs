@@ -1039,7 +1039,11 @@ mod server {
             detail: s.detail,
             installing: s.installing,
             error: s.error,
-            missing_packages: s.missing_packages.into_iter().map(missing_package_dto).collect(),
+            missing_packages: s
+                .missing_packages
+                .into_iter()
+                .map(missing_package_dto)
+                .collect(),
         }
     }
 
@@ -1094,12 +1098,13 @@ mod server {
             let t = s.trim().to_string();
             (!t.is_empty()).then_some(t)
         };
-        let replicas = match nodes.trim() {
-            "" => None,
-            n => Some(n.parse::<u32>().map_err(|_| {
-                format!("invalid node count '{n}': use a whole number of nodes")
-            })?),
-        };
+        let replicas =
+            match nodes.trim() {
+                "" => None,
+                n => Some(n.parse::<u32>().map_err(|_| {
+                    format!("invalid node count '{n}': use a whole number of nodes")
+                })?),
+            };
         let mut additional = serde_json::Map::new();
         for line in config.lines() {
             if let Some((k, v)) = line.split_once(':') {
@@ -1201,8 +1206,7 @@ mod server {
         }
         match crate::tenants::authenticate(&req.username, &req.password).await {
             Ok(Some(principal)) => {
-                let token =
-                    crate::auth::make_tenant_token(&principal.email, &principal.tenant_id);
+                let token = crate::auth::make_tenant_token(&principal.email, &principal.tenant_id);
                 return Ok(cookie_response(crate::auth::session_cookie(&token)));
             }
             Ok(None) => {}
@@ -1599,13 +1603,14 @@ mod server {
         let s = crate::k8s::get_deployment(&dep)
             .await
             .map_err(ApiError::internal)?
-            .ok_or_else(|| {
-                ApiError::bad_request(format!("no deployment named '{}'", req.name))
-            })?;
+            .ok_or_else(|| ApiError::bad_request(format!("no deployment named '{}'", req.name)))?;
 
         let mut targets: Vec<UpgradeTarget> = crate::upgrade::targets_for(&s.version)
             .into_iter()
-            .map(|e| UpgradeTarget { version: e.version.to_string(), note: e.note.to_string() })
+            .map(|e| UpgradeTarget {
+                version: e.version.to_string(),
+                note: e.note.to_string(),
+            })
             .collect();
         // The hourly check's find leads the list when it is ahead of everything
         // we ship — it is the version the "Upgrade vX" tag names, so the modal
@@ -1615,7 +1620,10 @@ mod server {
         {
             targets.insert(
                 0,
-                UpgradeTarget { version: s.suggested_version.clone(), note: "latest".into() },
+                UpgradeTarget {
+                    version: s.suggested_version.clone(),
+                    note: "latest".into(),
+                },
             );
         }
         let dashboards_behind =
@@ -1627,10 +1635,17 @@ mod server {
         let blocked_reason = if s.upgrade.in_flight() {
             format!(
                 "an upgrade to {} is already in progress",
-                if s.target_version.is_empty() { "a new version".into() } else { s.target_version.clone() }
+                if s.target_version.is_empty() {
+                    "a new version".into()
+                } else {
+                    s.target_version.clone()
+                }
             )
         } else if s.health != "green" {
-            format!("the cluster is {} — a rolling upgrade needs it green", s.health)
+            format!(
+                "the cluster is {} — a rolling upgrade needs it green",
+                s.health
+            )
         } else if targets.is_empty() && !dashboards_behind {
             format!("{} is the newest version we know of", s.version)
         } else {
@@ -1784,7 +1799,10 @@ mod server {
     /// Resolve the wizard's custom-size inputs into a full profile — 3 nodes,
     /// heap auto-derived as half the memory (ADR-016). Has a body → POST.
     async fn custom_sizing(Json(req): Json<CustomSizingReq>) -> Json<crate::k8s::SizingProfile> {
-        Json(crate::k8s::custom_sizing(Some(&req.memory), Some(&req.disk)))
+        Json(crate::k8s::custom_sizing(
+            Some(&req.memory),
+            Some(&req.disk),
+        ))
     }
 
     // ───────────────────────── handlers: recipes / monitoring ──────────
@@ -1929,10 +1947,7 @@ mod server {
     /// Rolls the Dashboards pod (the operator does), and changes where saved
     /// objects are scoped: on = workspaces, off = the deployment's tenant. The
     /// UI states both consequences before asking.
-    async fn set_next_ui(
-        scope: Scope,
-        Json(req): Json<NextUiReq>,
-    ) -> Result<StatusCode, ApiError> {
+    async fn set_next_ui(scope: Scope, Json(req): Json<NextUiReq>) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
         crate::k8s::set_next_ui(&dep, req.enabled, true)
             .await
@@ -2061,10 +2076,7 @@ mod server {
     /// `velox-metrics-*` index doesn't exist yet) has no series, so an error
     /// degrades to an empty 200 and the SPA shows "still collecting" instead of
     /// surfacing a console error (issue #32 gate).
-    async fn metrics_series(
-        scope: Scope,
-        Json(req): Json<MetricSeriesReq>,
-    ) -> Json<MetricSeries> {
+    async fn metrics_series(scope: Scope, Json(req): Json<MetricSeriesReq>) -> Json<MetricSeries> {
         let window = req.window_minutes.unwrap_or(60);
         let buckets = req.buckets.unwrap_or(60);
         // Same degradation as `node_stats`: unowned reads like not-collecting.
@@ -2093,7 +2105,9 @@ mod server {
             ingress_class: cfg.ingress_class,
             tls_secret: cfg.tls_secret,
             available_classes,
-            default_base_domain: crate::access::default_base_domain().await.unwrap_or_default(),
+            default_base_domain: crate::access::default_base_domain()
+                .await
+                .unwrap_or_default(),
         }))
     }
 
@@ -2481,7 +2495,10 @@ mod server {
             .route(p("/set_next_ui"), post(set_next_ui))
             // -- public per-deployment routes (ADR-053)
             .route(p("/set_ip_allow_list"), post(set_ip_allow_list))
-            .route(p("/reset_admin_password_random"), post(reset_admin_password_random))
+            .route(
+                p("/reset_admin_password_random"),
+                post(reset_admin_password_random),
+            )
             .route(p("/events"), get(sse_events))
     }
 
@@ -2549,4 +2566,6 @@ mod server {
 // Leptos `#[server]` fns in `app.rs` can borrow them until `app.rs` is deleted
 // (#26); `routes`/`sse_events`/`to_dto` are the lasting public surface.
 #[cfg(feature = "ssr")]
-pub use server::{bootstrap_dto, parse_overrides, routes, sse_events, to_dto, Policy, RoutePolicy, ROUTES};
+pub use server::{
+    bootstrap_dto, parse_overrides, routes, sse_events, to_dto, Policy, RoutePolicy, ROUTES,
+};

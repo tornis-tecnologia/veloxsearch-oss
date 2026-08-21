@@ -1,0 +1,54 @@
+name: Log integration request
+description: Ask for a new log-source recipe (nginx, PostgreSQL, Kafka, …)
+labels: ["integration", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Integrations are **signed data packages**, not code: a manifest plus an
+        ingest pipeline, index template, dashboards and a Fluent Bit config.
+        They live in
+        [`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry),
+        and the format is specified in
+        [docs/integrations/](https://github.com/tornis-tecnologia/veloxsearch-oss/tree/main/docs/integrations).
+
+        If you already have the pipeline and dashboards, open a PR there instead
+        of an issue here — it will move much faster.
+
+  - type: input
+    id: source
+    attributes:
+      label: Log source
+      placeholder: "HAProxy 2.8"
+    validations:
+      required: true
+
+  - type: textarea
+    id: format
+    attributes:
+      label: Log format
+      description: A few real (redacted) sample lines, and the format string that produces them if it is configurable.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: shipping
+    attributes:
+      label: How the logs reach the cluster
+      description: Container stdout, a file on the node, syslog, something else?
+    validations:
+      required: true
+
+  - type: textarea
+    id: dashboards
+    attributes:
+      label: What the dashboard should show
+      description: The three or four things an operator actually looks at for this source.
+
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Participation
+      options:
+        - label: I can supply an ingest pipeline or dashboards for this source

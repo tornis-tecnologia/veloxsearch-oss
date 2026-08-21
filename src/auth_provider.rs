@@ -429,7 +429,10 @@ pub fn security_config_files(
     }
     let mut files = BTreeMap::new();
     files.insert("config.yml".into(), security_config_yaml(spec, public_url)?);
-    files.insert("roles_mapping.yml".into(), roles_mapping_yaml(spec, accounts)?);
+    files.insert(
+        "roles_mapping.yml".into(),
+        roles_mapping_yaml(spec, accounts)?,
+    );
     files.insert("internal_users.yml".into(), internal_users_yaml(accounts)?);
     // No custom roles / action groups / tenants: the plugin's static ones cover
     // every role the mapping UI offers. The files must still exist, or

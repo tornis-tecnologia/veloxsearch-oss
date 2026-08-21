@@ -87,7 +87,9 @@ pub fn enabled() -> bool {
 /// Pure flag parse, split out for tests (the `db::flag_on` idiom, #67).
 fn flag_on(v: Option<String>) -> bool {
     matches!(
-        v.as_deref().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+        v.as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
         Some("1" | "true" | "yes" | "on")
     )
 }
@@ -201,7 +203,8 @@ pub async fn signup(
         bail!("self-serve signup is not enabled on this installation");
     }
     let mut pg = crate::db::connect_app().await?;
-    let Some((email, token, tenant)) = signup_on(&mut pg, raw_email, password, display_name).await?
+    let Some((email, token, tenant)) =
+        signup_on(&mut pg, raw_email, password, display_name).await?
     else {
         // Address already registered. Same answer, no mail, no row touched.
         tracing::info!("signup for an address that already exists; answering as accepted");
@@ -304,7 +307,9 @@ async fn create_user_and_tenant(
             Ok(row) => row,
             Err(e) if violates(&e, "tenants_slug_key") || violates(&e, "tenants_namespace_key") => {
                 // Rolls back the user insert too; the next attempt redoes it.
-                tx.rollback().await.context("rolling back a slug collision")?;
+                tx.rollback()
+                    .await
+                    .context("rolling back a slug collision")?;
                 continue;
             }
             Err(e) => return Err(e).context("creating tenant"),
@@ -332,7 +337,14 @@ async fn create_user_and_tenant(
         )
         .await
         .context("seeding tenant quota")?;
-        audit(&tx, Some(&user_id), Some(&tenant_id), "user.signup", Some(&slug)).await?;
+        audit(
+            &tx,
+            Some(&user_id),
+            Some(&tenant_id),
+            "user.signup",
+            Some(&slug),
+        )
+        .await?;
         tx.commit().await.context("committing signup")?;
         tracing::info!(tenant = %slug, "self-serve signup created a tenant");
         return Ok(Some((
@@ -735,7 +747,10 @@ mod tests {
         assert!(namespace_for(&long).len() <= 63);
         let truncated_at_a_hyphen = slugify(&format!("{}-tail", "y".repeat(MAX_SLUG_LEN - 1)));
         let slug = truncated_at_a_hyphen.unwrap();
-        assert!(!slug.ends_with('-'), "truncation left an invalid label: {slug}");
+        assert!(
+            !slug.ends_with('-'),
+            "truncation left an invalid label: {slug}"
+        );
     }
 
     #[test]
@@ -757,9 +772,15 @@ mod tests {
     #[test]
     fn display_name_is_never_blank() {
         assert_eq!(display_name_for("ops@acme.com", Some("Acme")), "Acme");
-        assert_eq!(display_name_for("ops@acme.com", Some("   ")), "ops@acme.com");
+        assert_eq!(
+            display_name_for("ops@acme.com", Some("   ")),
+            "ops@acme.com"
+        );
         assert_eq!(display_name_for("ops@acme.com", None), "ops@acme.com");
-        assert_eq!(display_name_for("ops@acme.com", Some(&"z".repeat(400))).len(), 120);
+        assert_eq!(
+            display_name_for("ops@acme.com", Some(&"z".repeat(400))).len(),
+            120
+        );
     }
 
     #[test]
@@ -768,7 +789,10 @@ mod tests {
         let b = new_token().unwrap();
         assert_eq!(a.len(), TOKEN_LEN);
         assert_ne!(a, b, "tokens must not repeat");
-        assert!(a.chars().all(|c| c.is_ascii_alphanumeric()), "URL-safe only");
+        assert!(
+            a.chars().all(|c| c.is_ascii_alphanumeric()),
+            "URL-safe only"
+        );
         let h = token_hash(&a);
         assert_eq!(h.len(), 64, "sha256 hex");
         assert_ne!(h, a, "the raw token must never be what we store");
@@ -802,7 +826,10 @@ mod tests {
             assert!(!verify_email("whatever").await.unwrap());
             assert!(request_password_reset("ops@acme.com").await.is_ok());
             assert!(!reset_password("whatever", "longenough").await.unwrap());
-            assert!(authenticate("ops@acme.com", "longenough").await.unwrap().is_none());
+            assert!(authenticate("ops@acme.com", "longenough")
+                .await
+                .unwrap()
+                .is_none());
         });
     }
 
@@ -890,7 +917,10 @@ mod tests {
             assert_eq!(t.get::<_, String>(2), "owner");
             assert_eq!(t.get::<_, i32>(3), 1);
             let audited: i64 = pg
-                .query_one("SELECT count(*) FROM audit WHERE action = 'user.signup'", &[])
+                .query_one(
+                    "SELECT count(*) FROM audit WHERE action = 'user.signup'",
+                    &[],
+                )
                 .await
                 .unwrap()
                 .get(0);
@@ -956,11 +986,15 @@ mod tests {
             let mut pg = fresh_db(&url).await;
 
             // 1. Sign up. The raw verification token comes back for delivery.
-            let (email, verify_token, _tenant) =
-                signup_on(&mut pg, " Ops@Acme.com ", "correct horse", Some("Acme Corp"))
-                    .await
-                    .unwrap()
-                    .expect("a fresh address must create an account");
+            let (email, verify_token, _tenant) = signup_on(
+                &mut pg,
+                " Ops@Acme.com ",
+                "correct horse",
+                Some("Acme Corp"),
+            )
+            .await
+            .unwrap()
+            .expect("a fresh address must create an account");
             assert_eq!(email, "ops@acme.com", "the stored identity is normalised");
 
             // 2. Unverified accounts cannot log in yet.
@@ -1076,7 +1110,10 @@ mod tests {
             assert_eq!(rows.len(), 2);
             let slugs: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
             assert_eq!(slugs[0], "acme");
-            assert!(slugs[1].starts_with("acme-"), "expected a suffixed slug, got {slugs:?}");
+            assert!(
+                slugs[1].starts_with("acme-"),
+                "expected a suffixed slug, got {slugs:?}"
+            );
             for r in &rows {
                 let ns: String = r.get(1);
                 assert!(ns.starts_with("velox-t-") && ns.len() <= 63);
@@ -1107,13 +1144,17 @@ mod tests {
             .unwrap();
             let tx = pg.transaction().await.unwrap();
             assert_eq!(
-                consume_token(&tx, "password_reset_tokens", &token).await.unwrap(),
+                consume_token(&tx, "password_reset_tokens", &token)
+                    .await
+                    .unwrap(),
                 None,
                 "an expired link must not work"
             );
             tx.commit().await.unwrap();
             // Issuing the next one sweeps the expired row — no scheduler.
-            issue_token(&pg, "password_reset_tokens", &user_id, 2).await.unwrap();
+            issue_token(&pg, "password_reset_tokens", &user_id, 2)
+                .await
+                .unwrap();
             let live: i64 = pg
                 .query_one("SELECT count(*) FROM password_reset_tokens", &[])
                 .await

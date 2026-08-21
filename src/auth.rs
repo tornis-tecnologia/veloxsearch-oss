@@ -115,7 +115,11 @@ async fn probe() -> Result<AuthState> {
             secret_str(&s, "session_secret"),
         );
         if let (Some(user), Some(hash), Some(session_secret)) = (user, hash, session_secret) {
-            return Ok(AuthState::Managed { user, hash, session_secret });
+            return Ok(AuthState::Managed {
+                user,
+                hash,
+                session_secret,
+            });
         }
         tracing::warn!("managed credentials secret is malformed; ignoring it");
     }
@@ -375,10 +379,7 @@ fn is_tenant_auth_public(path: &str) -> bool {
 /// the SPA uses to discover it IS first-run). Everything else (especially
 /// cluster-mutating APIs) stays sealed until an admin exists.
 fn is_setup(path: &str) -> bool {
-    path == "/setup"
-        || path == "/api/setup_admin"
-        || path == "/api/auth_state"
-        || is_asset(path)
+    path == "/setup" || path == "/api/setup_admin" || path == "/api/auth_state" || is_asset(path)
 }
 
 fn has_valid_session(req: &Request) -> bool {
@@ -460,7 +461,10 @@ mod tests {
         let token = make_tenant_token("ops@acme.com", "tenant-a");
         let forged = token.replace("tenant-a", "tenant-b");
         assert_ne!(forged, token);
-        assert!(parse_token(&forged).is_none(), "a re-tenanted cookie must not verify");
+        assert!(
+            parse_token(&forged).is_none(),
+            "a re-tenanted cookie must not verify"
+        );
         // Same for the user field, and for the signature itself.
         assert!(parse_token(&token.replace("ops@", "root@")).is_none());
         assert!(parse_token(&format!("{token}0")).is_none());
@@ -516,7 +520,10 @@ mod tests {
             "/api/request_password_reset",
             "/api/reset_password",
         ] {
-            assert!(!is_public(path), "{path} must stay sealed with the flag off");
+            assert!(
+                !is_public(path),
+                "{path} must stay sealed with the flag off"
+            );
         }
         // The pre-existing public set is untouched either way.
         assert!(is_public("/api/login"));

@@ -1,0 +1,6 @@
+# Only the Playwright-driven checks need this; smoke_check.py and day2_check.py
+# are stdlib-only by design, so the CI smoke lane installs nothing.
+#
+#   pip install -r tests/requirements.txt
+#   playwright install chromium
+playwright>=1.44

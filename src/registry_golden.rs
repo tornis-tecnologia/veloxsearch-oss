@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! #74 golden gate: the canonical registry packages under
 //! `integrations/<id>/` in the **external veloxsearch-registry repo**
-//! (gitlab.com/tornis-desenvolvimento/veloxsearch-registry — extracted from
+//! (github.com/tornis-tecnologia/veloxsearch-registry — extracted from
 //! this repo's `registry/` tree in #72/#105) are **frozen, byte-equivalent**
 //! extractions of the in-binary recipe catalog (ADR-039 "Tests"). Every
 //! recipe's `pipeline.json` / `index-template.json` / `saved-objects.ndjson` /
@@ -15,8 +15,8 @@
 //! `VELOX_REGISTRY_PATH` env var (the checkout ROOT — the directory holding
 //! `integrations/`). Locally, an unset variable SKIPS with a loud banner (a
 //! dev without a checkout should not redden). **In CI it is a hard failure**
-//! (#108): `test:registry-gates` clones the registry repo's `main` with the
-//! job token, so a missing variable there means the lane lost its checkout
+//! (#108): the CI job clones the registry repo's `main` (it is public, so no
+//! credentials), so a missing variable there means the lane lost its checkout
 //! and would otherwise go green while proving nothing. The resolved path and
 //! package count are printed once so a hollow green is visible in the log.
 //!
@@ -45,8 +45,8 @@ fn to_stderr(msg: &str) {
     let _ = std::io::stderr().write_all(msg.as_bytes());
 }
 
-/// Are we running inside CI? GitLab sets `CI=true` on every job (as do GitHub
-/// Actions and most others). An empty/`0`/`false` value counts as "not CI", so
+/// Are we running inside CI? GitHub Actions sets `CI=true` on every job (as do
+/// most other runners). An empty/`0`/`false` value counts as "not CI", so
 /// a dev who inherited the variable can still get the local skip.
 fn in_ci() -> bool {
     std::env::var("CI").is_ok_and(|v| !matches!(v.trim(), "" | "0" | "false" | "False" | "FALSE"))
@@ -74,18 +74,18 @@ pub(crate) fn registry_root() -> Option<PathBuf> {
                 !in_ci(),
                 "registry gate: VELOX_REGISTRY_PATH is unset (or empty) while CI is set — \
                  this is a HARD FAILURE, never a skip (#108). A CI lane without the registry \
-                 checkout proves nothing, so it must not go green. The test:registry-gates job \
-                 clones gitlab.com/tornis-desenvolvimento/veloxsearch-registry into \
-                 $VELOX_REGISTRY_PATH before running the tests — restore that clone (or the \
-                 variable) instead of skipping."
+                 checkout proves nothing, so it must not go green. The CI job clones \
+                 github.com/tornis-tecnologia/veloxsearch-registry into $VELOX_REGISTRY_PATH \
+                 before running the tests — restore that clone (or the variable) instead of \
+                 skipping."
             );
             to_stderr(
                 "\n==============================================================\n\
                  SKIPPED registry gate: VELOX_REGISTRY_PATH is not set.\n\
                  The canonical packages live in the external registry repo\n\
-                 (gitlab.com/tornis-desenvolvimento/veloxsearch-registry, #105).\n\
+                 (github.com/tornis-tecnologia/veloxsearch-registry, #105).\n\
                  To run the gates locally:\n\
-                 git clone git@gitlab.com:tornis-desenvolvimento/veloxsearch-registry.git\n\
+                 git clone https://github.com/tornis-tecnologia/veloxsearch-registry.git\n\
                  VELOX_REGISTRY_PATH=/path/to/veloxsearch-registry cargo test\n\
                  In CI this is a hard failure, not a skip (#108).\n\
                  ==============================================================\n",
@@ -256,7 +256,10 @@ fn pipeline_and_template_are_frozen_rust_output() {
             continue;
         };
         let vars = test_vars(recipe);
-        for (file, want) in [("pipeline.json", pipeline), ("index-template.json", template)] {
+        for (file, want) in [
+            ("pipeline.json", pipeline),
+            ("index-template.json", template),
+        ] {
             let raw = read(&dir, recipe, file);
             let rendered = integrations::render(&raw, &vars)
                 .unwrap_or_else(|e| panic!("{recipe}/{file}: {e}"));

@@ -233,7 +233,10 @@ fn ldap_tls_config(extra_ca: &str) -> anyhow::Result<std::sync::Arc<rustls::Clie
     let pem = extra_ca.trim();
     if !pem.is_empty() {
         let mut added = 0usize;
-        for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
+        // `PemObject` is the maintained home of the parser `rustls-pemfile`
+        // used to wrap (RUSTSEC-2025-0134); same bytes, same iteration.
+        use rustls_pki_types::pem::PemObject;
+        for cert in rustls_pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
             roots
                 .add(cert.context("the CA certificate is not valid PEM")?)
                 .context("the CA certificate could not be added to the trust store")?;
@@ -316,7 +319,10 @@ async fn probe_ldap(c: &crate::auth_provider::LdapConfig) -> ProbeResult {
         Ok(_) => checks.push(format!("bind OK as {}", c.bind_dn.trim())),
         Err(e) => {
             let _ = ldap.unbind().await;
-            return ProbeResult::fail(checks, format!("bind as '{}' failed: {e}", c.bind_dn.trim()));
+            return ProbeResult::fail(
+                checks,
+                format!("bind as '{}' failed: {e}", c.bind_dn.trim()),
+            );
         }
     }
 
@@ -344,7 +350,10 @@ async fn probe_ldap(c: &crate::auth_provider::LdapConfig) -> ProbeResult {
             let _ = ldap.unbind().await;
             return ProbeResult::fail(
                 checks,
-                format!("user search {user_filter} under '{}' failed: {e}", c.userbase.trim()),
+                format!(
+                    "user search {user_filter} under '{}' failed: {e}",
+                    c.userbase.trim()
+                ),
             );
         }
     };
@@ -425,7 +434,10 @@ async fn probe_ldap(c: &crate::auth_provider::LdapConfig) -> ProbeResult {
                 let _ = ldap.unbind().await;
                 return ProbeResult::fail(
                     checks,
-                    format!("group search {role_filter} under '{}' failed: {e}", c.rolebase.trim()),
+                    format!(
+                        "group search {role_filter} under '{}' failed: {e}",
+                        c.rolebase.trim()
+                    ),
                 );
             }
         }
@@ -443,7 +455,11 @@ async fn probe_ldap(c: &crate::auth_provider::LdapConfig) -> ProbeResult {
         {
             Ok((rs, _)) if !rs.is_empty() => {
                 let e = SearchEntry::construct(rs[0].clone());
-                let groups = e.attrs.get(c.userrolename.trim()).cloned().unwrap_or_default();
+                let groups = e
+                    .attrs
+                    .get(c.userrolename.trim())
+                    .cloned()
+                    .unwrap_or_default();
                 checks.push(format!(
                     "{} groups on the sample user's '{}' attribute",
                     groups.len(),
@@ -532,7 +548,11 @@ mod tests {
             role_mappings: vec![],
         })
         .await;
-        assert!(!r.ok, "a non-LDAP socket must not probe green: {:?}", r.checks);
+        assert!(
+            !r.ok,
+            "a non-LDAP socket must not probe green: {:?}",
+            r.checks
+        );
         // Reachability is still reported — it is a real, useful check — but it
         // is no longer the verdict.
         assert!(r.checks.iter().any(|c| c.contains(&addr)));
@@ -549,7 +569,9 @@ mod tests {
 
     #[test]
     fn a_bad_ldap_ca_paste_is_a_clear_error_not_a_panic() {
-        let e = ldap_tls_config("not a certificate").unwrap_err().to_string();
+        let e = ldap_tls_config("not a certificate")
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("not valid PEM"), "{e}");
     }
 

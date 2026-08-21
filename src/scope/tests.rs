@@ -13,9 +13,9 @@
 //!     `&Deployment`, `Deployment` has no constructor outside `scope.rs`, and
 //!     the only producers are `Scope::adopt` (behind `resolve`/`require`) and
 //!     `Scope::claim` (create only). A handler that skipped the check would
-//!     have nothing to pass, so it would not compile. `tests/route_scoping.rs`
-//!     pins the complementary half: no route can even be *mounted* without a
-//!     declared policy.
+//!     have nothing to pass, so it would not compile. The mount-time gate in
+//!     `api::routes` (the `p()` helper) pins the complementary half: no route
+//!     can even be *mounted* without a declared policy.
 //!  2. **The decision refuses cross-tenant access** — proved here, table-driven
 //!     over `api::ROUTES`, so a route added to the tenant-scoped set is covered
 //!     the moment it is declared.
@@ -61,7 +61,7 @@ fn legacy_cluster() -> LocatedCluster {
 
 /// Every route that names a deployment, straight from the audit table — so a
 /// new tenant-scoped route joins this test by being declared, and cannot be
-/// added without a declaration at all (see `tests/route_scoping.rs`).
+/// added without a declaration at all (the mount-time gate in `api::routes`).
 fn tenant_scoped_routes() -> Vec<&'static str> {
     ROUTES
         .iter()
@@ -94,7 +94,9 @@ fn account_b_is_refused_account_as_deployment_on_every_tenant_scoped_route() {
         // ...and the same route resolves fine for its actual owner, so the
         // refusal above is ownership and not a blanket failure.
         assert!(
-            scope_a().adopt("acme-logs-x1z9", a_deployment.clone()).is_some(),
+            scope_a()
+                .adopt("acme-logs-x1z9", a_deployment.clone())
+                .is_some(),
             "{route}: account A must still reach its own deployment",
         );
     }
@@ -149,7 +151,7 @@ fn no_label_value_lets_a_tenant_match_another_tenants_cr() {
 /// this is the ONLY scope that exists on `develop` today. It must behave
 /// exactly like the single-admin app: the app namespace, no label selector,
 /// and every deployment — including the unlabeled ones that already exist on
-/// Tornis prod — still reachable.
+/// An existing production namespace — still reachable.
 #[test]
 fn admin_scope_is_the_pre_80_behaviour() {
     assert!(!crate::tenants::enabled(), "flag must default to OFF");
@@ -164,7 +166,10 @@ fn admin_scope_is_the_pre_80_behaviour() {
          byte-identical to the one that shipped before #80",
     );
     assert!(admin.owns(&BTreeMap::new()), "legacy CRs stay visible");
-    assert!(admin.owns(&cluster_of(TENANT_A, NS_A).labels), "and so do tenants'");
+    assert!(
+        admin.owns(&cluster_of(TENANT_A, NS_A).labels),
+        "and so do tenants'"
+    );
     assert!(admin.require_admin().is_ok());
 }
 
@@ -176,7 +181,11 @@ fn admin_adopts_any_deployment_and_keeps_its_owner() {
     let dep = Scope::Admin
         .adopt("acme-logs-x1z9", cluster_of(TENANT_A, NS_A))
         .expect("admin sees everything");
-    assert_eq!(dep.namespace(), NS_A, "acts in the object's namespace, not ours");
+    assert_eq!(
+        dep.namespace(),
+        NS_A,
+        "acts in the object's namespace, not ours"
+    );
     assert_eq!(dep.tenant(), Some(TENANT_A));
 
     let legacy = Scope::Admin
@@ -273,7 +282,10 @@ fn a_v1_session_resolves_to_admin_without_a_datastore() {
         user: "admin".to_string(),
         tenant: None,
     };
-    assert_eq!(rt.block_on(Scope::from_session(&session)).unwrap(), Scope::Admin);
+    assert_eq!(
+        rt.block_on(Scope::from_session(&session)).unwrap(),
+        Scope::Admin
+    );
 }
 
 /// A v2 session for a tenant that cannot be resolved must NOT widen into the

@@ -6,8 +6,10 @@ async fn main() {
     use axum::Router;
     use tower_http::services::{ServeDir, ServeFile};
 
-    // kube-rs uses rustls; with both aws-lc-rs and ring in the tree, rustls
-    // can't auto-pick a provider — install one explicitly before any TLS use.
+    // Install the process-wide rustls provider before any TLS use. Required,
+    // not defensive: reqwest is built on the `-no-provider` rustls feature
+    // precisely so ring is not linked as a second provider, which leaves
+    // installing one the caller's job (see the reqwest note in Cargo.toml).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     tracing_subscriber::fmt()
@@ -29,10 +31,14 @@ async fn main() {
             std::process::exit(1);
         }
     } else {
-        tracing::info!("control-plane postgres disabled (VELOX_PG_ENABLED unset; ADR-041 bring-up flag)");
+        tracing::info!(
+            "control-plane postgres disabled (VELOX_PG_ENABLED unset; ADR-041 bring-up flag)"
+        );
         tokio::spawn(async {
             if let Err(e) = veloxsearch::db::ensure_pg_secret_best_effort().await {
-                tracing::warn!("could not ensure postgres credentials Secret (harmless off-cluster): {e:#}");
+                tracing::warn!(
+                    "could not ensure postgres credentials Secret (harmless off-cluster): {e:#}"
+                );
             }
         });
     }
@@ -41,7 +47,8 @@ async fn main() {
     // index.html so the client-side router owns navigation (/login, /setup,
     // /d/:name, …). Built by the frontend; the dir is overridable for deploys.
     let static_dir = std::env::var("VELOX_STATIC_DIR").unwrap_or_else(|_| "dist".to_string());
-    let spa = ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html")));
+    let spa =
+        ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html")));
 
     let app = Router::new()
         .nest("/api", veloxsearch::api::routes())

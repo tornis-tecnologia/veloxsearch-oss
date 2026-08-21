@@ -67,8 +67,8 @@ teardown:
 # ed25519 signature over the canonical package digest (see ../signing.md).
 # NOTE: the `value` below is an illustrative, structurally-valid placeholder
 # (64 zero-through-63 bytes, base64) — NOT a real signature. The real value is
-# produced by the registry publish step against the operator-held signing key
-# (custody is an open OPERATOR DECISION — see signing.md).
+# produced by the registry publish step against the maintainer-held signing key
+# (custody and rotation: keys/README.md).
 signature:
   algorithm: ed25519
   key_id: velox-registry-2026

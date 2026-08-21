@@ -1,5 +1,10 @@
 # VeloxSearch
 
+[![CI](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+
+*[Leia em português](README.pt-BR.md)*
+
 **Turns a bare Kubernetes cluster into a managed OpenSearch platform.** A Rust
 control plane and React UI that install OpenSearch, keep it running, and give
 you a wizard instead of a folder of YAML.
@@ -38,7 +43,7 @@ credential rotation, per-tenant isolation.
   quay.io and cr.fluentbit.io
 
 Read [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) before anything else, and
-[`docs/DECISIONS.md`](docs/DECISIONS.md) if you want to know whether the
+[`docs/adr/README.md`](docs/adr/README.md) if you want to know whether the
 narrowness is principled or accidental. The first is
 the honest contract: eight numbered requirements, what each probe checks, and
 exactly what the app says when your cluster fails one. A cluster outside the
@@ -141,9 +146,14 @@ is gated, and the namespace model — are specified in
 | | |
 |---|---|
 | [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) | The platform contract: R1–R8, probes, refusal messages, tested platforms. **Start here.** |
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | 53 ADRs — every significant decision, why it was made, and what was rejected. If you want to know whether the narrow requirements envelope is principled or accidental, read this |
 | [`docs/INSTALL.md`](docs/INSTALL.md) | Per-platform install, access modes, teardown |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the control plane is put together, and the two conventions that are load-bearing |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | The local loop, and how to run the tests that need Postgres or a registry checkout |
+| [`docs/DEPLOY.md`](docs/DEPLOY.md) | Building and publishing a release; air-gapped side-loading |
+| [`docs/SECRETS.md`](docs/SECRETS.md) | Every secret the control plane reads or creates, and how to rotate it |
 | [`docs/PREMISES.md`](docs/PREMISES.md) | The self-managing behaviours and the permissions each needs |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | What is planned, what is open, and what is deliberately not being done |
+| [`docs/adr/README.md`](docs/adr/README.md) | What each of the ADR numbers cited throughout the source decided |
 | [`docs/integrations/`](docs/integrations/) | Integration-package format: manifest schema, interpolation, signing |
 | `tests/*_check.py` | Executable acceptance checks — smoke, first-run, day-2, full journey, and a Playwright browser gate |
 
@@ -168,18 +178,25 @@ limited real-world exercise.
 
 ---
 
-## This repository is a publish-only export
+## Contributing
 
-Development happens on GitLab
-(`gitlab.com/tornis-desenvolvimento/veloxsearch`), which is the source of truth.
-This GitHub repository receives one-way snapshot exports: each commit here is a
-fresh snapshot of the source tree at the SHA named in its commit message.
+Contributions are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) — it
+covers the local setup, the DCO sign-off every commit needs, and the two
+conventions this codebase holds to that are not obvious from the outside:
+ownership is enforced by the type system rather than by checks, and the modules
+that decide things deliberately make no cluster calls.
 
-No development history is carried over, issues and pull requests here are not
-the development workflow, and **force-pushes to `main` are expected** — the
-repository holds exactly one commit at any time. The export is rebuilt from an
-explicit allowlist and gated by a secret scan and a client-identifier scan on
-every publish.
+Three places to start that need no Rust:
+
+- Issues labelled [`good first issue`](https://github.com/tornis-tecnologia/veloxsearch-oss/labels/good%20first%20issue)
+- **New log integrations** — an integration is a signed *data* package, not
+  code. They live in
+  [`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry)
+- **Translations** — every UI string is in `frontend/i18n.jsx`
+
+Please read [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) before participating, and
+[`SECURITY.md`](SECURITY.md) before reporting anything security-relevant —
+vulnerabilities go through private advisories, never public issues.
 
 ## License
 
@@ -207,6 +224,6 @@ yourself:
 cargo install cargo-deny && cargo deny check licenses
 ```
 
-**Contributions** cannot be accepted through this repository — it is a
-publish-only export with no development history, and inbound licensing terms are
-not settled. Bug reports are welcome; patches will need somewhere else to land.
+Inbound contributions are accepted under the same licence, certified by a
+[DCO](https://developercertificate.org/) sign-off on each commit rather than a
+CLA. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
