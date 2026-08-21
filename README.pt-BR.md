@@ -3,7 +3,7 @@
 [![CI](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml)
 [![Licença: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-*[Read in English](README.md)*
+*[Read in English](README.md) · [Leer en español](README.es.md)*
 
 **Transforma um cluster Kubernetes cru em uma plataforma OpenSearch gerenciada.**
 Um control plane em Rust e uma interface React que instalam o OpenSearch, mantêm
@@ -86,10 +86,17 @@ Tabela completa, com sondas e mensagens de falha: [`docs/REQUIREMENTS.md`](docs/
 ## Experimente
 
 ```bash
-kubectl apply -f deploy/install.yaml
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # abra http://localhost:3000 — crie a conta de admin, e o app assume dali
 ```
+
+Essa URL é um **artefato de release**, não um branch: a imagem dentro dela está
+fixada por digest, então o que você aplica hoje é o que você recebe se aplicar de
+novo mês que vem. `releases/latest/` acompanha o release mais novo; para fixar
+uma versão, use `releases/download/v0.7.1/install.yaml`. Aplicar o
+`deploy/install.yaml` do `main` te dá o que estiver no HEAD naquele instante —
+serve para desenvolvimento, não para um cluster que importa.
 
 Um arquivo, sem credencial de registry — a imagem é
 [`tornistecnologia/veloxsearch-oss`](https://hub.docker.com/r/tornistecnologia/veloxsearch-oss),

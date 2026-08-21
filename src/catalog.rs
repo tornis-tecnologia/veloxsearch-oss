@@ -577,6 +577,74 @@ pub fn verify_package(manifest_yaml: &str, assets: &BTreeMap<String, Vec<u8>>) -
         })
 }
 
+/// Sign a package with the registry's private key, returning the base64 value
+/// the manifest's `signature.value` carries.
+///
+/// Deliberately adjacent to [`verify_package`]: the one property that must hold
+/// is that both sides derive the same bytes from [`package_digest`], and
+/// keeping them in the same screenful is what makes a drift between them
+/// visible in review rather than at install time.
+///
+/// The key is PKCS#8 PEM — what `openssl genpkey -algorithm ed25519` emits, and
+/// what `keys/README.md` documents. `aws-lc-rs` is already the process-wide
+/// rustls provider, so this adds no crypto stack (and `ring` stays banned; see
+/// `deny.toml`).
+///
+/// This function does NOT touch the manifest. The caller writes the returned
+/// value back and re-verifies — see `velox sign`, which refuses to write a
+/// signature that does not verify.
+pub fn sign_package(
+    manifest_yaml: &str,
+    assets: &BTreeMap<String, Vec<u8>>,
+    key_pem: &str,
+) -> Result<String> {
+    use rustls_pki_types::pem::PemObject;
+
+    let key = rustls_pki_types::PrivatePkcs8KeyDer::from_pem_slice(key_pem.as_bytes())
+        .context("the signing key is not a PKCS#8 PEM private key")?;
+    let pair = aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(key.secret_pkcs8_der())
+        .map_err(|_| anyhow::anyhow!("the signing key is not a usable ed25519 key"))?;
+
+    let digest = package_digest(manifest_yaml, assets)?;
+    let sig = pair.sign(&digest);
+    Ok(base64::engine::general_purpose::STANDARD.encode(sig.as_ref()))
+}
+
+/// Replace a manifest's `signature.value` with `value`, in place, **by line**.
+///
+/// Not a YAML round-trip, on purpose. Manifests carry hand-written comments
+/// explaining every field, and re-serializing would erase them — and the
+/// manifest bytes are themselves an input to [`package_digest`], so rewriting
+/// the file wholesale would invalidate the very signature being written.
+///
+/// Safe by construction: `package_digest` removes the `signature` key before
+/// hashing, so changing `value` cannot change the digest.
+pub fn replace_signature_value(manifest_yaml: &str, value: &str) -> Result<String> {
+    let mut out = String::with_capacity(manifest_yaml.len());
+    let mut replaced = 0usize;
+    for line in manifest_yaml.lines() {
+        // The `value:` of the signature block is the only two-space-indented
+        // `value:` a manifest has (the schema puts nothing else at that depth).
+        if let Some(indent) = line.strip_suffix(line.trim_start()) {
+            if line.trim_start().starts_with("value:") && indent == "  " {
+                out.push_str(indent);
+                out.push_str("value: ");
+                out.push_str(value);
+                out.push('\n');
+                replaced += 1;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    match replaced {
+        1 => Ok(out),
+        0 => bail!("manifest.yaml has no `signature.value` line to replace"),
+        n => bail!("manifest.yaml has {n} candidate `value:` lines; refusing to guess"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cache — staleness-tolerant, never a failure
 // ---------------------------------------------------------------------------
@@ -1112,6 +1180,162 @@ mod tests {
             .map(|(_, k)| *k)
             .unwrap();
         assert_eq!(on_disk.trim(), compiled.trim(), "vendored key drifted");
+    }
+
+    // ── signing ─────────────────────────────────────────────────────────
+
+    /// A throwaway key pair, generated per test so nothing here depends on the
+    /// real signing key ever being present. Returns (PKCS#8 PEM, public base64
+    /// in the form `keys/*.pub` carries).
+    fn throwaway_key() -> (String, String) {
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let pkcs8 = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pem = format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref())
+        );
+        let pair = aws_lc_rs::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public = base64::engine::general_purpose::STANDARD
+            .encode(aws_lc_rs::signature::KeyPair::public_key(&pair).as_ref());
+        (pem, public)
+    }
+
+    /// A tiny package, so the signing tests need no registry checkout.
+    fn toy_package(sig_value: &str) -> (String, BTreeMap<String, Vec<u8>>) {
+        let manifest = format!(
+            "# a comment that a YAML round-trip would destroy\n\
+             schema_version: \"1.0\"\n\
+             id: toy\n\
+             signature:\n  \
+             algorithm: ed25519\n  \
+             key_id: velox-registry-2026\n  \
+             value: {sig_value}\n"
+        );
+        let mut assets = BTreeMap::new();
+        assets.insert("a.json".to_string(), b"{}".to_vec());
+        (manifest, assets)
+    }
+
+    /// Sign then verify: the round trip closes with the real keyring path.
+    #[test]
+    fn a_signature_this_code_produces_is_one_this_code_accepts() {
+        let (key_pem, public_b64) = throwaway_key();
+        let (manifest, assets) = toy_package("PLACEHOLDER");
+        let value = sign_package(&manifest, &assets, &key_pem).unwrap();
+        let signed = replace_signature_value(&manifest, &value).unwrap();
+
+        // verify_package checks the compiled-in keyring, which does not hold a
+        // throwaway key — so assert the crypto directly, the same way it does.
+        let digest = package_digest(&signed, &assets).unwrap();
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(&public_b64)
+            .unwrap();
+        aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, &key)
+            .verify(
+                &digest,
+                &base64::engine::general_purpose::STANDARD
+                    .decode(&value)
+                    .unwrap(),
+            )
+            .expect("a freshly signed package must verify");
+    }
+
+    /// Writing the signature does not change what was signed. This is the
+    /// property that lets `velox sign` rewrite the file it just hashed.
+    #[test]
+    fn writing_the_signature_does_not_change_the_digest() {
+        let (manifest, assets) = toy_package("PLACEHOLDER");
+        let before = package_digest(&manifest, &assets).unwrap();
+        let rewritten = replace_signature_value(&manifest, "SOMETHINGELSE").unwrap();
+        let after = package_digest(&rewritten, &assets).unwrap();
+        assert_eq!(before, after, "the digest must ignore the signature block");
+    }
+
+    /// The comments are the documentation; a signer that eats them is a signer
+    /// nobody will use twice.
+    #[test]
+    fn writing_the_signature_preserves_comments_and_every_other_line() {
+        let (manifest, _) = toy_package("PLACEHOLDER");
+        let rewritten = replace_signature_value(&manifest, "NEW").unwrap();
+        assert!(rewritten.contains("# a comment that a YAML round-trip would destroy"));
+        assert!(rewritten.contains("key_id: velox-registry-2026"));
+        assert!(rewritten.contains("  value: NEW"));
+        assert!(!rewritten.contains("PLACEHOLDER"));
+        assert_eq!(manifest.lines().count(), rewritten.lines().count());
+    }
+
+    /// Refuse rather than guess: a manifest without exactly one signature value
+    /// is a manifest this tool does not understand.
+    #[test]
+    fn a_manifest_with_no_signature_value_is_refused() {
+        let err = replace_signature_value("id: toy\n", "X").unwrap_err();
+        assert!(err.to_string().contains("no `signature.value`"), "{err:#}");
+    }
+
+    /// A key that is not a key fails with a message that says so, not a panic.
+    #[test]
+    fn a_bad_signing_key_is_a_clear_error() {
+        let (manifest, assets) = toy_package("PLACEHOLDER");
+        let err = sign_package(&manifest, &assets, "not a key").unwrap_err();
+        assert!(err.to_string().contains("PKCS#8 PEM"), "{err:#}");
+    }
+
+    /// Signing with the wrong key produces a package the core rejects as
+    /// TAMPERED — the keyring is what decides, not the signer.
+    #[test]
+    fn a_package_signed_by_a_foreign_key_is_rejected() {
+        let (key_pem, _) = throwaway_key();
+        let (manifest, assets) = toy_package("PLACEHOLDER");
+        let value = sign_package(&manifest, &assets, &key_pem).unwrap();
+        let signed = replace_signature_value(&manifest, &value).unwrap();
+        let err = verify_package(&signed, &assets).unwrap_err();
+        assert!(err.to_string().contains("TAMPERED"), "unhelpful: {err:#}");
+    }
+
+    /// THE regression test for this whole feature: re-signing a package that
+    /// is already published must reproduce its signature byte for byte.
+    /// ed25519 is deterministic, so a mismatch means the digest changed — which
+    /// would silently invalidate every package already in the wild.
+    ///
+    /// Needs both the registry checkout and the private key, so it is opt-in.
+    ///
+    /// Skips — never fails — when the key is absent, including in CI. That is
+    /// the opposite of the registry gate's rule (`registry_golden`, #108),
+    /// deliberately: a CI lane can and does clone the registry, but the signing
+    /// key is not in CI and is never going to be (`keys/README.md`). A test
+    /// that demanded it would only ever be a broken lane. This one runs where
+    /// it is meaningful — on the machine that actually signs.
+    #[test]
+    #[ignore = "needs the registry checkout and the private key (set VELOX_SIGNING_KEY_FILE)"]
+    fn re_signing_a_published_package_reproduces_its_signature() {
+        let Some(root) = checkout() else { return };
+        let Ok(key_file) = std::env::var("VELOX_SIGNING_KEY_FILE") else {
+            crate::registry_golden::to_stderr(
+                "\n==============================================================\n\
+                 SKIPPED re-signing gate: VELOX_SIGNING_KEY_FILE is not set.\n\
+                 The signing key is not in CI and never will be; run this where\n\
+                 you actually sign:\n\
+                 VELOX_REGISTRY_PATH=… VELOX_SIGNING_KEY_FILE=… \\\n\
+                 cargo test -- --ignored re_signing\n\
+                 ==============================================================\n",
+            );
+            return;
+        };
+        let key_pem = std::fs::read_to_string(&key_file)
+            .unwrap_or_else(|e| panic!("reading the signing key from {key_file}: {e}"));
+
+        for id in ["nginx", "kubernetes", "kafka"] {
+            let dir = root.join("integrations").join(id);
+            let pkg = FetchedPackage::load_from_dir(&dir).expect(id);
+            let published: SignedManifest = serde_yaml::from_str(&pkg.manifest_yaml).unwrap();
+            let want = published.signature.expect(id).value;
+            let got = sign_package(&pkg.manifest_yaml, &pkg.assets, &key_pem).unwrap();
+            assert_eq!(
+                want.trim(),
+                got,
+                "{id}: re-signing did not reproduce the published signature"
+            );
+        }
     }
 
     // ── catalog parsing + fetch ─────────────────────────────────────────

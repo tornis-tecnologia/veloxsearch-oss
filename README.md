@@ -3,7 +3,7 @@
 [![CI](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 
-*[Leia em português](README.pt-BR.md)*
+*[Leia em português](README.pt-BR.md) · [Leer en español](README.es.md)*
 
 **Turns a bare Kubernetes cluster into a managed OpenSearch platform.** A Rust
 control plane and React UI that install OpenSearch, keep it running, and give
@@ -86,10 +86,17 @@ Full table with probes and failure messages: [`docs/REQUIREMENTS.md`](docs/REQUI
 ## Try it
 
 ```bash
-kubectl apply -f deploy/install.yaml
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # open http://localhost:3000 — create the admin account, and the app takes over
 ```
+
+That URL is a **release artifact**, not a branch: the image in it is pinned to a
+digest, so what you apply today is what you get if you apply it again next
+month. `releases/latest/` follows the newest release; pin a version with
+`releases/download/v0.7.1/install.yaml`. Applying `deploy/install.yaml` from
+`main` instead gives you whatever is on HEAD at that moment — fine for
+development, wrong for a cluster you care about.
 
 One file, no registry credentials — the image is
 [`tornistecnologia/veloxsearch-oss`](https://hub.docker.com/r/tornistecnologia/veloxsearch-oss),

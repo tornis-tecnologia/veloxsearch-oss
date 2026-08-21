@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! `velox` — the VeloxSearch operator CLI (ADR-001 option C).
 //!
-//! Today it has one subcommand, `init`: a one-command bootstrap that installs
+//! Three subcommands. `init` is the bootstrap; `sign` and `verify` are the
+//! integration-package tools (ADR-039) — `sign` is how a maintainer publishes a
+//! package to the registry, and `verify` is what a contributor and CI run to
+//! check one. The signing key is never in this repository, never in the image
+//! and never in CI (`keys/README.md`); `sign` reads it from a file or stdin.
+//!
+//! `init` is a one-command bootstrap that installs
 //! VeloxSearch onto the operator's *current kubeconfig context*. It applies the
 //! generic single-file manifest (`deploy/install.yaml`, ADR-027) with
 //! server-side apply, waits for the Deployment to become ready, then prints the
@@ -63,10 +69,20 @@ mod imp {
 velox — VeloxSearch operator CLI
 
 USAGE:
-    velox init [OPTIONS]
+    velox init   [OPTIONS]
+    velox sign   <PACKAGE_DIR> --key <FILE|->
+    velox verify <PACKAGE_DIR>
 
 COMMANDS:
     init        Install VeloxSearch onto the current kubeconfig context
+    sign        Sign an integration package, in place (maintainers only)
+    verify      Check an integration package against the compiled-in keyring
+
+OPTIONS (sign):
+    --key <FILE|->             PKCS#8 PEM ed25519 private key. `-` reads stdin,
+                               so the key need never touch disk. Signing writes
+                               only the manifest's `signature.value` line, and
+                               refuses to write a signature that does not verify.
 
 OPTIONS (init):
     --pull-token <TOKEN>       Registry password/token. When given, velox creates
@@ -112,6 +128,8 @@ OPTIONS (init):
         let args: Vec<String> = std::env::args().skip(1).collect();
         match args.first().map(String::as_str) {
             Some("init") => init(&args[1..]),
+            Some("sign") => sign(&args[1..]),
+            Some("verify") => verify(&args[1..]),
             Some("-h") | Some("--help") | None => {
                 print!("{USAGE}");
                 0
@@ -122,6 +140,113 @@ OPTIONS (init):
                 2
             }
         }
+    }
+
+    // ── integration packages (ADR-039) ──────────────────────────────────
+
+    /// Load a package directory the way the registry client loads a fetched
+    /// one: the manifest, plus exactly the assets the manifest names. Reusing
+    /// the same loader is the point — a directory this accepts is a package the
+    /// core would accept over the wire, filename validation included.
+    fn load_package(
+        dir: &std::path::Path,
+    ) -> Result<(String, std::collections::BTreeMap<String, Vec<u8>>)> {
+        let pkg = veloxsearch::catalog::FetchedPackage::load_from_dir(dir)
+            .with_context(|| format!("loading the package in {}", dir.display()))?;
+        Ok((pkg.manifest_yaml, pkg.assets))
+    }
+
+    fn verify(args: &[String]) -> i32 {
+        let Some(dir) = args.first().filter(|a| !a.starts_with('-')) else {
+            eprintln!("velox verify: expected a package directory\n");
+            print!("{USAGE}");
+            return 2;
+        };
+        let dir = std::path::Path::new(dir);
+        let r = load_package(dir)
+            .and_then(|(m, a)| veloxsearch::catalog::verify_package(&m, &a).map(|_| ()));
+        match r {
+            Ok(()) => {
+                println!("{}: signature OK", dir.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("{}: {e:#}", dir.display());
+                1
+            }
+        }
+    }
+
+    fn sign(args: &[String]) -> i32 {
+        let mut dir: Option<&String> = None;
+        let mut key_src: Option<String> = None;
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--key" => match it.next() {
+                    Some(v) if !v.is_empty() => key_src = Some(v.clone()),
+                    _ => {
+                        eprintln!("velox sign: --key needs a value\n");
+                        return 2;
+                    }
+                },
+                "-h" | "--help" => {
+                    print!("{USAGE}");
+                    return 0;
+                }
+                other if other.starts_with('-') => {
+                    eprintln!("velox sign: unknown option '{other}'\n");
+                    return 2;
+                }
+                _ => dir = Some(a),
+            }
+        }
+        let (Some(dir), Some(key_src)) = (dir, key_src) else {
+            eprintln!("velox sign: expected a package directory and --key\n");
+            print!("{USAGE}");
+            return 2;
+        };
+
+        match sign_in_place(std::path::Path::new(dir), &key_src) {
+            Ok(()) => {
+                println!("{dir}: signed and verified");
+                0
+            }
+            Err(e) => {
+                eprintln!("velox sign: {e:#}");
+                1
+            }
+        }
+    }
+
+    /// Sign, **verify the result**, and only then write.
+    ///
+    /// The verify-before-write order is the whole safety property: a signature
+    /// that does not check out never reaches the disk, so a half-signed package
+    /// cannot be committed by accident. Only the manifest's `value:` line
+    /// changes — the digest deliberately ignores the signature block, so
+    /// rewriting it cannot invalidate what was just signed.
+    fn sign_in_place(dir: &std::path::Path, key_src: &str) -> Result<()> {
+        let key_pem = if key_src == "-" {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .context("reading the signing key from stdin")?;
+            buf
+        } else {
+            std::fs::read_to_string(key_src)
+                .with_context(|| format!("reading the signing key from {key_src}"))?
+        };
+
+        let (manifest, assets) = load_package(dir)?;
+        let value = veloxsearch::catalog::sign_package(&manifest, &assets, &key_pem)?;
+        let signed = veloxsearch::catalog::replace_signature_value(&manifest, &value)?;
+        veloxsearch::catalog::verify_package(&signed, &assets)
+            .context("refusing to write: the signature this key produced does not verify")?;
+        std::fs::write(dir.join("manifest.yaml"), signed)
+            .with_context(|| format!("writing {}/manifest.yaml", dir.display()))?;
+        Ok(())
     }
 
     fn init(args: &[String]) -> i32 {
