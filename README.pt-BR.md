@@ -1,13 +1,32 @@
+<div align="center">
+
+<img src=".github/assets/logo.svg" width="92" alt="Logo do VeloxSearch" />
+
 # VeloxSearch
+
+**Transforma um cluster Kubernetes cru em uma plataforma OpenSearch gerenciada.**
+
+Um control plane em Rust e uma interface React que instalam o OpenSearch, mantêm
+ele rodando, e te dão um assistente no lugar de uma pasta de YAML.
 
 [![CI](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml)
 [![Licença: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Downloads no Docker](https://img.shields.io/docker/pulls/tornistecnologia/veloxsearch-oss?logo=docker&label=pulls)](https://hub.docker.com/r/tornistecnologia/veloxsearch-oss)
+[![rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-dea584?logo=rust)](Cargo.toml)
+[![kubernetes ≥ 1.30](https://img.shields.io/badge/kubernetes%20%E2%89%A5%201.30-326ce5?logo=kubernetes&logoColor=white)](docs/REQUIREMENTS.md)
+[![DCO](https://img.shields.io/badge/DCO-required-8e44ad)](CONTRIBUTING.md)
 
-*[Read in English](README.md)*
+*Read in English: [README.md](README.md)*
 
-**Transforma um cluster Kubernetes cru em uma plataforma OpenSearch gerenciada.**
-Um control plane em Rust e uma interface React que instalam o OpenSearch, mantêm
-ele rodando, e te dão um assistente no lugar de uma pasta de YAML.
+</div>
+
+<img src=".github/assets/demo.gif" width="880" alt="Demo do VeloxSearch: criação da conta admin no primeiro acesso, a tela de conformidade do cluster, a visão geral e o catálogo de integrações de um deployment verde, a capacidade do cluster, e o assistente de criação parado na revisão" />
+
+*Do primeiro acesso ao primeiro cluster: setup → conformidade → deployments →
+integrações → o assistente de criação (parado na revisão — nada é provisionado
+nesta gravação).*
+
+---
 
 Você aponta para um cluster, abre o navegador, e ele faz o resto: confere se o
 cluster é capaz, instala o que falta (Longhorn, cert-manager, o operator do

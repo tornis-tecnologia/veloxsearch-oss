@@ -1,13 +1,31 @@
+<div align="center">
+
+<img src=".github/assets/logo.svg" width="92" alt="VeloxSearch logo" />
+
 # VeloxSearch
+
+**Turns a bare Kubernetes cluster into a managed OpenSearch platform.**
+
+A Rust control plane and React UI that install OpenSearch, keep it running,
+and give you a wizard instead of a folder of YAML.
 
 [![CI](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Docker pulls](https://img.shields.io/docker/pulls/tornistecnologia/veloxsearch-oss?logo=docker&label=pulls)](https://hub.docker.com/r/tornistecnologia/veloxsearch-oss)
+[![rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-dea584?logo=rust)](Cargo.toml)
+[![kubernetes ≥ 1.30](https://img.shields.io/badge/kubernetes%20%E2%89%A5%201.30-326ce5?logo=kubernetes&logoColor=white)](docs/REQUIREMENTS.md)
+[![DCO](https://img.shields.io/badge/DCO-required-8e44ad)](CONTRIBUTING.md)
 
-*[Leia em português](README.pt-BR.md)*
+*Leia em português: [README.pt-BR.md](README.pt-BR.md)*
 
-**Turns a bare Kubernetes cluster into a managed OpenSearch platform.** A Rust
-control plane and React UI that install OpenSearch, keep it running, and give
-you a wizard instead of a folder of YAML.
+</div>
+
+<img src=".github/assets/demo.gif" width="880" alt="VeloxSearch demo: first-run admin setup, the cluster conformity screen, a green deployment's overview and integrations catalog, host capacity, and the create wizard held at its review step" />
+
+*First run to first cluster: setup → conformity → deployments → integrations →
+the create wizard (held at review — nothing is provisioned in this recording).*
+
+---
 
 You point it at a cluster, open a browser, and it does the rest: checks the
 cluster is capable, installs what is missing (Longhorn, cert-manager, the
