@@ -360,7 +360,11 @@ pub(crate) fn random_chars(alphabet: &[u8], len: usize) -> Result<String> {
     let mut out = String::with_capacity(len);
     let mut buf = [0u8; 64];
     while out.len() < len {
-        getrandom::fill(&mut buf).context("OS CSPRNG (getrandom) unavailable")?;
+        // getrandom 0.3's `Error` (pulled in via bcrypt 0.19's tree) no longer
+        // implements `std::error::Error`, so anyhow's `.context()` bound fails.
+        // Wrap by hand instead — Display is all it guarantees.
+        getrandom::fill(&mut buf)
+            .map_err(|e| anyhow::anyhow!("OS CSPRNG (getrandom) unavailable: {e}"))?;
         for &b in &buf {
             if (b as u16) < limit {
                 out.push(alphabet[b as usize % n] as char);
