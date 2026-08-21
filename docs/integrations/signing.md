@@ -141,9 +141,23 @@ governed — decisions that are operational, not engineering, and that were open
 until the open-source release settled them.
 
 1. **Signing-key custody.** The ed25519 private key is held by the project
-   maintainers, outside this repository and outside the container image. It is
-   used only by the registry's publishing tooling, when a maintainer signs a
-   package for release. A contributor never needs it: proposing an integration
+   maintainers, outside this repository, outside the container image and
+   **outside CI**. Signing is `velox sign`, run on a maintainer's own machine:
+
+   ```sh
+   velox sign integrations/<id> --key <key.pem>   # or --key - to read stdin
+   velox verify integrations/<id>                 # no key needed
+   ```
+
+   `sign` verifies the signature it just produced before writing, so a package
+   that would not check out never reaches the disk. It rewrites one line — the
+   manifest's `value:` — because the manifest bytes are themselves an input to
+   the digest, and because the comments in it are documentation.
+
+   Keeping this step manual is a deliberate trade: packages change a few times a
+   year, and automating that would mean a long-lived signing key sitting in CI
+   permanently. Rotation is a core release (the keyring is compiled in), so a
+   leak is unusually expensive to recover from. A contributor never needs it: proposing an integration
    is a pull request against the registry repository. Custody, and the exact
    format of the public half, are documented in
    [`keys/README.md`](../../keys/README.md).
