@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 24 24" fill="none" role="img" aria-label="VeloxSearch logo">
+  <!-- The app's own cluster motif (frontend/ui.jsx :: Logo), brand emerald -->
+  <g stroke="#10b981" stroke-width="1.4" stroke-linecap="round">
+    <path d="M12 7.4L6 14.8M12 7.4l6 7.4M7 17h10" opacity="0.55"/>
+  </g>
+  <circle cx="12" cy="5" r="2.7" fill="#10b981"/>
+  <circle cx="5" cy="17" r="2.7" fill="#10b981"/>
+  <circle cx="19" cy="17" r="2.7" fill="#10b981"/>
+</svg>
