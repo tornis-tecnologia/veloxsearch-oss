@@ -35,7 +35,7 @@ crate-type = ["rlib"]
 [dependencies]
 axum = "0.8.0"
 # SPA static-file serving (ServeDir + index.html fallback) for the React build.
-tower-http = { version = "0.6", features = ["fs"], optional = true }
+tower-http = { version = "0.7", features = ["fs"], optional = true }
 # `net`/`time` are used directly by the auth-provider reachability probe
 # (ADR-045) — named explicitly rather than relying on another crate's features.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
