@@ -25,9 +25,16 @@ export default defineConfig({
   // (frontend/build → image) is untouched. The SPA calls the API at the
   // relative path /api/* (api.jsx: API_BASE = "/api"); without this proxy the
   // Vite dev server answers those itself and every call 404s (issue #68).
+  //
+  // The key is a REGEX anchored to a path segment, not the plain prefix
+  // "/api": a string key prefix-matches every path starting with "/api",
+  // which swallows the SPA's own flat module ./api.jsx — the browser then
+  // receives the backend's JSON for a module request and dies with a MIME
+  // error (issue #13). "^/api/" says the intent out loud: the API namespace
+  // is /api/<endpoint>, not /api*.
   server: {
     proxy: {
-      "/api": {
+      "^/api/": {
         target: apiTarget,
         changeOrigin: true,
         // The /api/events SSE stream must stream, not buffer. Vite's proxy
