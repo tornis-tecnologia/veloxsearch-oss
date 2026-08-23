@@ -1,14 +1,33 @@
+<div align="center">
+
+<img src=".github/assets/logo.svg" width="92" alt="Logo de VeloxSearch" />
+
 # VeloxSearch
+
+**Convierte un clúster Kubernetes vacío en una plataforma OpenSearch
+gestionada.**
+
+Un plano de control en Rust y una interfaz React que instalan OpenSearch, lo
+mantienen en marcha y te dan un asistente en lugar de una carpeta llena de YAML.
 
 [![CI](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml)
 [![Licencia: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![Descargas en Docker](https://img.shields.io/docker/pulls/tornistecnologia/veloxsearch-oss?logo=docker&label=pulls)](https://hub.docker.com/r/tornistecnologia/veloxsearch-oss)
+[![rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-dea584?logo=rust)](Cargo.toml)
+[![kubernetes ≥ 1.30](https://img.shields.io/badge/kubernetes%20%E2%89%A5%201.30-326ce5?logo=kubernetes&logoColor=white)](docs/REQUIREMENTS.md)
+[![DCO](https://img.shields.io/badge/DCO-required-8e44ad)](CONTRIBUTING.md)
 
-*[Read in English](README.md) · [Leia em português](README.pt-BR.md)*
+*Read in English: [README.md](README.md) · Leia em português: [README.pt-BR.md](README.pt-BR.md)*
 
-**Convierte un clúster Kubernetes vacío en una plataforma OpenSearch
-gestionada.** Un plano de control en Rust y una interfaz React que instalan
-OpenSearch, lo mantienen en marcha y te dan un asistente en lugar de una carpeta
-llena de YAML.
+</div>
+
+<img src=".github/assets/demo.gif" width="880" alt="Demo de VeloxSearch: creación de la cuenta de administrador en el primer acceso, la pantalla de conformidad del clúster, la visión general y el catálogo de integraciones de un despliegue verde, la capacidad del clúster y el asistente de creación detenido en la revisión" />
+
+*Del primer acceso al primer clúster: setup → conformidad → despliegues →
+integraciones → el asistente de creación (detenido en la revisión — nada se
+aprovisiona en esta grabación).*
+
+---
 
 Lo apuntas a un clúster, abres el navegador y él hace el resto: comprueba que el
 clúster es capaz, instala lo que falta (Longhorn, cert-manager, el operador de
