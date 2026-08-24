@@ -1,0 +1,193 @@
+name: Release
+
+# A release is a merge that changes `version` in Cargo.toml — the same model as
+# release-please: the version-bump PR is reviewed, and merging it publishes.
+#
+# Nothing here writes to `main`. The digest-pinned manifest ships as a release
+# artifact instead, which is also why there is no loop to guard against.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  IMAGE: docker.io/tornistecnologia/veloxsearch-oss
+
+jobs:
+  gate:
+    name: Is this a release?
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # this commit and its parent — enough to diff the version
+      - id: check
+        run: |
+          set -euo pipefail
+          read_version() { sed -n 's/^version = "\(.*\)"/\1/p' "$1" | head -1; }
+          now=$(read_version Cargo.toml)
+          before=$(git show HEAD~1:Cargo.toml 2>/dev/null | sed -n 's/^version = "\(.*\)"/\1/p' | head -1 || true)
+          echo "version=$now" >> "$GITHUB_OUTPUT"
+          if [ "$now" = "$before" ]; then
+            echo "version unchanged ($now) — not a release"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A tag that already exists means this version was released before and
+          # something is wrong upstream; fail loudly rather than double-publish.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$now" >/dev/null 2>&1; then
+            echo "::error::tag v$now already exists but Cargo.toml just changed to it"
+            exit 1
+          fi
+          echo "version $before -> $now — releasing"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Re-verify at the release commit
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: t
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      # The same gates ci.yml runs, re-run on the exact commit being released.
+      # `main` being green earlier is not the same claim as this tree being green.
+      - uses: actions/checkout@v4
+        with:
+          repository: tornis-tecnologia/veloxsearch-registry
+          path: .registry
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: ./.github/scripts/check-headers.sh
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - env:
+          VELOX_REGISTRY_PATH: ${{ github.workspace }}/.registry
+        run: cargo test --all-targets
+      - env:
+          VELOX_PG_TEST_URL: postgres://postgres:t@127.0.0.1:5432/postgres
+          VELOX_REGISTRY_PATH: ${{ github.workspace }}/.registry
+        run: cargo test --all-targets -- --ignored --skip dump_manifests --test-threads=1
+
+  publish:
+    name: Build, push and sign the image
+    needs: [gate, verify]
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write   # the OIDC token cosign exchanges for a short-lived cert
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # amd64 only, matching the R5 support envelope in docs/REQUIREMENTS.md.
+      # arm64 needs a conformance fixture before it can be claimed; see ROADMAP.
+      - name: Build and push
+        id: push
+        run: |
+          set -euo pipefail
+          deploy/build-image.sh --profile release --push
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            "$IMAGE:${{ needs.gate.outputs.version }}" | cut -d@ -f2)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "pushed $IMAGE:${{ needs.gate.outputs.version }}@$digest"
+
+      - uses: sigstore/cosign-installer@v3
+
+      # Keyless: no key exists to leak or rotate. The signature binds the image
+      # to the workflow identity that built it, recorded in Rekor. The verify
+      # command users run is documented in docs/INSTALL.md §5b.
+      - name: Sign the image
+        run: cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
+
+  release:
+    name: Tag and publish the release
+    needs: [gate, publish]
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # tags and releases only; this job touches no branch
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The artifact users apply: the same manifest, with the tag swapped for
+      # the digest that was actually published. Immutable by construction.
+      - name: Pin the manifest to the published digest
+        run: |
+          set -euo pipefail
+          sed -E 's|^(\s*image: )'"$IMAGE"':.*$|\1'"$IMAGE"'@${{ needs.publish.outputs.digest }}|' \
+            deploy/install.yaml > install.yaml
+          grep -q "@${{ needs.publish.outputs.digest }}" install.yaml \
+            || { echo "::error::digest pin did not apply"; exit 1; }
+
+      - name: Build the velox CLI as a release asset
+        run: |
+          set -euo pipefail
+          cargo build --release --bin velox
+          cp target/release/velox velox-linux-amd64
+          sha256sum install.yaml velox-linux-amd64 > SHA256SUMS
+
+      - name: Extract the changelog section
+        id: notes
+        run: |
+          set -euo pipefail
+          v="${{ needs.gate.outputs.version }}"
+          # The section for this version, up to the next heading.
+          awk -v v="$v" '
+            $0 ~ "^## \\[" v "\\]" {f=1; next}
+            f && /^## / {exit}
+            f {print}
+          ' CHANGELOG.md > NOTES.md
+          [ -s NOTES.md ] || echo "See CHANGELOG.md." > NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.gate.outputs.version }}
+          name: v${{ needs.gate.outputs.version }}
+          body_path: NOTES.md
+          files: |
+            install.yaml
+            velox-linux-amd64
+            SHA256SUMS

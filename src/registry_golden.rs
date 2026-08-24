@@ -40,7 +40,10 @@ use std::path::PathBuf;
 /// Write PAST libtest's output capture (which swallows `println!`/`eprintln!`
 /// from PASSING tests) — a skip nobody sees, or a gate nobody can tell ran,
 /// is exactly the hollow green #108 is about.
-fn to_stderr(msg: &str) {
+///
+/// `pub(crate)` because `catalog`'s re-signing gate skips for the same reason
+/// and must be just as visible when it does.
+pub(crate) fn to_stderr(msg: &str) {
     use std::io::Write;
     let _ = std::io::stderr().write_all(msg.as_bytes());
 }

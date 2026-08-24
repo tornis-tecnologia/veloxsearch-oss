@@ -20,36 +20,54 @@ is — which is exactly the confusion the single source exists to prevent.
 
 ## Cutting a release
 
-1. **Bump the version.** `version` in `Cargo.toml`, then `cargo check` so
-   `Cargo.lock` follows.
-2. **Update `CHANGELOG.md`.** Move `Unreleased` entries under the new version
-   with the date. Breaking changes get their own callout — this project is
-   pre-1.0, so a minor version may break, and the changelog is the only place
-   that says so.
-3. **Pin the image in `deploy/install.yaml`** to the new version tag.
-4. **Open a release PR** with those three changes. CI must be green.
-5. **Merge, then tag:**
+**Releasing is merging a pull request.** There is no tagging step, no manual
+build, and no publish command — `.github/workflows/release.yml` does all of it
+when it sees `version` change in `Cargo.toml` on `main`.
 
-   ```sh
-   git tag -s v0.7.1 -m "v0.7.1"
-   git push origin v0.7.1
-   ```
+Open one pull request containing exactly three things:
 
-6. **Build and push the image:**
+1. **`version` in `Cargo.toml`**, then `cargo check` so `Cargo.lock` follows.
+2. **`CHANGELOG.md`** — move the `Unreleased` entries under the new version with
+   the date. Breaking changes get their own callout: this project is pre-1.0, so
+   a minor version may break, and the changelog is the only place that says so.
+   The release notes are lifted verbatim from this section, so write it for the
+   person reading the release page.
+3. **`deploy/install.yaml`** — the image tag, to the new version.
 
-   ```sh
-   deploy/build-image.sh --profile release --push
-   ```
+Get it reviewed and merge it. That is the release.
 
-   The script prints the resulting `RepoDigests` entry.
+### What the workflow then does
 
-7. **Pin the digest.** Replace the tag in `deploy/install.yaml` with
-   `<image>@sha256:…` and push that as a follow-up commit. A tag can be moved;
-   a digest cannot, and `kubectl apply` of a movable tag makes the running
-   version a function of when the Pod last restarted.
+| Step | |
+| --- | --- |
+| `gate` | Confirms the version actually changed, and refuses if a tag for it already exists |
+| `verify` | Re-runs every CI gate **on the release commit**. `main` having been green earlier is a different claim from this tree being green |
+| `publish` | Builds and pushes `<image>:<version>`, then signs it with cosign **keyless** — an OIDC identity and a ten-minute certificate, so there is no signing key to leak or rotate |
+| `release` | Rewrites the manifest's image to the published **digest**, tags `v<version>`, and publishes the release with `install.yaml`, `velox-linux-amd64` and `SHA256SUMS` attached |
 
-8. **Create the GitHub release** against the tag, with the changelog section as
-   the body.
+### Why the digest lives in the release, not in `main`
+
+The artifact users apply is
+`releases/latest/download/install.yaml`, and it is pinned to a digest — the same
+URL applied twice gives the same bytes and the same image. `deploy/install.yaml`
+on `main` keeps a version *tag*, because it is the source the release is built
+from and because a tag is what `deploy/build-image-local.sh` can work with.
+
+This is also why no job in the release pipeline has write access to `main`.
+Nothing pushes back, so there is no loop to guard against and no branch
+protection to bypass. The trigger condition is its own protection: a commit that
+does not change the version cannot start a release.
+
+### If it goes wrong
+
+The workflow is not transactional. If `publish` succeeds and `release` fails,
+the image is on Docker Hub but no tag or release exists. That is recoverable and
+deliberately not automated: re-running the failed job republishes the same
+digest (Docker Hub accepts the identical push), and `cosign sign` is idempotent
+for a digest already signed.
+
+Do **not** fix it by bumping the version again — that publishes a second image
+for the same code.
 
 ## Publishing manually
 
@@ -122,20 +140,45 @@ rather than fetched.
 ## Publishing an integration package
 
 Integration packages live in
-[`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry)
-and are signed at publish time with the private half of the key in
-[`keys/`](../keys/README.md). A contributor never needs that key: proposing an
-integration is a pull request against the registry repo, and a maintainer signs
-it. See [integrations/signing.md](integrations/signing.md).
+[`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry).
+Signing them is the one publishing step that is **deliberately not automated**:
+the ed25519 private key is not in CI, and putting it there to save a few minutes
+a year would be a poor trade. Rotating that key is a core release — the keyring
+is compiled into the binary — so a leak is unusually expensive.
+
+```sh
+gh pr checkout <number> --repo tornis-tecnologia/veloxsearch-registry
+velox sign integrations/<id> --key ~/path/to/velox-registry-2026.priv.pem
+git commit -am "sign: <id>" && git push
+```
+
+`velox sign` verifies the signature it just produced before writing, so a
+package that would not check out never reaches the disk. The registry's CI
+refuses to merge anything still carrying the placeholder.
+
+**Changing a core recipe does not require doing this by hand.** A push to `main`
+touching `src/recipes.rs`, `src/agents.rs` or `src/integrations.rs` runs
+`registry-sync.yml`, which regenerates the assets and opens the pull request for
+you — unsigned. You sign it as above.
+
+See [integrations/signing.md](integrations/signing.md) and
+[`keys/README.md`](../keys/README.md).
 
 ## Release checklist
 
+Everything below the line is the workflow's job. Yours is the pull request.
+
 - [ ] `Cargo.toml` version bumped, `Cargo.lock` updated
-- [ ] `CHANGELOG.md` section written, breaking changes called out
-- [ ] `deploy/install.yaml` pinned to the new version
+- [ ] `CHANGELOG.md` section written for a reader, breaking changes called out
+- [ ] `deploy/install.yaml` image tag bumped to the new version
 - [ ] CI green on the release PR
-- [ ] Signed tag pushed
-- [ ] Image built and pushed
-- [ ] `deploy/install.yaml` re-pinned to the digest
-- [ ] GitHub release published
-- [ ] The quickstart in both READMEs still installs the right thing
+
+---
+
+- [x] Re-verified at the release commit
+- [x] Image built, pushed and signed
+- [x] Tag created, release published with a digest-pinned `install.yaml`
+
+Afterwards, worth a glance: `cosign verify` on the published image
+([docs/INSTALL.md §5b](INSTALL.md)), and that the release asset applies cleanly
+on a scratch cluster.

@@ -16,7 +16,7 @@ ele rodando, e te dão um assistente no lugar de uma pasta de YAML.
 [![kubernetes ≥ 1.30](https://img.shields.io/badge/kubernetes%20%E2%89%A5%201.30-326ce5?logo=kubernetes&logoColor=white)](docs/REQUIREMENTS.md)
 [![DCO](https://img.shields.io/badge/DCO-required-8e44ad)](CONTRIBUTING.md)
 
-*Read in English: [README.md](README.md)*
+*Read in English: [README.md](README.md) · Leer en español: [README.es.md](README.es.md)*
 
 </div>
 
@@ -105,10 +105,17 @@ Tabela completa, com sondas e mensagens de falha: [`docs/REQUIREMENTS.md`](docs/
 ## Experimente
 
 ```bash
-kubectl apply -f deploy/install.yaml
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # abra http://localhost:3000 — crie a conta de admin, e o app assume dali
 ```
+
+Essa URL é um **artefato de release**, não um branch: a imagem dentro dela está
+fixada por digest, então o que você aplica hoje é o que você recebe se aplicar de
+novo mês que vem. `releases/latest/` acompanha o release mais novo; para fixar
+uma versão, use `releases/download/v0.7.1/install.yaml`. Aplicar o
+`deploy/install.yaml` do `main` te dá o que estiver no HEAD naquele instante —
+serve para desenvolvimento, não para um cluster que importa.
 
 Um arquivo, sem credencial de registry — a imagem é
 [`tornistecnologia/veloxsearch-oss`](https://hub.docker.com/r/tornistecnologia/veloxsearch-oss),

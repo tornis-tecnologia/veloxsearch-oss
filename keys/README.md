@@ -27,11 +27,24 @@ openssl pkey -in velox-registry-2026.priv.pem -pubout -outform DER \
 
 ## Custody
 
-The private half is **never** in this repository and never in the container
-image. It is held by the project maintainers and used only by the registry's
-signing tooling when publishing a package. A contributor never needs it:
-proposing an integration means opening a PR against the registry repo, and a
-maintainer signs the package at publish time.
+The private half is **never** in this repository, never in the container image,
+and never in CI. It is held by the project maintainers and used only by
+`velox sign`, run on a maintainer's own machine:
+
+```sh
+velox sign integrations/<id> --key velox-registry-2026.priv.pem
+velox sign integrations/<id> --key -    # from stdin, so it never lands on disk
+```
+
+A contributor never needs it: proposing an integration means opening a PR
+against the registry repo, and a maintainer signs it there. The registry's CI
+refuses to merge a package still carrying the placeholder signature.
+
+Anyone can check a package without any key:
+
+```sh
+velox verify integrations/<id>
+```
 
 ## Rotation
 
