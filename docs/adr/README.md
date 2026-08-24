@@ -82,7 +82,7 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-035 | Memory bounds: the operator derives heap as memory/2, so heap is never set directly |
 | ADR-036 | The bundled Postgres StatefulSet pattern and how its passwords reach it |
 | ADR-038 | The corporate-email gate for self-serve signup |
-| ADR-039 | Integration packages are data, not code: the manifest format, the apply engine, and signing as the security boundary |
+| ADR-039 | Integration packages are data, not code: the manifest format, the apply engine, and signing as the security boundary (registry hosting and key custody superseded by ADR-054) |
 | ADR-040 | Version literals are derived, not hand-copied across files |
 | ADR-041 | The Postgres-backed control-plane account store, and the tenant model on top of it |
 | ADR-042 | The snapshot MinIO platform namespace |
@@ -97,6 +97,7 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-051 | What the tenant NetworkPolicy set does *not* enforce, stated explicitly |
 | ADR-052 | Deferred provisioning re-runs: profile and monitors re-applied to an existing CR |
 | ADR-053 | The four-step create wizard (purpose → size → backup → review) and the opt-in next-generation Dashboards UI |
+| ADR-054 | Registry and signing live on GitHub and Docker Hub — the public `veloxsearch-registry` repo, cosign-keyless Docker Hub image, signing key held outside the repo (supersedes the internal-registry plan) |
 
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and

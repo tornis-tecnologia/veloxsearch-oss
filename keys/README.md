@@ -27,9 +27,10 @@ openssl pkey -in velox-registry-2026.priv.pem -pubout -outform DER \
 
 ## Custody
 
-The private half is **never** in this repository, never in the container image,
-and never in CI. It is held by the project maintainers and used only by
-`velox sign`, run on a maintainer's own machine:
+The private half is **never** in this repository, never in the container
+image, and off any single maintainer's machine: its home is a secret store —
+a GitHub Actions secret or private object storage, per ADR-054. It is used
+only by `velox sign`, run by a maintainer with key-file access:
 
 ```sh
 velox sign integrations/<id> --key velox-registry-2026.priv.pem

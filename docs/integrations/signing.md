@@ -140,9 +140,12 @@ The mechanism above is complete. This section records how the trust anchor is
 governed — decisions that are operational, not engineering, and that were open
 until the open-source release settled them.
 
-1. **Signing-key custody.** The ed25519 private key is held by the project
-   maintainers, outside this repository, outside the container image and
-   **outside CI**. Signing is `velox sign`, run on a maintainer's own machine:
+1. **Signing-key custody.** The ed25519 private key is held
+   **outside this repository**, outside the container image, and off any
+   single maintainer's machine: its home is a secret store — a GitHub
+   Actions secret or private object storage (ADR-054). The signing tool is
+   `velox sign`, run by a maintainer with key-file access
+   (`VELOX_SIGNING_KEY_FILE` or `--key`):
 
    ```sh
    velox sign integrations/<id> --key <key.pem>   # or --key - to read stdin
@@ -154,10 +157,10 @@ until the open-source release settled them.
    manifest's `value:` — because the manifest bytes are themselves an input to
    the digest, and because the comments in it are documentation.
 
-   Keeping this step manual is a deliberate trade: packages change a few times a
-   year, and automating that would mean a long-lived signing key sitting in CI
-   permanently. Rotation is a core release (the keyring is compiled in), so a
-   leak is unusually expensive to recover from. A contributor never needs it: proposing an integration
+   Packages change a few times a year, so signing stays a deliberate manual
+   step rather than a permanently-wired CI job with the key online. Rotation
+   is a core release (the keyring is compiled in), so a leak is unusually
+   expensive to recover from. A contributor never needs the key: proposing an integration
    is a pull request against the registry repository. Custody, and the exact
    format of the public half, are documented in
    [`keys/README.md`](../../keys/README.md).
