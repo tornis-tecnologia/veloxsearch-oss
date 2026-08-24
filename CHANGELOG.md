@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-24
+
 ### Added
 - `README.es.md` — a Spanish README, at full parity with the English one (same
   sections, tables and examples). The three READMEs cross-link. Note that the
@@ -43,6 +45,11 @@ are called out explicitly.
   `docs/SECRETS.md`, `docs/INSTALLER.md`, `docs/ROADMAP.md`, `docs/adr/` and
   `tests/README.md` — documents the code already referenced but that were never
   exported.
+- A demo GIF in all three READMEs — the whole product story (first-run setup,
+  conformity, a green deployment, integrations, capacity, the create wizard
+  held at review) in 24 seconds, recorded against a mock API so nothing was
+  provisioned. The READMEs now open with the logo, the tagline and a full badge
+  row (CI, licence, Docker pulls, MSRV, Kubernetes floor, DCO).
 
 ### Changed
 - **Breaking (operators):** the install manifest to apply is now the release
@@ -68,6 +75,18 @@ are called out explicitly.
   `registry.gitlab.com`.
 - Development moved to GitHub. This repository is the source of truth; it is no
   longer a one-way export and `main` is no longer force-pushed.
+- Dependency wave (the first Dependabot round, all nine PRs): `kube` 0.99 →
+  **2.0.1** paired with `k8s-openapi` 0.24 → 0.26 (unpaired, two k8s-openapi
+  copies compile and the unfeatured one fails its build script — the pairing is
+  now part of the upgrade checklist), React and ReactDOM 18 → **19** (a
+  peer-locked pair that cannot land as separate PRs), `bcrypt` 0.19, `base64`
+  0.23, `tower-http` 0.7, plus the cargo/npm/actions minor groups. No API
+  changes were needed for any of them.
+- ADR-054: registry and signing live on GitHub and Docker Hub — the public
+  `veloxsearch-registry` repo, a cosign-keyless image, and the signing key's
+  private half held in a secret store rather than on a maintainer machine.
+  Supersedes the pre-OSS internal-registry buffer plan and ADR-039's open
+  hosting/custody provisions.
 
 ### Removed
 - `docs/DECISIONS.md` — the full ADR log was exported by mistake; `docs/INSTALL.md`
@@ -101,6 +120,10 @@ are called out explicitly.
   `docs/INSTALLER.md`, `spec/signing.md`).
 - SPDX license headers were missing from nine source files; the `headers` CI job
   now prevents recurrence.
+- The Vite dev proxy's `/api` prefix swallowed the SPA's own `api.jsx` module,
+  so `npm run dev` against a live backend was a white page with a MIME error.
+  The proxy key is now the regex `^/api/` (production builds were never
+  affected).
 
 ## [0.7.0] - 2026-08-20
 
