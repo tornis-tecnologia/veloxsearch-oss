@@ -57,7 +57,10 @@ with sync_playwright() as p:
     page.fill('input[name="name"]', "journeytest")  # step 1: name (+ default purpose)
     page.locator('[data-testid="wizard-next"]').click()  # -> size
     page.wait_for_timeout(300)
-    page.locator('[data-testid="wizard-next"]').click()  # -> data
+    # The 4-step wizard has NO default size: the next button stays disabled
+    # until a sizing preset card is picked (ADR-016 — presets come from the
+    # backend). Pick the second card (medium), i18n-proof via aria-pressed.
+    page.locator('button.purpose:not([aria-pressed="true"])').nth(0).click()  # small — the only preset a 16Gi fixture fits
     page.wait_for_timeout(300)
     page.locator('[data-testid="wizard-next"]').click()  # -> backup (skipped)
     page.wait_for_timeout(300)
@@ -68,39 +71,65 @@ with sync_playwright() as p:
     # 3. success: the SPA navigates to the new deployment's detail. The topbar
     #    crumb (.crumb .cur) only renders once the deployment shows up in the
     #    SSE list and the detail mounts — wait for it, then read the name.
-    crumb = page.wait_for_selector(".crumb .cur", timeout=60000)
+    # Greenfield first-create includes the Longhorn bootstrap (ADR-031): the
+    # wizard's storage-ready gate can hold the create for several MINUTES while
+    # Longhorn installs and becomes the default SC. 15 min covers it.
+    crumb = page.wait_for_selector(".crumb .cur", timeout=900000)
     dep_name = crumb.inner_text().strip()
     if not dep_name.startswith("journeytest-"):
         fail(f"unexpected generated name: {dep_name!r}")
     print(f"  created {dep_name}")
 
-    # 4. detail tabs: Overview / Edit / Integrations / Security (4 buttons).
+    # 3b. provisioning settle: a fresh deployment is BUSY (nodes booting, PVCs
+    # binding) and LOCKS its editing controls (activity.locks_edits). The tab
+    # assertions below are about a MANAGED deployment, so wait for the lock to
+    # lift — the reset-pass button is the sentinel (it is disabled while busy).
+    page.wait_for_selector('[data-testid="reset-pass"]:not([disabled])', timeout=900000)
+    print(f"  {dep_name} settled (edits unlocked)")
+
+    # 4. detail tabs: the global nav STAYS inside a deployment (app.jsx:
+    #    "Global navigation stays put inside a deployment too") — the single
+    #    nav.tabs holds the 4 top tabs followed by the 6 detail tabs
+    #    (Overview / Edit / Integrations / Snapshot / Security / Auth).
+    #    Address detail tabs positionally from the END so the global tab
+    #    count can change without breaking this.
     page.wait_for_selector("nav.tabs", timeout=20000)
     page.wait_for_timeout(1000)
     n_tabs = page.locator("nav.tabs button").count()
-    if n_tabs != 4:
-        fail(f"expected 4 detail tabs, got {n_tabs}")
+    if n_tabs - 4 != 6:
+        fail(f"expected 6 detail tabs after the 4 global ones, got {n_tabs - 4}")
 
     # 5. Edit tab: size <select>, automatic (disabled) JVM field, NO purpose cards.
-    page.click("nav.tabs button:nth-child(2)")
+    page.click("nav.tabs button:nth-last-child(5)")
     page.wait_for_selector("select.select", timeout=10000)
     jvm = [page.locator("input[disabled]").nth(i).input_value()
            for i in range(page.locator("input[disabled]").count())]
-    if not any(v.startswith("-Xms") for v in jvm):
+    # The automatic JVM/heap field reads in the operator's short form since
+    # ADR-035 ("1536m"/"2g"), not the -Xms form the June wizard showed.
+    if not any(v.startswith("-Xms") or __import__("re").fullmatch(r"\d+[mMgG]", v.strip()) for v in jvm):
         fail(f"Edit tab missing the automatic-JVM field (disabled inputs: {jvm})")
     if page.locator(".purpose-grid").count() or page.locator(".profile-cards").count():
         fail("Edit tab must NOT show the purpose cards (purpose is fixed)")
 
-    # 6. Security tab: password-reset form = new + confirm password fields.
-    page.click("nav.tabs button:nth-child(4)")
+    # 6. Security tab: credentials are REVEALED on demand and the admin
+    #    password is GENERATED on reset — never chosen — so there are no
+    #    password inputs. Assert the reset action + its confirm modal exist
+    #    (and cancel out: this journey must not rotate credentials).
+    import re as _re
+    page.click("nav.tabs button:nth-last-child(2)")
     page.wait_for_timeout(800)
     n_pw = page.locator('input[type="password"]').count()
-    if n_pw != 2:
-        fail(f"Security tab must have new + confirm password fields, got {n_pw}")
+    if n_pw != 0:
+        fail(f"Security tab must have NO password inputs (generated, not chosen), got {n_pw}")
+    page.locator('[data-testid="reset-pass"]').click()
+    page.wait_for_timeout(600)
+    # the confirm modal's cancel — a journey must not rotate credentials
+    page.get_by_role("button", name=_re.compile("Cancelar|Cancel", _re.I)).last.click()
+    page.wait_for_timeout(400)
 
     # 7. cleanup — delete via the stable hooks (#33): the danger-zone
     #    delete-deployment button arms the modal, delete-confirm commits it.
-    page.click("nav.tabs button:nth-child(1)")  # overview
+    page.click("nav.tabs button:nth-last-child(6)")  # overview
     page.wait_for_timeout(500)
     page.click('[data-testid="delete-deployment"]')        # arm: opens the Confirm modal
     page.wait_for_selector('[data-testid="delete-confirm"]', timeout=5000)
