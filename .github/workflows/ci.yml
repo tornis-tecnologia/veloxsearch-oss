@@ -121,6 +121,57 @@ jobs:
       - name: The build actually produced the SPA
         run: test -f build/index.html
 
+  # Trunk-only runtime gate (issue #21). Everything else in this file proves
+  # the tree COMPILES; this proves the released artifact RUNS: the latest
+  # release's digest-pinned install.yaml is applied to a real (if tiny)
+  # Kubernetes and the control plane must boot and serve.
+  #
+  # Push-to-main only, deliberately: a PR commit has no published image, and
+  # building one per PR to side-load is the expensive version nobody asked
+  # for. Per-PR runtime testing is a later decision, not smuggled scope.
+  #
+  # The smoke SUBSET (tests/smoke_check.py) needs no R4-floor cluster and
+  # triggers no operator bootstrap — those are conformance-fleet concerns
+  # (REQUIREMENTS.md, issue #19). minikube's node-local default StorageClass
+  # is fine for the bundled Postgres.
+  smoke:
+    name: Smoke (minikube)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install minikube
+        run: |
+          curl -fsSLO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+          sudo install minikube-linux-amd64 /usr/local/bin/minikube
+          minikube version
+
+      - name: Start minikube
+        run: minikube start --driver=docker --cpus=2 --memory=6144 --wait=all
+
+      - name: Apply the latest released install manifest
+        run: |
+          curl -fsSL \
+            https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml \
+            -o released-install.yaml
+          grep -E 'image: docker\.io/tornistecnologia' released-install.yaml \
+            || { echo "::error::manifest does not reference the published image"; exit 1; }
+          kubectl apply -f released-install.yaml
+
+      - name: Wait for the control plane
+        run: |
+          kubectl -n veloxsearch-system rollout status deploy/veloxsearch --timeout=420s
+
+      - name: "Smoke: the app serves and reports first-run"
+        run: |
+          kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80 &
+          trap 'kill %1 2>/dev/null || true' EXIT
+          python3 tests/smoke_check.py http://127.0.0.1:3000 --retries 40 --delay 5
+
   image:
     name: Container image
     runs-on: ubuntu-latest
