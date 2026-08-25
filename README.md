@@ -194,12 +194,17 @@ Running in production for its author, and deliberately narrow rather than
 broadly compatible: the requirements envelope is kept small so everything inside
 it works, instead of degrading in interesting ways outside it.
 
-Be aware of two things before you rely on it. The conformance fleet — greenfield
-k3s, bare k0s, and an undersized cluster that must be *refused* — has runs
-pending re-verification against the current storage path; `docs/REQUIREMENTS.md`
-marks each row with when it was last actually verified rather than when it was
-expected to work. And the OpenTelemetry observability stack ships but has had
-limited real-world exercise.
+The conformance fleet was re-verified against v0.8.0 on 2026-08-25 (see
+[`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the per-row evidence): the
+install → conformity → refusal paths are verified live on k3s, k0s and a real
+3-node Longhorn cluster, and a trunk CI lane boots the released image on
+minikube on every push. Two known gaps are tracked rather than hidden:
+single-node deployments stall on Longhorn's default replica count
+([#26](https://github.com/tornis-tecnologia/veloxsearch-oss/issues/26)), and
+the post-green rolling restart can hang on system-index shard recovery
+([#27](https://github.com/tornis-tecnologia/veloxsearch-oss/issues/27)). The
+OpenTelemetry observability stack ships but has had limited real-world
+exercise.
 
 ---
 
