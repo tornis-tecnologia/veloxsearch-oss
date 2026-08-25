@@ -228,7 +228,7 @@ function App() {
   }
 
   async function deleteCluster(name) {
-    try { await API.deleteCluster(name); showToast(lang === "pt" ? "Cluster excluído" : "Deployment deleted"); }
+    try { await API.deleteCluster(name); showToast(lang === "pt" ? "Cluster excluído" : lang === "es" ? "Deployment eliminado" : "Deployment deleted"); }
     catch (e) { showToast(e.message); }
     go({ name: "status" });
   }
@@ -251,7 +251,7 @@ function App() {
 
   // ── pre-ready screens (login / setup / bootstrap) ──────────────
   if (boot === "loading") {
-    return <BootShell><p className="hint">{lang === "pt" ? "Carregando…" : "Loading…"}</p></BootShell>;
+    return <BootShell><p className="hint">{lang === "pt" ? "Carregando…" : lang === "es" ? "Cargando…" : "Loading…"}</p></BootShell>;
   }
   if (boot === "login" || boot === "setup") {
     return <AuthView mode={boot} lang={lang} setLang={setLang} theme={theme} setTheme={setTheme} onAuthed={probeBoot} />;
@@ -294,6 +294,7 @@ function App() {
         <div className="seg" data-testid="lang-toggle">
           <button aria-pressed={lang === "pt"} onClick={() => setLang("pt")}>PT</button>
           <button aria-pressed={lang === "en"} onClick={() => setLang("en")}>EN</button>
+          <button aria-pressed={lang === "es"} onClick={() => setLang("es")}>ES</button>
         </div>
         <button className="iconbtn" data-testid="theme-toggle" title={theme === "dark" ? "Light" : "Dark"} onClick={() => setTheme(th => th === "dark" ? "light" : "dark")}>
           <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
@@ -338,20 +339,20 @@ function App() {
               onResetPass={resetPass}
               onToast={showToast}
               onDelete={deleteCluster} />
-          : <div className="view-enter"><p className="hint">{lang === "pt" ? "Carregando deployment…" : "Loading deployment…"}</p></div>)}
+          : <div className="view-enter"><p className="hint">{lang === "pt" ? "Carregando deployment…" : lang === "es" ? "Cargando deployment…" : "Loading deployment…"}</p></div>)}
       </main>
 
       <Toast msg={toast.msg} show={toast.show} />
 
       <TweaksPanel title="Tweaks">
-        <TweakSection label={lang === "pt" ? "Aparência" : "Appearance"} />
-        <TweakColor label={lang === "pt" ? "Cor de destaque" : "Accent"} value={t.accent}
+        <TweakSection label={lang === "pt" ? "Aparência" : lang === "es" ? "Apariencia" : "Appearance"} />
+        <TweakColor label={lang === "pt" ? "Cor de destaque" : lang === "es" ? "Color de acento" : "Accent"} value={t.accent}
           options={["#10b981", "#3b82f6", "#8b5cf6", "#06b6d4", "#f97316"]}
           onChange={v => setTweak("accent", v)} />
-        <TweakRadio label={lang === "pt" ? "Densidade" : "Density"} value={t.density}
+        <TweakRadio label={lang === "pt" ? "Densidade" : lang === "es" ? "Densidad" : "Density"} value={t.density}
           options={["compact", "regular", "comfy"]}
           onChange={v => setTweak("density", v)} />
-        <TweakSelect label={lang === "pt" ? "Fonte" : "Font"} value={t.uiFont}
+        <TweakSelect label={lang === "pt" ? "Fonte" : lang === "es" ? "Fuente" : "Font"} value={t.uiFont}
           options={["IBM Plex", "Geist", "Mono only"]}
           onChange={v => setTweak("uiFont", v)} />
       </TweaksPanel>

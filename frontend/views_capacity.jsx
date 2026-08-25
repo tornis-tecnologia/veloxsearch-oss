@@ -144,7 +144,7 @@ function CapacityView({ lang }) {
         <div className="cap-live">
           <span className="statusdot green" />
           <span>{t.cap_live}</span>
-          {updated && <span className="cap-ts">{t.cap_updated} {updated.toLocaleTimeString(lang === "pt" ? "pt-BR" : "en-US")}</span>}
+          {updated && <span className="cap-ts">{t.cap_updated} {updated.toLocaleTimeString(lang === "pt" ? "pt-BR" : lang === "es" ? "es-ES" : "en-US")}</span>}
         </div>
       </div>
 

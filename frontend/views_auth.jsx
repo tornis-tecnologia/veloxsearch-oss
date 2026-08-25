@@ -23,8 +23,8 @@ function AuthPrefs({ lang, setLang, theme, setTheme }) {
         <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
       </button>
       <button className="iconbtn" style={{ width: "auto", padding: "0 12px", fontFamily: "var(--font-mono)", fontSize: 13 }}
-        title="language" onClick={() => setLang(lang === "pt" ? "en" : "pt")}>
-        {lang === "pt" ? "EN" : "PT"}
+        title="language" onClick={() => setLang(lang === "pt" ? "en" : lang === "en" ? "es" : "pt")}>
+        {lang === "pt" ? "EN" : lang === "en" ? "ES" : "PT"}
       </button>
     </div>
   );
