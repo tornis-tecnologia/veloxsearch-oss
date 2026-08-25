@@ -56,20 +56,19 @@ envelope is bulletproof, not before.
 
 These are genuinely undecided. An informed argument in an issue is welcome.
 
-**Getting the signing key out of a file on a laptop.** Publishing a package is
-`velox sign` on a maintainer's machine, with the key in a file. That is
-deliberately not in CI ([signing.md §4](integrations/signing.md)), but it is not
-the top of the ladder either: a hardware token or a cloud KMS would mean the key
-material is never readable at all. Worth doing before the registry gains
-outside publishers.
+**Signing-key custody — resolved by ADR-054.** The signing key moved off the
+maintainer-laptop model: its home is a secret store (a GitHub Actions secret or
+private object storage), and `signing.md §4` / `keys/README.md` were
+reconciled in the same change. What remains genuinely open is the *top* of the
+ladder: a hardware token or a cloud KMS would mean the key material is never
+readable at all. Worth doing before the registry gains outside publishers.
 
 **Self-hosted runners.** Release and sync jobs run on GitHub-hosted runners,
-which are free for a public repository. Moving them to `actions-runner-controller`
-in a cluster would buy control over the build environment — and would be the
-prerequisite for holding the signing key in a cluster Secret instead of a file.
-It also carries a real hazard: a self-hosted runner reachable from a fork's pull
-request runs untrusted code on your infrastructure, so any such move must keep
-`pull_request` triggers on hosted runners.
+which are free for a public repository — decided to stay that way for this
+repo (2026-08-20 alignment): a self-hosted runner reachable from a fork's pull
+request runs untrusted code on your infrastructure. If Enterprise work ever
+justifies `actions-runner-controller` in a cluster, keep `pull_request`
+triggers on hosted runners and confine self-hosted to private repositories.
 
 **The query layer over Postgres.** `db.rs` is deliberately the bare
 `tokio-postgres` driver with a hand-rolled migration runner — the choice of sqlx
