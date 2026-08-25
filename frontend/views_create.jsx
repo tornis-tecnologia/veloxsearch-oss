@@ -331,7 +331,7 @@ function CreateView({ lang, onCreate, onCancel }) {
               </div>
               <div className="kvrow"><span className="k">{t.review_purpose}</span><span className="v">{STR[lang]["p_" + (purpose === "observability" ? "obs" : purpose === "security" ? "sec" : "search") + "_t"]}</span></div>
               <div className="kvrow"><span className="k">{t.version_label}</span><span className="v">{chosenVersion || "—"}</span></div>
-              <div className="kvrow"><span className="k">{t.review_size}</span><span className="v">{advanced ? (lang === "pt" ? "Personalizado" : "Custom") : sz.label} · {sz.nodes} {t.nodes} · {(advanced && customHeap) || sz.heap} · {(advanced && customDisk) || sz.disk}</span></div>
+              <div className="kvrow"><span className="k">{t.review_size}</span><span className="v">{advanced ? (lang === "pt" ? "Personalizado" : lang === "es" ? "Personalizado" : "Custom") : sz.label} · {sz.nodes} {t.nodes} · {(advanced && customHeap) || sz.heap} · {(advanced && customDisk) || sz.disk}</span></div>
               <div className="kvrow">
                 <span className="k">{t.review_sources}</span>
                 <span className="v">

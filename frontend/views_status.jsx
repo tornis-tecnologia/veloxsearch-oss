@@ -50,7 +50,7 @@ function relAge(iso, lang) {
   if (!Number.isFinite(ms) || ms < 0) return "";
   const min = Math.floor(ms / 60000);
   const val = min < 60 ? `${min}m` : min < 1440 ? `${Math.floor(min / 60)}h` : `${Math.floor(min / 1440)}d`;
-  return lang === "pt" ? `há ${val}` : `${val} ago`;
+  return lang === "pt" ? `há ${val}` : lang === "es" ? `hace ${val}` : `${val} ago`;
 }
 
 function StatusView({ deployments, lang, onOpen, onUpgrade, onCreate }) {

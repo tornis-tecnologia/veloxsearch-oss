@@ -35,7 +35,7 @@ function perMinute(points, lang) {
   const mins = (last.ts - first.ts) / 60000;
   if (!(mins > 0)) return "—";
   const delta = (last.docs - first.docs) / mins;
-  if (delta <= 0) return lang === "pt" ? "estável" : "steady";
+  if (delta <= 0) return lang === "pt" ? "estável" : lang === "es" ? "estable" : "steady";
   const v = delta >= 1000 ? `${(delta / 1000).toFixed(1)}k` : delta.toFixed(0);
   return `↗ +${v}${lang === "pt" ? "/min" : "/min"}`;
 }
