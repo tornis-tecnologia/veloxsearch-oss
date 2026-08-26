@@ -95,7 +95,7 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
-    verbs: ["get", "list", "patch"]
+    verbs: ["get", "list", "patch", "delete", "create"]
   # Storage-sizing reconcile (#26): a sub-3-node cluster gets Longhorn's
   # replica defaults lowered to what it can schedule — the StorageClass
   # parameter above, the default-replica-count Setting, and volumes stuck

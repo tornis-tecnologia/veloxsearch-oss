@@ -13,7 +13,7 @@
 use anyhow::{bail, Context, Result};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-use kube::api::{Api, ApiResource, DynamicObject, ListParams, Patch, PatchParams};
+use kube::api::{Api, ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams};
 use kube::core::GroupVersionKind;
 use kube::discovery::{Discovery, Scope};
 use kube::Client;
@@ -1441,15 +1441,42 @@ pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
         return Ok(()); // the cluster places the bundle default — nothing to size
     }
 
-    // 1. The StorageClass parameter — the path our own PVCs take.
+    // 1. The StorageClass parameter — the path our own PVCs inherit. SC
+    //    `parameters` are IMMUTABLE in Kubernetes, so the class is replaced
+    //    wholesale: read the current one, swap the replica count, delete,
+    //    re-apply. Bound PVCs are unaffected (their Longhorn volumes carry
+    //    their own counts, healed below) and the brief absent window only
+    //    delays brand-new claims momentarily — the create gate runs before
+    //    this deployment's PVCs exist.
     use k8s_openapi::api::storage::v1::StorageClass;
     let sc: Api<StorageClass> = Api::all(client.clone());
-    let sc_patch = Patch::Merge(serde_json::json!({
-        "parameters": { "numberOfReplicas": replicas.to_string() }
-    }));
-    sc.patch(LONGHORN_SC, &PatchParams::default(), &sc_patch)
+    let current = sc
+        .get(LONGHORN_SC)
         .await
-        .context("sizing the longhorn StorageClass replicas")?;
+        .context("reading the longhorn StorageClass to resize")?;
+    let mut parameters = current.parameters.clone().unwrap_or_default();
+    parameters.insert("numberOfReplicas".into(), replicas.to_string());
+    let replacement = serde_json::json!({
+        "apiVersion": "storage.k8s.io/v1",
+        "kind": "StorageClass",
+        "metadata": {
+            "name": LONGHORN_SC,
+            "annotations": current.metadata.annotations.clone().unwrap_or_default(),
+        },
+        "provisioner": current.provisioner,
+        "reclaimPolicy": current.reclaim_policy,
+        "volumeBindingMode": current.volume_binding_mode,
+        "allowVolumeExpansion": current.allow_volume_expansion,
+        "parameters": parameters,
+    });
+    let _ = sc.delete(LONGHORN_SC, &DeleteParams::default()).await;
+    apply_bundle(
+        client,
+        &serde_yaml::to_string(&replacement).context("serializing the resized StorageClass")?,
+        BOOTSTRAP_BINDING,
+    )
+    .await
+    .context("re-applying the longhorn StorageClass at the schedulable replica count")?;
 
     // 2. The default setting — volumes claimed outside our StorageClass.
     apply_bundle(
