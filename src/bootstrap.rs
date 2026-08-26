@@ -1441,52 +1441,63 @@ pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
         return Ok(()); // the cluster places the bundle default — nothing to size
     }
 
-    // 1. The StorageClass parameter — the path our own PVCs inherit. SC
-    //    `parameters` are IMMUTABLE in Kubernetes, so the class is replaced
-    //    wholesale: read the current one, swap the replica count, delete,
-    //    re-apply. Bound PVCs are unaffected (their Longhorn volumes carry
-    //    their own counts, healed below) and the brief absent window only
-    //    delays brand-new claims momentarily — the create gate runs before
-    //    this deployment's PVCs exist.
+    // 1. The StorageClass parameter — the path our own PVCs inherit. The SC
+    //    belongs to Longhorn's driver-deployer, which recreates it from the
+    //    `longhorn-storageclass` ConfigMap on every sync: patching the object
+    //    is refused (parameters are immutable) and replacing it is undone.
+    //    The Longhorn-native knob is the ConfigMap itself — edit it, delete
+    //    the class, and wait for the deployer to rebuild it at the
+    //    schedulable count.
+    use k8s_openapi::api::core::v1::ConfigMap;
     use k8s_openapi::api::storage::v1::StorageClass;
-    let sc: Api<StorageClass> = Api::all(client.clone());
-    let current = sc
-        .get(LONGHORN_SC)
+    let cm: Api<ConfigMap> = Api::namespaced(client.clone(), LONGHORN_NS);
+    let current_cm = cm
+        .get("longhorn-storageclass")
         .await
-        .context("reading the longhorn StorageClass to resize")?;
-    let mut parameters = current.parameters.clone().unwrap_or_default();
-    parameters.insert("numberOfReplicas".into(), replicas.to_string());
-    let replacement = serde_json::json!({
-        "apiVersion": "storage.k8s.io/v1",
-        "kind": "StorageClass",
-        "metadata": {
-            "name": LONGHORN_SC,
-            "annotations": current.metadata.annotations.clone().unwrap_or_default(),
-        },
-        "provisioner": current.provisioner,
-        "reclaimPolicy": current.reclaim_policy,
-        "volumeBindingMode": current.volume_binding_mode,
-        "allowVolumeExpansion": current.allow_volume_expansion,
-        "parameters": parameters,
-    });
-    let _ = sc.delete(LONGHORN_SC, &DeleteParams::default()).await;
-    // Deletion is asynchronous: the object lingers with a deletionTimestamp
-    // until the registry drops it, and an apply that lands in that window is
-    // refused as an immutable-parameter change against the OLD object. Wait
-    // it out (bounded — a plain SC carries no finalizers).
-    for _ in 0..30 {
-        if sc.get(LONGHORN_SC).await.is_err() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    apply_bundle(
-        client,
-        &serde_yaml::to_string(&replacement).context("serializing the resized StorageClass")?,
-        BOOTSTRAP_BINDING,
+        .context("reading the longhorn-storageclass ConfigMap")?;
+    let mut sized = current_cm
+        .data
+        .clone()
+        .unwrap_or_default()
+        .get("storageclass.yaml")
+        .cloned()
+        .unwrap_or_default();
+    sized = resize_storageclass_yaml(&sized, replicas)
+        .context("editing numberOfReplicas in the longhorn-storageclass ConfigMap")?;
+    cm.patch(
+        "longhorn-storageclass",
+        &PatchParams::default(),
+        &Patch::Merge(serde_json::json!({
+            "data": { "storageclass.yaml": sized }
+        })),
     )
     .await
-    .context("re-applying the longhorn StorageClass at the schedulable replica count")?;
+    .context("sizing the longhorn-storageclass ConfigMap")?;
+
+    let sc: Api<StorageClass> = Api::all(client.clone());
+    let _ = sc.delete(LONGHORN_SC, &DeleteParams::default()).await;
+    // The deployer rebuilds the class from the patched ConfigMap — wait for
+    // it to reappear at the schedulable count before letting creation
+    // proceed (the absent window only delays brand-new claims momentarily).
+    let mut rebuilt = false;
+    for _ in 0..60 {
+        if let Ok(sc_now) = sc.get(LONGHORN_SC).await {
+            let n = sc_now
+                .parameters
+                .as_ref()
+                .and_then(|p| p.get("numberOfReplicas"))
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            if n == replicas {
+                rebuilt = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    if !rebuilt {
+        bail!("longhorn did not rebuild its StorageClass at {replicas} replica(s) within 120s");
+    }
 
     // 2. The default setting — volumes claimed outside our StorageClass.
     apply_bundle(
@@ -1500,6 +1511,22 @@ pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
     // 3. Volumes already asking for more than the cluster can place.
     heal_overscheduled_volumes(client, replicas).await?;
     Ok(())
+}
+
+/// Swap `numberOfReplicas` in the driver-deployer's `storageclass.yaml` blob.
+/// Round-trips through YAML so the edit is structural, not textual surgery.
+fn resize_storageclass_yaml(yaml: &str, replicas: u32) -> Result<String> {
+    let mut v: serde_json::Value =
+        serde_yaml::from_str(yaml).context("parsing storageclass.yaml")?;
+    let params = v
+        .get_mut("parameters")
+        .and_then(|p| p.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("storageclass.yaml has no parameters map"))?;
+    params.insert(
+        "numberOfReplicas".into(),
+        serde_json::Value::String(replicas.to_string()),
+    );
+    serde_yaml::to_string(&v).context("re-serializing storageclass.yaml")
 }
 
 /// Patch Longhorn volumes asking for more replicas than the cluster can
@@ -1658,6 +1685,29 @@ mod tests {
         assert!(yaml.contains(r#"value: "1""#));
         assert!(yaml.contains("name: replica-soft-anti-affinity"));
         assert!(yaml.contains(r#"value: "true""#));
+    }
+
+    #[test]
+    fn storageclass_yaml_resize_is_structural() {
+        let src = r#"kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: longhorn
+parameters:
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "30"
+  fsType: ext4
+"#;
+        let out = resize_storageclass_yaml(src, 1).unwrap();
+        let v: serde_json::Value = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(
+            v["parameters"]["numberOfReplicas"].as_str(),
+            Some("1"),
+            "replica count swapped: {out}"
+        );
+        // untouched neighbors survive the round-trip
+        assert_eq!(v["parameters"]["staleReplicaTimeout"].as_str(), Some("30"));
+        assert_eq!(v["metadata"]["name"].as_str(), Some("longhorn"));
     }
 
     // --- R7 operator guard (`#115`) -----------------------------------------
