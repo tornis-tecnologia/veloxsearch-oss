@@ -1401,32 +1401,6 @@ async fn schedulable_node_count(client: &Client) -> Result<usize> {
         .count())
 }
 
-/// The two Longhorn settings a sub-default cluster needs (#26): the default
-/// replica count itself, and soft anti-affinity so a transiently cordoned
-/// node degrades replication instead of faulting the volume outright.
-fn longhorn_sizing_settings(replicas: u32) -> String {
-    format!(
-        r#"apiVersion: longhorn.io/v1beta2
-kind: Setting
-metadata:
-  name: default-replica-count
-  namespace: {ns}
-spec:
-  value: "{replicas}"
----
-apiVersion: longhorn.io/v1beta2
-kind: Setting
-metadata:
-  name: replica-soft-anti-affinity
-  namespace: {ns}
-spec:
-  value: "true"
-"#,
-        ns = LONGHORN_NS,
-        replicas = replicas
-    )
-}
-
 /// Bring Longhorn's replica sizing in line with the cluster it must live on
 /// (#26). The count reaches volumes three ways, so the reconcile touches all
 /// three: the `longhorn` StorageClass parameter (what our PVCs inherit), the
@@ -1500,13 +1474,24 @@ pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
     }
 
     // 2. The default setting — volumes claimed outside our StorageClass.
-    apply_bundle(
-        client,
-        &longhorn_sizing_settings(replicas),
-        BOOTSTRAP_BINDING,
-    )
-    .await
-    .context("sizing longhorn's default replica setting")?;
+    //    Merge-patched, not SSA'd: Longhorn's Setting CRD carries fields the
+    //    typed-patch machinery rejects server-side applies over.
+    let gvk = GroupVersionKind::gvk("longhorn.io", "v1beta2", "Setting");
+    let ar = ApiResource::from_gvk(&gvk);
+    let settings: Api<DynamicObject> = Api::namespaced_with(client.clone(), LONGHORN_NS, &ar);
+    for (name, value) in [
+        ("default-replica-count", replicas.to_string()),
+        ("replica-soft-anti-affinity", "true".to_string()),
+    ] {
+        settings
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(serde_json::json!({ "spec": { "value": value } })),
+            )
+            .await
+            .with_context(|| format!("sizing longhorn setting {name}"))?;
+    }
 
     // 3. Volumes already asking for more than the cluster can place.
     heal_overscheduled_volumes(client, replicas).await?;
@@ -1675,16 +1660,6 @@ mod tests {
         assert_eq!(replicas_for_nodes(2), 2);
         assert_eq!(replicas_for_nodes(3), 3); // the bundle default, untouched
         assert_eq!(replicas_for_nodes(64), 3); // big clusters keep the default
-    }
-
-    #[test]
-    fn sizing_settings_target_both_longhorn_knobs() {
-        let yaml = longhorn_sizing_settings(1);
-        assert!(yaml.contains("name: default-replica-count"));
-        assert!(yaml.contains("namespace: longhorn-system"));
-        assert!(yaml.contains(r#"value: "1""#));
-        assert!(yaml.contains("name: replica-soft-anti-affinity"));
-        assert!(yaml.contains(r#"value: "true""#));
     }
 
     #[test]
