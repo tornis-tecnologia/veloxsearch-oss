@@ -80,7 +80,7 @@ rules:
   # working; it just loses the telemetry list.
   - apiGroups: [""]
     resources: ["services", "configmaps"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
   # Events read: granted to the k8s-events agent (same no-escalate parity).
   - apiGroups: ["", "events.k8s.io"]
     resources: ["events"]
@@ -95,11 +95,13 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
-    verbs: ["get", "list", "patch", "delete", "create"]
+    verbs: ["get", "list", "delete"]
   # Storage-sizing reconcile (#26): a sub-3-node cluster gets Longhorn's
-  # replica defaults lowered to what it can schedule — the StorageClass
-  # parameter above, the default-replica-count Setting, and volumes stuck
-  # faulted above the schedulable count.
+  # replica defaults lowered to what it can schedule — the
+  # longhorn-storageclass ConfigMap (the driver-deployer rebuilds the SC from
+  # it), the default-replica-count Setting, and volumes stuck faulted above
+  # the schedulable count. The configmaps `patch` grant lives in the
+  # services+configmaps rule (telemetry parity).
   - apiGroups: ["longhorn.io"]
     resources: ["settings"]
     verbs: ["get", "list", "create", "patch"]
