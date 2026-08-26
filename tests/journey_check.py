@@ -83,8 +83,11 @@ with sync_playwright() as p:
     # 3b. provisioning settle: a fresh deployment is BUSY (nodes booting, PVCs
     # binding) and LOCKS its editing controls (activity.locks_edits). The tab
     # assertions below are about a MANAGED deployment, so wait for the lock to
-    # lift — the reset-pass button is the sentinel (it is disabled while busy).
-    page.wait_for_selector('[data-testid="reset-pass"]:not([disabled])', timeout=900000)
+    # lift. The sentinel (reset-pass) only RENDERS on the Security tab — go
+    # there first, then wait for it enabled (it stays disabled while busy).
+    page.wait_for_selector("nav.tabs", timeout=20000)
+    page.click("nav.tabs button:nth-last-child(2)")
+    page.wait_for_selector('[data-testid="reset-pass"]:not([disabled])', timeout=1800000)
     print(f"  {dep_name} settled (edits unlocked)")
 
     # 4. detail tabs: the global nav STAYS inside a deployment (app.jsx:
