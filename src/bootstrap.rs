@@ -1470,6 +1470,16 @@ pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
         "parameters": parameters,
     });
     let _ = sc.delete(LONGHORN_SC, &DeleteParams::default()).await;
+    // Deletion is asynchronous: the object lingers with a deletionTimestamp
+    // until the registry drops it, and an apply that lands in that window is
+    // refused as an immutable-parameter change against the OLD object. Wait
+    // it out (bounded — a plain SC carries no finalizers).
+    for _ in 0..30 {
+        if sc.get(LONGHORN_SC).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     apply_bundle(
         client,
         &serde_yaml::to_string(&replacement).context("serializing the resized StorageClass")?,
