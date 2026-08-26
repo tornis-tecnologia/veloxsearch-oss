@@ -74,6 +74,10 @@ pub const LONGHORN_SC: &str = "longhorn";
 const LONGHORN_PROVISIONER: &str = "driver.longhorn.io";
 const LONGHORN_MANAGER_DS: &str = "longhorn-manager";
 const LONGHORN_DRIVER_DEPLOYER: &str = "longhorn-driver-deployer";
+/// Replicas per volume the vendored bundle pins (the `longhorn` StorageClass
+/// parameter the driver-deployer creates). The sizing reconcile (#26) lowers
+/// it on clusters too small to ever place three copies.
+const LONGHORN_DEFAULT_REPLICAS: u32 = 3;
 
 /// Provisioners whose volumes don't survive a pod reschedule — "not real"
 /// persistent storage (ADR-031), so a default backed by one triggers the
@@ -213,6 +217,10 @@ pub async fn deployment_sc_allows_expansion(client: &Client) -> Result<Option<bo
 /// clear message rather than provisioning into Pending storage.
 pub async fn ensure_storage_ready(client: &Client) -> Result<()> {
     if classify_storage(client).await?.longhorn_ready() {
+        // Pre-existing Longhorn still gets its replica sizing reconciled: a
+        // single-node cluster carrying the bundle default of three faults
+        // every volume (#26), however Longhorn got there.
+        reconcile_longhorn_sizing(client).await?;
         return Ok(());
     }
     match install_longhorn(client)
@@ -1346,11 +1354,146 @@ pub async fn install_longhorn(client: &Client) -> Result<()> {
     // `longhorn` the sole default by demoting any node-local SC still flagged.
     wait_longhorn_storage_ready(client, LONGHORN_SC, 300).await?;
     demote_node_local_defaults(client).await?;
+    // Size replicas to the cluster that just got Longhorn (#26): a sub-3-node
+    // cluster cannot place the bundle's default of three copies per volume.
+    reconcile_longhorn_sizing(client).await?;
     // Gate: the `longhorn` SC must now be in place and ready (ADR-043).
     match classify_storage(client).await? {
         DeploymentStorage::Longhorn { .. } => Ok(()),
         other => bail!("longhorn installed but its StorageClass is still not usable: {other:?}"),
     }
+}
+
+/// Replicas a cluster of `nodes` schedulable nodes can actually place: the
+/// bundle default while it fits, otherwise one per node (#26). One copy on
+/// one node is exactly the durability of the node-local storage the cluster
+/// arrived with — the R3 remediation's starting point, not a silent downgrade
+/// from a working state: with the bundle default, such a cluster has NO
+/// working volumes at all, only faulted ones.
+pub(crate) fn replicas_for_nodes(nodes: usize) -> u32 {
+    (nodes.max(1) as u32).min(LONGHORN_DEFAULT_REPLICAS)
+}
+
+/// Schedulable node count — the same population R4 sums over (unschedulable
+/// nodes excluded; `node_info` presence proxies a reported node).
+async fn schedulable_node_count(client: &Client) -> Result<usize> {
+    use k8s_openapi::api::core::v1::Node;
+    let api: Api<Node> = Api::all(client.clone());
+    let list = api
+        .list(&ListParams::default())
+        .await
+        .context("listing nodes for storage sizing")?;
+    Ok(list
+        .items
+        .iter()
+        .filter(|n| {
+            let schedulable = !n
+                .spec
+                .as_ref()
+                .and_then(|s| s.unschedulable)
+                .unwrap_or(false);
+            schedulable
+                && n.status
+                    .as_ref()
+                    .and_then(|st| st.node_info.as_ref())
+                    .is_some()
+        })
+        .count())
+}
+
+/// The two Longhorn settings a sub-default cluster needs (#26): the default
+/// replica count itself, and soft anti-affinity so a transiently cordoned
+/// node degrades replication instead of faulting the volume outright.
+fn longhorn_sizing_settings(replicas: u32) -> String {
+    format!(
+        r#"apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata:
+  name: default-replica-count
+  namespace: {ns}
+spec:
+  value: "{replicas}"
+---
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata:
+  name: replica-soft-anti-affinity
+  namespace: {ns}
+spec:
+  value: "true"
+"#,
+        ns = LONGHORN_NS,
+        replicas = replicas
+    )
+}
+
+/// Bring Longhorn's replica sizing in line with the cluster it must live on
+/// (#26). The count reaches volumes three ways, so the reconcile touches all
+/// three: the `longhorn` StorageClass parameter (what our PVCs inherit), the
+/// `default-replica-count` setting (volumes claimed outside our SC), and
+/// already-created volumes stuck above the schedulable count — the upgrade
+/// path for clusters that faulted before this reconcile existed. Clusters
+/// that fit the bundle default are left untouched, which is every ≥3-node
+/// deployment's steady state.
+pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
+    let replicas = replicas_for_nodes(schedulable_node_count(client).await?);
+    if replicas == LONGHORN_DEFAULT_REPLICAS {
+        return Ok(()); // the cluster places the bundle default — nothing to size
+    }
+
+    // 1. The StorageClass parameter — the path our own PVCs take.
+    use k8s_openapi::api::storage::v1::StorageClass;
+    let sc: Api<StorageClass> = Api::all(client.clone());
+    let sc_patch = Patch::Merge(serde_json::json!({
+        "parameters": { "numberOfReplicas": replicas.to_string() }
+    }));
+    sc.patch(LONGHORN_SC, &PatchParams::default(), &sc_patch)
+        .await
+        .context("sizing the longhorn StorageClass replicas")?;
+
+    // 2. The default setting — volumes claimed outside our StorageClass.
+    apply_bundle(
+        client,
+        &longhorn_sizing_settings(replicas),
+        BOOTSTRAP_BINDING,
+    )
+    .await
+    .context("sizing longhorn's default replica setting")?;
+
+    // 3. Volumes already asking for more than the cluster can place.
+    heal_overscheduled_volumes(client, replicas).await?;
+    Ok(())
+}
+
+/// Patch Longhorn volumes asking for more replicas than the cluster can
+/// schedule down to `replicas` (#26). Only volumes ABOVE the schedulable
+/// count are touched — a volume at or below it is placeable as asked.
+async fn heal_overscheduled_volumes(client: &Client, replicas: u32) -> Result<()> {
+    let gvk = GroupVersionKind::gvk("longhorn.io", "v1beta2", "Volume");
+    let ar = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), LONGHORN_NS, &ar);
+    let list = api
+        .list(&ListParams::default())
+        .await
+        .context("listing longhorn volumes to heal")?;
+    let patch = Patch::Merge(serde_json::json!({
+        "spec": { "numberOfReplicas": replicas }
+    }));
+    for v in &list.items {
+        let asked = v
+            .data
+            .get("spec")
+            .and_then(|s| s.get("numberOfReplicas"))
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0);
+        if asked > replicas as u64 {
+            let name = v.metadata.name.as_deref().unwrap_or("<unknown>");
+            api.patch(name, &PatchParams::default(), &patch)
+                .await
+                .with_context(|| format!("healing longhorn volume {name}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Kind ordering inside a bundle: namespaces and CRDs must land before
@@ -1458,6 +1601,27 @@ pub async fn apply_doc(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // --- Longhorn replica sizing (#26) ---------------------------------------
+
+    #[test]
+    fn replica_sizing_never_exceeds_the_bundle_default() {
+        assert_eq!(replicas_for_nodes(0), 1); // degenerate cluster: at least one
+        assert_eq!(replicas_for_nodes(1), 1); // the single-node greenfield shape
+        assert_eq!(replicas_for_nodes(2), 2);
+        assert_eq!(replicas_for_nodes(3), 3); // the bundle default, untouched
+        assert_eq!(replicas_for_nodes(64), 3); // big clusters keep the default
+    }
+
+    #[test]
+    fn sizing_settings_target_both_longhorn_knobs() {
+        let yaml = longhorn_sizing_settings(1);
+        assert!(yaml.contains("name: default-replica-count"));
+        assert!(yaml.contains("namespace: longhorn-system"));
+        assert!(yaml.contains(r#"value: "1""#));
+        assert!(yaml.contains("name: replica-soft-anti-affinity"));
+        assert!(yaml.contains(r#"value: "true""#));
+    }
 
     // --- R7 operator guard (`#115`) -----------------------------------------
 
