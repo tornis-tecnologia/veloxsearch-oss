@@ -69,6 +69,11 @@ function App() {
   const [route, setRoute] = useState({ name: "status" });
   const [deployments, setDeployments] = useState([]);
   const [loaded, setLoaded] = useState(false); // a deployment snapshot has arrived
+  // Host-cluster nodes, fetched once (#26/#32 UI honesty): feeds the
+  // single-copy warning (fewer than 3 nodes → one Longhorn replica) and the
+  // known kernel-incompatibility warning in the wizard. Empty = unknown →
+  // both warnings stay silent rather than guessing.
+  const [hostNodes, setHostNodes] = useState([]);
   const [sseDead, setSseDead] = useState(false);
   const [toast, setToast] = useState({ msg: "", show: false });
   const toastTimer = useRef(null);
@@ -121,6 +126,10 @@ function App() {
     // One eager fetch so the list isn't empty before the first SSE frame.
     API.listDeployments()
       .then(list => { if (alive && Array.isArray(list)) { setDeployments(list.map(adaptDeployment)); setLoaded(true); } })
+      .catch(() => {});
+
+    API.clusterCapacity()
+      .then(c => { if (alive && Array.isArray(c?.nodes)) setHostNodes(c.nodes); })
       .catch(() => {});
 
     let es;
@@ -322,7 +331,7 @@ function App() {
             onCreate={() => go({ name: "create" })} />
         )}
         {route.name === "create" && (
-          <CreateView lang={lang} onCreate={createCluster} onCancel={() => go({ name: "status" })} />
+          <CreateView lang={lang} hostNodes={hostNodes} onCreate={createCluster} onCancel={() => go({ name: "status" })} />
         )}
         {route.name === "capacity" && (
           <CapacityView lang={lang} />
@@ -331,7 +340,7 @@ function App() {
           <SettingsView lang={lang} onToast={showToast} />
         )}
         {route.name === "deployment" && (current
-          ? <DeploymentView d={current} lang={lang} tab={route.tab || "overview"}
+          ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}
               openUpgrade={!!route.upgrade}
               onTab={tab => setRoute(r => ({ ...r, tab, upgrade: false }))}
               onToggleStack={toggleOtelStack}

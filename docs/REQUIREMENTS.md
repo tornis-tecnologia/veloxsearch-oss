@@ -40,6 +40,8 @@ auto-installed (R3), how cert-manager/the operator are auto-installed and gated
 
 Expected-compatible but untested: vanilla kubeadm, k0s + a StorageClass, EKS/GKE/AKS. minikube (node-local `standard` default) now has **continuous smoke evidence** via the trunk CI lane (`Smoke (minikube)`, merged 2026-08-24) — install-and-boot only, not a conformance run. Per-platform install steps for minikube/k0s/k3s/k8s live in [`INSTALL.md`](INSTALL.md).
 
+**Known incompatibility (kernel, [#32](https://github.com/tornis-tecnologia/veloxsearch-oss/issues/32)):** OpenSearch 3.8.0's bundled JDK crashes at boot on Debian kernel `6.1.0-52` (`ClassNotFoundException` in the javaagent bootstrap; reproduced with a bare `ctr run` of the image, no Kubernetes involved — byte-identical images boot on `6.1.0-40`). The wizard warns at version selection and review when a host node reports an affected kernel; the fix is a host kernel change or a different OpenSearch version. The affected matrix beyond this observed combination is unmapped.
+
 > **Refusal/honesty coverage (#34).** ADR-031 turned R3 from a hard fail into a remediation
 > (bootstrap Longhorn), so `k0s-bare` was repurposed off the old R3 hard-fail test — leaving the
 > refusal paths without a live fixture. **`k3s-undersized`** restores live coverage for

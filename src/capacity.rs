@@ -116,6 +116,10 @@ pub async fn cluster_capacity() -> Result<ClusterCapacity> {
             roles: node_roles(node),
             ready,
             pressures,
+            kernel_version: status
+                .and_then(|s| s.node_info.as_ref())
+                .map(|i| i.kernel_version.clone())
+                .unwrap_or_default(),
             cpu: ResUse {
                 total: cpu_cap,
                 used: metrics_available.then_some(n_cpu_used),
