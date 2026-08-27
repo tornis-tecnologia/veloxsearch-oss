@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Secret};
+use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Pod, Secret};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch,
@@ -3030,6 +3030,38 @@ async fn stall_diagnosis_in(namespace: &str, name: &str) -> crate::activity::Clu
         }
     }
 
+    // #27: a recovery this old is not slow, it is wedged. Arm the proven
+    // remediation (throttle + bounce, cooldown-guarded) and surface the pod a
+    // PREVIOUS pass bounced so the activity panel can say what was done.
+    let last = remediation_log()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).cloned());
+    let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
+    if should_remediate(out.recovery_secs, !out.recovery_index.is_empty(), fired_ago) {
+        if let Ok(mut log) = remediation_log().lock() {
+            log.insert(key.clone(), (std::time::Instant::now(), None));
+        }
+        let (ns, nm, idx) = (
+            namespace.to_string(),
+            name.to_string(),
+            out.recovery_index.clone(),
+        );
+        tracing::warn!(
+            "#27 stall remediation armed for {ns}/{nm}: recovery of {idx} held {}s",
+            out.recovery_secs
+        );
+        tokio::spawn(async move {
+            let pod = remediate_wedged_recovery(&ns, &nm, &idx).await;
+            if let Ok(mut log) = remediation_log().lock() {
+                log.insert(format!("{ns}/{nm}"), (std::time::Instant::now(), pod));
+            }
+        });
+    }
+    if let Some((_, Some(pod))) = last {
+        out.remediated_node = Some(pod);
+    }
+
     if let Ok(mut cache) = diagnosis_cache().lock() {
         // Deleted deployments would otherwise leak an entry each. Nothing here
         // is state worth keeping, so anything long stale simply goes.
@@ -3037,6 +3069,120 @@ async fn stall_diagnosis_in(namespace: &str, name: &str) -> crate::activity::Clu
         cache.insert(key, (std::time::Instant::now(), out.clone()));
     }
     out
+}
+
+// ───────────────── stall remediation (#27, live-validated on the fleet) ────
+
+/// #27: once the SAME recovery has held this long, reporting is no longer
+/// enough — the wedge does not clear on its own. 10 minutes is ~2 orders of
+/// magnitude past a legitimate small-index recovery (seconds) and well under
+/// the incident's 30 hours.
+const REMEDIATE_AFTER_SECS: i64 = 600;
+
+/// One remediation pass per episode: firing the bounce again within this
+/// window adds churn, not progress. If the stall is STILL the same after the
+/// cooldown, a second pass is legitimately a new attempt.
+const REMEDIATE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// Last remediation per deployment: when it fired, and the pod it bounced
+/// (`None` while in flight, or when the pass could not name a node — the
+/// diagnosis still reports, the panel just has nothing extra to say).
+type RemediationLog =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>;
+
+fn remediation_log() -> &'static RemediationLog {
+    static LOG: std::sync::OnceLock<RemediationLog> = std::sync::OnceLock::new();
+    LOG.get_or_init(Default::default)
+}
+
+/// The pure decision — budget elapsed, something nameable, cooldown respected
+/// — split out so the policy is testable without a cluster.
+fn should_remediate(
+    recovery_secs: i64,
+    has_index: bool,
+    last_fired_ago: Option<std::time::Duration>,
+) -> bool {
+    has_index
+        && recovery_secs >= REMEDIATE_AFTER_SECS
+        && last_fired_ago.is_none_or(|ago| ago >= REMEDIATE_COOLDOWN)
+}
+
+/// Break a wedged rolling restart, the sequence proven live on the
+/// conformance fleet's 30-hour stall (#27): the operator's node restart leaves
+/// dead peer-recovery sessions behind, they occupy OpenSearch's default TWO
+/// `node_concurrent_recoveries` slots forever, and every later recovery —
+/// including the one blocking green — queues behind them for eternity.
+///
+/// 1. Raise the recovery throttle transiently: the queued recoveries flow.
+/// 2. Bounce the node holding the wedged recovery: a fresh JVM is a fresh
+///    recovery listener, and the operator tolerates the pod coming back.
+///
+/// Both actions were validated by hand against the live stalled deployment
+/// (the restart walked 25% → 40% seconds later, first motion in a day and a
+/// half); this function is that exact sequence, automated.
+async fn remediate_wedged_recovery(namespace: &str, name: &str, index: &str) -> Option<String> {
+    let base = crate::recipes::os_base_in(name, namespace);
+    let http = crate::recipes::http().ok()?;
+    let (user, pass) = admin_creds_in(namespace, name).await;
+    let auth =
+        |rb: reqwest::RequestBuilder| rb.basic_auth(&user, Some(&pass)).timeout(DIAGNOSIS_TIMEOUT);
+
+    // 1. Transient throttle raise — enough slots for the queue to drain past
+    //    the two dead sessions.
+    if let Err(e) = auth(
+        http.put(format!("{base}/_cluster/settings"))
+            .json(&serde_json::json!({
+                "transient": { "cluster.routing.allocation.node_concurrent_recoveries": 8 }
+            })),
+    )
+    .send()
+    .await
+    {
+        tracing::warn!("#27 throttle raise for {namespace}/{name} failed: {e:#}");
+    }
+
+    // 2. Name the node holding the wedged recovery — the INITIALIZING replica
+    //    of the index we already diagnosed. Its node name IS the pod name
+    //    (network.publish_host is the pod name by operator convention).
+    let node = auth(http.get(format!(
+        "{base}/_cat/shards/{index}?h=state,node&format=json"
+    )))
+    .send()
+    .await
+    .ok()?
+    .json::<serde_json::Value>()
+    .await
+    .ok()?
+    .as_array()?
+    .iter()
+    .find(|r| {
+        r.get("state")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("initializing"))
+    })?
+    .get("node")
+    .and_then(|n| n.as_str())?
+    .to_string();
+
+    // 3. The bounce. Best-effort by design: the operator owns the pod's
+    //    lifecycle and will recreate it; our job was to clear the dead
+    //    sessions, and a failed delete is loud, logged, and retried only
+    //    after the cooldown.
+    let client = client().await.ok()?;
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    match pods.delete(&node, &DeleteParams::default()).await {
+        Ok(_) => {
+            tracing::warn!(
+                "#27 remediation for {namespace}/{name}: throttled recoveries and bounced \
+                 pod {node} to clear the wedged {index} recovery"
+            );
+            Some(node)
+        }
+        Err(e) => {
+            tracing::warn!("#27 bounce of {node} in {namespace} failed: {e:#}");
+            None
+        }
+    }
 }
 
 /// Message of the most recent `Warning`/`Upgrade` Event on a deployment's CR.
@@ -5045,6 +5191,34 @@ pub async fn provision_tenant(t: &TenantIdentity, q: &TenantQuota) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── stall-remediation policy (#27) ─────────────────────────────────
+    //
+    // The ACTIONS (throttle raise, pod bounce) are fleet-validated, not
+    // unit-testable; the POLICY — when to fire — is pure and proven here.
+
+    #[test]
+    fn stall_remediation_respects_budget_and_cooldown() {
+        use std::time::Duration;
+        // Budget: a legitimate small-index recovery is seconds; 10 min is
+        // decisively wedged. One second under the budget must NOT fire.
+        assert!(!should_remediate(REMEDIATE_AFTER_SECS - 1, true, None));
+        assert!(should_remediate(REMEDIATE_AFTER_SECS, true, None));
+        // Cooldown: a recent pass means the bounce is still working through;
+        // re-firing adds churn. After the cooldown, a still-stalled recovery
+        // legitimately earns a second attempt.
+        assert!(!should_remediate(
+            9_999_999,
+            true,
+            Some(Duration::from_secs(60))
+        ));
+        let just_under = REMEDIATE_COOLDOWN - Duration::from_secs(1);
+        assert!(!should_remediate(9_999_999, true, Some(just_under)));
+        assert!(should_remediate(9_999_999, true, Some(REMEDIATE_COOLDOWN)));
+        // Nothing nameable → nothing to remediate: a stall without an index
+        // is reported, not bounced.
+        assert!(!should_remediate(9_999_999, false, None));
+    }
 
     // ── per-tenant isolation primitives (#81, ADR-044/051) ─────────────
     //

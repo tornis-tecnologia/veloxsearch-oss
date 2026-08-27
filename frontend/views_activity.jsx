@@ -101,6 +101,9 @@ function StallNotice({ a, lang }) {
   if (b.recovery_index) {
     lines.push(fmt(t.act_stall_recovery, b.recovery_index, b.recovery_stage || "?", fmtDur(b.recovery_secs)));
   }
+  // #27: what the app already DID about it — stated as a fact, only after
+  // the bounce happened (the backend sets the field on success).
+  if (b.remediated_node) lines.push(fmt(t.act_stall_remediated, b.remediated_node));
   if (b.component && b.component_status) {
     lines.push(fmt(t.act_stall_component, b.component, b.component_status));
   }

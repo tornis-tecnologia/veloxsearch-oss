@@ -138,6 +138,10 @@ pub struct ClusterBlock {
     pub recovery_index: String,
     pub recovery_stage: String,
     pub recovery_secs: i64,
+    /// The pod a previous stall-remediation pass bounced (#27) — set only
+    /// after the bounce happened, so the panel can state a fact, not an
+    /// intention.
+    pub remediated_node: Option<String>,
 }
 
 impl Default for ClusterBlock {
@@ -151,6 +155,7 @@ impl Default for ClusterBlock {
             recovery_index: String::new(),
             recovery_stage: String::new(),
             recovery_secs: 0,
+            remediated_node: None,
         }
     }
 }
@@ -180,6 +185,9 @@ pub struct Blocked {
     pub recovery_index: String,
     pub recovery_stage: String,
     pub recovery_secs: i64,
+    /// Set when the app already bounced the wedged node itself (#27); the
+    /// UI states what was done while the stall persists.
+    pub remediated_node: Option<String>,
 }
 
 impl Default for Blocked {
@@ -193,6 +201,7 @@ impl Default for Blocked {
             recovery_index: c.recovery_index,
             recovery_stage: c.recovery_stage,
             recovery_secs: c.recovery_secs,
+            remediated_node: None,
         }
     }
 }
@@ -429,6 +438,7 @@ fn blocked_of(i: &ActivityInput) -> Blocked {
         recovery_index: c.recovery_index,
         recovery_stage: c.recovery_stage,
         recovery_secs: c.recovery_secs,
+        remediated_node: c.remediated_node,
     }
 }
 
@@ -595,6 +605,7 @@ mod tests {
                 recovery_index: ".opendistro_security".into(),
                 recovery_stage: "init".into(),
                 recovery_secs: 57_240,
+                remediated_node: None,
             }),
             ..steady()
         }

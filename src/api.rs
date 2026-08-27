@@ -212,6 +212,9 @@ pub struct BlockedStatus {
     pub recovery_index: String,
     pub recovery_stage: String,
     pub recovery_secs: i64,
+    /// The pod the stall remediation bounced (#27) — `None` until it happened.
+    #[serde(default)]
+    pub remediated_node: Option<String>,
 }
 
 impl Default for BlockedStatus {
@@ -229,6 +232,7 @@ fn blocked_status_of(b: &crate::activity::Blocked) -> BlockedStatus {
         recovery_index: b.recovery_index.clone(),
         recovery_stage: b.recovery_stage.clone(),
         recovery_secs: b.recovery_secs,
+        remediated_node: b.remediated_node.clone(),
     }
 }
 
