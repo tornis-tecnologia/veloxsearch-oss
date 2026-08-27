@@ -277,7 +277,7 @@ function adaptDeployment(cs) {
     activity: cs.activity || {
       kind: "idle", stage: "ready", percent: 100, settled: true, locks_edits: false,
       nodes_ready: 0, nodes_total: 0, since_secs: 0, stalled: false, serving: true,
-      blocked: { health: "", unassigned_shards: -1, component: "", component_status: "", recovery_index: "", recovery_stage: "", recovery_secs: 0 },
+      blocked: { health: "", unassigned_shards: -1, component: "", component_status: "", recovery_index: "", recovery_stage: "", recovery_secs: 0, remediated_node: null },
     },
   };
 }
