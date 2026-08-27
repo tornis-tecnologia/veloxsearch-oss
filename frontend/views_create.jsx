@@ -55,8 +55,9 @@ function PurposeCard({ p, selected, lang, onSelect }) {
   );
 }
 
-function CreateView({ lang, onCreate, onCancel }) {
+function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   const t = STR[lang];
+  const fmt = (s, ...args) => s.replace(/\{(\d+)\}/g, (_, i) => String(args[+i] ?? "?"));
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [purpose, setPurpose] = useState("observability");
@@ -66,6 +67,16 @@ function CreateView({ lang, onCreate, onCancel }) {
   // a malformed tag or one whose images are not published.
   const [versions, setVersions] = useState([]);
   const [version, setVersion] = useState("");
+
+  // ── host-cluster honesty (#26/#32) — AFTER the state it reads: a const
+  // referencing `version` above its declaration is a TDZ crash at render, not
+  // a build error (caught live by the fleet probe). Both warnings are SILENT
+  // when hostNodes is empty (capacity unknown) — a guess rendered as a warning
+  // is worse than saying nothing. ────────────────────────────────────────────
+  const singleCopy = hostNodes.length > 0 && hostNodes.length < 3;
+  const kernelIncompat =
+    hostNodes.some(n => (n.kernel_version || "").startsWith("6.1.0-52")) &&
+    version.startsWith("3.8");
   const [customVersion, setCustomVersion] = useState("");
   const [size, setSize] = useState("small");
   // No longer a form field: the data-sources step moved to the Integrations
@@ -238,6 +249,13 @@ function CreateView({ lang, onCreate, onCancel }) {
                 ))}
                 <option value={OTHER_VERSION}>{t.version_other}</option>
               </select>
+              {/* #32: OpenSearch 3.8.0's bundled JDK dies on Debian kernel
+                  6.1.0-52 (fleet-proven, bare `ctr run` repro). A warn, not a
+                  refuse: the affected matrix is one observed combo, not a
+                  mapped boundary, and a kernel upgrade is the user's fix. */}
+              {kernelIncompat && (
+                <p className="hint" style={{ color: "var(--warn)", marginBottom: 0 }}>⚠ {t.kernel_bad_h}</p>
+              )}
             </Field>
             {version === OTHER_VERSION && (
               <Field label={t.version_manual} hint={t.version_manual_hint} htmlFor="create-version-custom">
@@ -323,6 +341,28 @@ function CreateView({ lang, onCreate, onCancel }) {
           <div className="view-enter">
             <div className="section-title">{t.review_h}</div>
             <p className="hint" style={{ marginTop: -6, marginBottom: 18 }}>{t.review_p}</p>
+            {/* #26: one Longhorn copy per volume on a sub-3-node cluster —
+                the durability of the node-local storage the cluster arrived
+                with, and the reason snapshots exist. Stated, not hidden. */}
+            {singleCopy && (
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-start", border: "1px solid var(--warn)", borderRadius: "var(--radius)", padding: "10px 14px", marginBottom: 14 }}>
+                <span aria-hidden="true" style={{ color: "var(--warn)" }}>⚠</span>
+                <span style={{ fontSize: 13.5 }}>
+                  <b>{t.single_copy_h}</b>
+                  <span style={{ color: "var(--text-2)" }}> — {fmt(t.single_copy_p, hostNodes.length)}</span>
+                </span>
+              </div>
+            )}
+            {/* #32: known host-kernel incompatibility — a warn, not a refuse. */}
+            {kernelIncompat && (
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-start", border: "1px solid var(--warn)", borderRadius: "var(--radius)", padding: "10px 14px", marginBottom: 14 }}>
+                <span aria-hidden="true" style={{ color: "var(--warn)" }}>⚠</span>
+                <span style={{ fontSize: 13.5 }}>
+                  <b>{t.kernel_bad_h}</b>
+                  <span style={{ color: "var(--text-2)" }}> — {t.kernel_bad_p}</span>
+                </span>
+              </div>
+            )}
             <div style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "4px 16px" }}>
               {/* The suffix is generated server-side at submit (ADR-020); the
                   old "-xxxx" read like a real value. */}

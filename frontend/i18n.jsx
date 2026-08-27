@@ -341,6 +341,10 @@ const STR = {
     act_stall_unassigned: "{0} shards sem alocação.",
     act_stall_recovery: "A recuperação de um shard de {0} está parada em `{1}` há {2}.",
     act_stall_remediated: "O nó travado ({0}) foi reiniciado automaticamente para liberar a recuperação.",
+    single_copy_h: "1 cópia dos dados",
+    single_copy_p: "este cluster tem {0} nó(s) — cada volume terá uma única cópia no Longhorn. Perder o nó perde os dados; configure snapshots (aba Backup) antes de confiar neste deployment.",
+    kernel_bad_h: "OpenSearch 3.8.0 × kernel 6.1.0-52: incompatível",
+    kernel_bad_p: "os nós podem falhar na inicialização neste kernel (issue #32). Atualize o kernel do host ou escolha outra versão do OpenSearch.",
     act_stall_component: "O operador ainda não terminou {0} ({1}).",
     act_stall_unknown: "O cluster não deu um motivo. Abra os Detalhes abaixo: os Events e o estado dos pods são o que resta.",
     act_stall_serving: "Isto não é uma queda: as primárias estão no ar, o cluster atende e continua indexando. O que não terminou foi a convergência.",
@@ -890,6 +894,10 @@ const STR = {
     // index name).
     act_stall_h: "Stalled — nothing has advanced for {0}",
     act_stall_p: "The cluster is still answering, but this operation is not finishing. Here is what it reports:",
+    single_copy_h: "single data copy",
+    single_copy_p: "this cluster has {0} node(s) — every volume gets a single Longhorn copy. Losing the node loses the data; configure snapshots (Backup tab) before relying on this deployment.",
+    kernel_bad_h: "OpenSearch 3.8.0 × kernel 6.1.0-52: incompatible",
+    kernel_bad_p: "nodes may crash at boot on this kernel (issue #32). Upgrade the host kernel or choose a different OpenSearch version.",
     act_stall_health: "Waiting for the cluster to go green — it is {0}.",
     act_stall_unassigned: "{0} unassigned shards.",
     act_stall_recovery: "A shard recovery on {0} has been stuck in `{1}` for {2}.",
@@ -1439,6 +1447,10 @@ const STR = {
     act_src_state: "estado actual",
     // un estado bloqueado se explica en el lugar, nunca en un toast (ADR-050,
     // #131). Compuesto a partir de HECHOS que envía el servidor — la red no
+    single_copy_h: "una copia de datos",
+    single_copy_p: "este clúster tiene {0} nodo(s) — cada volumen tendrá una única copia en Longhorn. Perder el nodo pierde los datos; configura snapshots (pestaña Backup) antes de confiar en este deployment.",
+    kernel_bad_h: "OpenSearch 3.8.0 × kernel 6.1.0-52: incompatible",
+    kernel_bad_p: "los nodos pueden fallar al arrancar en este kernel (issue #32). Actualiza el kernel del host o elige otra versión de OpenSearch.",
     // lleva prosa, solo el vocabulario del propio clúster (yellow, init,
     // RollingRestart, el nombre de un índice).
     act_stall_h: "Detenido — nada avanza hace {0}",

@@ -538,6 +538,11 @@ pub struct NodeCapacity {
     pub ready: bool,
     /// Active node pressures (MemoryPressure / DiskPressure / PIDPressure).
     pub pressures: Vec<String>,
+    /// Host kernel as the kubelet reports it (`6.1.0-52-cloud-amd64`) — feeds
+    /// the known-incompatibility warning in the wizard (#32: OpenSearch 3.8.0's
+    /// bundled JDK dies on Debian kernel 6.1.0-52).
+    #[serde(default)]
+    pub kernel_version: String,
     pub cpu: ResUse,
     pub mem: ResUse,
     pub host_disk: Option<ResUse>,

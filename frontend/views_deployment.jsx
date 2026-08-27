@@ -1515,7 +1515,7 @@ function SecurityTab({ d, lang, onReset, onToast, locked }) {
   );
 }
 
-function DeploymentView({ d, lang, tab, onTab, onToggleStack, onSaveEdit, onResetPass, onToast, onDelete, openUpgrade }) {
+function DeploymentView({ d, lang, hostNodes = [], tab, onTab, onToggleStack, onSaveEdit, onResetPass, onToast, onDelete, openUpgrade }) {
   const t = STR[lang];
   const [confirm, setConfirm] = useState(false);
   // Computed once, here, from the server's verdict — the tabs receive the
@@ -1535,6 +1535,11 @@ function DeploymentView({ d, lang, tab, onTab, onToggleStack, onSaveEdit, onRese
     <div className="view-enter">
       <h1 className="page-title" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <span style={{ color: "var(--text-3)" }}>{d.id}</span>
+        {/* #26: one Longhorn copy per volume on a sub-3-node host cluster —
+            said in place, next to the thing it is true about. */}
+        {hostNodes.length > 0 && hostNodes.length < 3 && (
+          <span className="badge" style={{ textTransform: "none", color: "var(--warn)" }} title={t.single_copy_p}>{t.single_copy_h}</span>
+        )}
       </h1>
 
       <nav className="tabs" style={{ marginTop: 18 }}>
