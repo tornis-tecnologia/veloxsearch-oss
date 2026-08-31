@@ -1,0 +1,54 @@
+name: Mirror watch
+
+# The get.veloxsearch.ai install paths are REDIRECTS to this repo's latest
+# release assets (issue #37): the release pipeline is the only publisher, so
+# the mirror cannot drift. This watch proves that stays true — daily, and on
+# demand. A failure means someone replaced the redirects with a local file
+# again, or the release pipeline changed asset names; both are exactly the
+# week-long silent staleness this exists to prevent.
+
+on:
+  schedule:
+    - cron: "23 4 * * *" # daily, 04:23 UTC — off the whole hour
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: get.veloxsearch.ai serves the latest release
+    runs-on: ubuntu-latest
+    steps:
+      - name: The mirror redirects at the pipeline
+        run: |
+          set -euo pipefail
+          for pair in \
+            "install.yml|install.yaml" \
+            "install.yaml|install.yaml" \
+            "velox|velox-linux-amd64" \
+            "velox.sha256|SHA256SUMS"; do
+            path="${pair%%|*}"; asset="${pair##*|}"
+            loc="$(curl -sSI --max-time 30 "https://get.veloxsearch.ai/$path" \
+              | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}')"
+            case "$loc" in
+              https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/$asset)
+                echo "  /$path -> $asset  OK" ;;
+              *)
+                echo "::error::/$path no longer redirects at the release asset (Location: ${loc:-none})"
+                exit 1 ;;
+            esac
+          done
+
+      - name: Byte parity — what users get via the mirror vs the release asset
+        run: |
+          set -euo pipefail
+          rel="https://github.com/${{ github.repository }}/releases/latest/download/install.yaml"
+          mir="https://get.veloxsearch.ai/install.yml"
+          a="$(curl -fsSL --max-time 60 "$rel" | sha256sum | awk '{print $1}')"
+          b="$(curl -fsSL --max-time 60 "$mir" | sha256sum | awk '{print $1}')"
+          if [ "$a" != "$b" ]; then
+            echo "::error::mirror content diverged from the release asset ($a vs $b)"
+            exit 1
+          fi
+          echo "byte-identical: $a"
