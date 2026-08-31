@@ -140,6 +140,16 @@ jobs:
       - name: Sign the image
         run: cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
 
+      # `:latest` is deliberately NOT what the install paths use (they are
+      # digest- or version-pinned), but third parties pull it regardless — so
+      # it stays exactly this release's manifest, forever (issue #37: it once
+      # pointed at the closed pre-OSS build for a week because nothing owned
+      # it). imagetools create tags the already-pushed digest verbatim.
+      - name: Point :latest at this release
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create             -t "$IMAGE:latest"             "$IMAGE@${{ steps.push.outputs.digest }}"
+
   release:
     name: Tag and publish the release
     needs: [gate, publish]
