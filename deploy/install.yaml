@@ -324,7 +324,7 @@ spec:
           # `kubectl apply` of a floating tag makes the running version a
           # function of when the pod last restarted. The release job rewrites
           # this line, so the manifest and the binary are always one artifact.
-          image: docker.io/tornistecnologia/veloxsearch-oss:0.8.0
+          image: docker.io/tornistecnologia/veloxsearch-oss:0.8.1
           imagePullPolicy: IfNotPresent
           # Container hardening (#118). The image already runs as uid 10001, but
           # an image USER is a default a cluster can override; this makes it a
