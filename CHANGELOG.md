@@ -8,6 +8,54 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-27
+
+### Fixed
+- **Single-node and small clusters could never go green (#26):** the vendored
+  Longhorn bundle pins three replicas per volume, unschedulable on a cluster
+  with fewer nodes — every volume sat `faulted`, every deployment stalled. The
+  storage reconcile now sizes replicas to the schedulable-node count through
+  the `longhorn-storageclass` ConfigMap (the driver-deployer rebuilds the
+  StorageClass from it — patching the object is immutable-refused, replacing
+  it is undone), merge-patches the `default-replica-count` and
+  `replica-soft-anti-affinity` settings, and heals volumes already stuck above
+  the schedulable count: the in-place upgrade path for clusters that faulted
+  on 0.8.0. Runtime RBAC gains what the reconcile touches. Clusters that fit
+  the default (≥3 nodes) are untouched. Live-validated on the conformance
+  fixture that found it: create gate hard-failure → 5 seconds.
+- **A wedged rolling restart no longer hangs for days (#27):** the operator's
+  node restart leaves dead peer-recovery sessions that squat OpenSearch's
+  default two recovery slots forever, freezing the green gate with every edit
+  locked. The stall diagnosis ADR-050 already runs now arms the
+  fleet-proven remediation after a 10-minute budget (cooldown-guarded):
+  transient recovery-throttle raise + bounce of the node holding the wedged
+  recovery, surfaced on the activity panel in pt/en/es — stated only after it
+  happened.
+- `chacha20` yanked upstream redden the supply-chain gate; the lock moves to
+  the replacement release.
+
+### Added
+- **UI honesty warnings (#26 follow-up, #32):** the wizard's review step and
+  the deployment overview say when a sub-3-node cluster means a single
+  Longhorn copy per volume (snapshots advised), and the wizard warns at
+  version selection when a host node reports Debian kernel `6.1.0-52` —
+  OpenSearch 3.8.x nodes crash at boot there (known incompatibility, see
+  REQUIREMENTS). A warn, deliberately not a refusal: the affected matrix is
+  one observed combination, and the fix is the user's. `kernel_version` now
+  rides the capacity payload (absent on older servers → the warning stays
+  silent rather than guessing).
+
+### Changed
+- `journey_check.py` modernized against the current wizard and deployment
+  surface (it was last verified pre-SPA-rewrite): no default size in the
+  4-step wizard, global nav that stays visible inside a deployment, the
+  ADR-035 heap form, the generated-password security tab, and the settle
+  wait on the tab that renders its sentinel.
+- `docs/REQUIREMENTS.md`: every conformance row re-dated 2026-08-25 with live
+  v0.8.0 evidence, the refusal fixture's first-ever run recorded, minikube
+  moved to continuous smoke evidence, and the kernel known-incompatibility
+  paragraph added.
+
 ## [0.8.0] - 2026-08-24
 
 ### Added
