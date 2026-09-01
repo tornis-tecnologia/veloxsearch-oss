@@ -45,7 +45,7 @@ futures = { version = "0.3" }
 serde_yaml = { version = "0.9", optional = true }
 
 # Server-only (Kubernetes / OpenSearch) dependencies.
-kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"], optional = true }
+kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"], optional = true }
 rustls = { version = "0.23", optional = true }
 hmac = { version = "0.12", optional = true }
 bcrypt = { version = "0.19", optional = true }
