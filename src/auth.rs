@@ -18,7 +18,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, Patch, PatchParams};
 use sha2::Sha256;
