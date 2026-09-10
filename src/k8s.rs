@@ -1068,6 +1068,14 @@ pub async fn create_cluster(
         .await
         .context("applying OpenSearchCluster CR")?;
 
+    // #46: the operator materializes the Dashboards Deployment asynchronously
+    // after the CR is accepted; make it survivable the moment it exists
+    // (probe budget + Recreate), off the create flow's critical path.
+    tokio::spawn(spawn_dashboards_survivability(
+        dep.namespace().to_string(),
+        name.to_string(),
+    ));
+
     // Public dashboards ingress at <name>.<base_domain> — ingress mode only
     // (ADR-027). In portforward mode no Ingress exists and the UI hands out a
     // kubectl port-forward command instead.
@@ -2515,7 +2523,10 @@ async fn status_from(
     {
         // Confirm the last clause cheaply: a settled cluster's Dashboards
         // Deployment is up, and this is the one call the fast path still makes.
-        if dashboards_ready(client, &name).await {
+        // The namespace is the CR's (`obj_ns`), not the app's own — the
+        // pre-#46 version looked in `ns()` and so could never see a
+        // per-tenant Dashboards Deployment at all.
+        if dashboards_ready_in(client, &obj_ns, &name).await {
             crate::activity::Activity {
                 // Even the fast path carries the node pair, so the tile has ONE
                 // source in the steady state as well (issue #131).
@@ -2540,6 +2551,7 @@ async fn status_from(
                 // seconds-scale — not a stall worth two HTTP calls to explain.
                 since_secs: 0,
                 cluster: None,
+                dashboards: None,
             })
         }
     } else {
@@ -2555,7 +2567,7 @@ async fn status_from(
             nodes_updated,
             pvcs_bound,
             pvcs_total,
-            dashboards_ready: dashboards_ready(client, &name).await,
+            dashboards_ready: dashboards_ready_in(client, &obj_ns, &name).await,
             upgrade: upgrade.clone(),
             components,
             since_secs: node_pool_age_secs(
@@ -2566,6 +2578,7 @@ async fn status_from(
             )
             .await,
             cluster: None,
+            dashboards: None,
         };
         // Two passes, on purpose (issue #131). The first is the pure verdict
         // from Kubernetes alone; only if THAT says the deployment has been
@@ -2579,6 +2592,14 @@ async fn status_from(
             first
         } else {
             input.cluster = Some(stall_diagnosis_in(&obj_ns, &name).await);
+            // #46: a stall that landed exactly on the dashboards rung (nodes
+            // green, security done, Dashboards never ready) has its own
+            // question to ask — and its own remediation to arm. The fetch is
+            // stage-gated so a nodes-side stall still costs exactly what it
+            // always did.
+            if first.stage == "dashboards" {
+                input.dashboards = Some(dashboards_block_in(&obj_ns, &name).await);
+            }
             crate::activity::evaluate(&input)
         }
     };
@@ -2855,9 +2876,9 @@ pub async fn activity_log(dep: &Deployment, limit: usize) -> Result<Vec<Activity
 /// at. Best-effort: any lookup failure reads as not-ready, which keeps the
 /// deployment in an activity state rather than declaring it settled on a
 /// missing answer.
-async fn dashboards_ready(client: &Client, name: &str) -> bool {
+async fn dashboards_ready_in(client: &Client, namespace: &str, name: &str) -> bool {
     use k8s_openapi::api::apps::v1::Deployment;
-    let api: Api<Deployment> = Api::namespaced(client.clone(), ns());
+    let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
     match api.get_opt(&format!("{name}-dashboards")).await {
         Ok(Some(d)) => d
             .status
@@ -3183,6 +3204,330 @@ async fn remediate_wedged_recovery(namespace: &str, name: &str, index: &str) -> 
             None
         }
     }
+}
+
+// ───────────── dashboards stall diagnosis + remediation (#46) ───────────────
+//
+// The incident: a first Dashboards boot that starts its saved-objects
+// migration while the cluster is still settling gets killed by the operator's
+// hardcoded ~210s startup probe, leaving `.kibana_1` half-migrated. Every
+// later boot then hits `resource_already_exists_exception`, interprets it as
+// "another instance is migrating", waits forever, and is killed again — a
+// self-sustaining crash-loop that only ever ends by hand. Observed live:
+// 235 restarts over 17 hours on a cluster that was green in every other
+// respect. The fix has two halves: make the first boot survivable (below,
+// `ensure_dashboards_survivability`) and self-heal the deadlock if it happens
+// anyway (`remediate_kibana_deadlock`).
+
+/// #46: three full crash cycles is a pattern, not a flake. One restart is a
+/// slow cluster; three means the boot is deterministically dying, which is
+/// the deadlock's signature (and harmless to treat even when the cause is
+/// something else — see the safety note on `remediate_kibana_deadlock`).
+const DASHBOARDS_REMEDIATE_AFTER_RESTARTS: i32 = 3;
+
+/// One remediation pass per episode, same contract as `REMEDIATE_COOLDOWN`.
+const DASHBOARDS_REMEDIATE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// Last dashboards remediation per deployment: when it fired, and whether the
+/// pass completed (`None` while in flight — a fact, not an intention).
+type DashboardsRemediationLog =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<bool>)>>;
+
+fn dashboards_remediation_log() -> &'static DashboardsRemediationLog {
+    static LOG: std::sync::OnceLock<DashboardsRemediationLog> = std::sync::OnceLock::new();
+    LOG.get_or_init(Default::default)
+}
+
+/// TTL cache for the dashboards half, same contract as `diagnosis_cache`: the
+/// SSE loop asks every 3s, and the answer is only paid for by deployments
+/// that are actually stalled on the rung.
+type DashboardsCache = std::sync::Mutex<
+    std::collections::HashMap<String, (std::time::Instant, crate::activity::DashboardsBlock)>,
+>;
+
+fn dashboards_cache() -> &'static DashboardsCache {
+    static CACHE: std::sync::OnceLock<DashboardsCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// The pure decision — crash-looping, budget of restarts, cooldown respected
+/// — split out so the policy is testable without a cluster, exactly like
+/// `should_remediate`.
+fn should_remediate_dashboards(
+    restarts: i32,
+    waiting_reason: &str,
+    last_fired_ago: Option<std::time::Duration>,
+) -> bool {
+    waiting_reason == "CrashLoopBackOff"
+        && restarts >= DASHBOARDS_REMEDIATE_AFTER_RESTARTS
+        && last_fired_ago.is_none_or(|ago| ago >= DASHBOARDS_REMEDIATE_COOLDOWN)
+}
+
+/// The Kubernetes half of a dashboards-rung stall (#46): restarts and waiting
+/// reason of the worst Dashboards container, from the same `pods` read the
+/// runtime grant already allows — NOT the container logs (see
+/// `DashboardsBlock` for why that refusal stands). Memoized, best-effort per
+/// pod, and arms the one-shot remediation when the crash-loop budget is met.
+async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::DashboardsBlock {
+    let key = format!("{namespace}/{name}");
+    if let Ok(cache) = dashboards_cache().lock() {
+        if let Some((at, hit)) = cache.get(&key) {
+            if at.elapsed() < DIAGNOSIS_TTL {
+                return hit.clone();
+            }
+        }
+    }
+
+    let mut out = crate::activity::DashboardsBlock::default();
+    let prefix = format!("{name}-dashboards");
+    if let Ok(client) = client().await {
+        use k8s_openapi::api::core::v1::Pod;
+        let pods: Api<Pod> = Api::namespaced(client, namespace);
+        if let Ok(list) = pods.list(&ListParams::default()).await {
+            for pod in list {
+                if !pod
+                    .metadata
+                    .name
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with(&prefix))
+                {
+                    continue;
+                }
+                let Some(status) = pod.status else { continue };
+                for cs in status.container_statuses.unwrap_or_default() {
+                    // The worst container is the story; a healthy sibling
+                    // replica must not soften it.
+                    if cs.restart_count > out.restarts {
+                        out.restarts = cs.restart_count;
+                    }
+                    // The waiting reason of the crash-looping container, kept
+                    // verbatim — the panel words it, the wire never does.
+                    if let Some(waiting) = cs.state.and_then(|s| s.waiting) {
+                        if let Some(reason) = waiting.reason.filter(|r| !r.is_empty()) {
+                            out.waiting_reason = reason;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // #46: arm the one-shot remediation and surface what a PREVIOUS pass did,
+    // the same contract as the #27 half above.
+    let last = dashboards_remediation_log()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).cloned());
+    let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
+    if should_remediate_dashboards(out.restarts, &out.waiting_reason, fired_ago) {
+        if let Ok(mut log) = dashboards_remediation_log().lock() {
+            log.insert(key.clone(), (std::time::Instant::now(), None));
+        }
+        let (ns, nm) = (namespace.to_string(), name.to_string());
+        tracing::warn!(
+            "#46 dashboards remediation armed for {ns}/{nm}: {} restarts ({})",
+            out.restarts,
+            out.waiting_reason
+        );
+        tokio::spawn(async move {
+            let ok = remediate_kibana_deadlock(&ns, &nm).await;
+            if let Ok(mut log) = dashboards_remediation_log().lock() {
+                log.insert(format!("{ns}/{nm}"), (std::time::Instant::now(), Some(ok)));
+            }
+        });
+    }
+    if let Some((_, Some(_))) = last {
+        out.remediated = true;
+    }
+
+    if let Ok(mut cache) = dashboards_cache().lock() {
+        cache.retain(|_, (at, _)| at.elapsed() < DIAGNOSIS_TTL * 20);
+        cache.insert(key, (std::time::Instant::now(), out.clone()));
+    }
+    out
+}
+
+/// Break the `.kibana_1` migration deadlock (#46): scale the Dashboards
+/// Deployment to zero, delete the dead index, scale it back. This is the
+/// exact sequence validated live against the incident cluster (recovered in
+/// 65 seconds after 17 hours of crash-looping).
+///
+/// **Why deleting `.kibana_1` is always safe here.** The remediation only
+/// ever arms from `dashboards_block_in`, which `status_from` only calls on
+/// the `dashboards` rung — meaning the Deployment has never had a ready
+/// replica, so Dashboards has never served a request, so the index cannot
+/// hold anything but aborted migration state. It must never be reachable for
+/// a deployment past the rung.
+///
+/// Best-effort by design: the operator owns the Deployment and reconciles
+/// replicas toward the CR; a failed step is loud, logged, and retried only
+/// after the cooldown.
+async fn remediate_kibana_deadlock(namespace: &str, name: &str) -> bool {
+    use k8s_openapi::api::apps::v1::Deployment;
+
+    let Ok(client) = client().await else {
+        return false;
+    };
+    let deploy: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    let object = format!("{name}-dashboards");
+
+    // 1. Quiesce: no Dashboards pod may be mid-boot against the index we are
+    //    about to delete.
+    if let Err(e) = deploy
+        .patch(
+            &object,
+            &PatchParams::default(),
+            &Patch::Merge(&serde_json::json!({ "spec": { "replicas": 0 } })),
+        )
+        .await
+    {
+        tracing::warn!("#46 scale-to-zero of {namespace}/{object} failed: {e:#}");
+        return false;
+    }
+    for _ in 0..20 {
+        let pods_gone = match dashboards_pod_count(&client, namespace, name).await {
+            Some(n) => n == 0,
+            None => false,
+        };
+        if pods_gone {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+
+    // 2. Delete the dead index with the admin credentials the deployment
+    //    already carries for exactly this class of call.
+    let base = crate::recipes::os_base_in(name, namespace);
+    let deleted = async {
+        let http = crate::recipes::http().ok()?;
+        let (user, pass) = admin_creds_in(namespace, name).await;
+        let resp = http
+            .delete(format!("{base}/.kibana_1"))
+            .basic_auth(&user, Some(&pass))
+            .timeout(DIAGNOSIS_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        resp.status().is_success().then_some(true)
+    }
+    .await
+    .unwrap_or(false);
+
+    // 3. Let it boot fresh: a clean migration on a settled cluster completes
+    //    in seconds, well inside any probe budget.
+    if let Err(e) = deploy
+        .patch(
+            &object,
+            &PatchParams::default(),
+            &Patch::Merge(&serde_json::json!({ "spec": { "replicas": 1 } })),
+        )
+        .await
+    {
+        tracing::warn!("#46 scale-back of {namespace}/{object} failed: {e:#}");
+        return false;
+    }
+    if deleted {
+        tracing::warn!(
+            "#46 remediation for {namespace}/{name}: deleted the dead .kibana_1 and \
+             restarted {object}"
+        );
+    } else {
+        tracing::warn!(
+            "#46 index delete for {namespace}/{name} failed; {object} was restarted anyway"
+        );
+    }
+    deleted
+}
+
+/// Dashboards pods currently existing for a deployment, `None` when the list
+/// failed (which must read as "cannot proceed", not "zero").
+async fn dashboards_pod_count(client: &Client, namespace: &str, name: &str) -> Option<i32> {
+    use k8s_openapi::api::core::v1::Pod;
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let list = pods.list(&ListParams::default()).await.ok()?;
+    let prefix = format!("{name}-dashboards");
+    Some(
+        list.into_iter()
+            .filter(|p| {
+                p.metadata
+                    .name
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with(&prefix))
+            })
+            .count() as i32,
+    )
+}
+
+/// Make the Dashboards Deployment survive its own first boot (#46): the
+/// operator hardcodes a ~210s startup probe, and Dashboards does not bind
+/// :5601 until saved-objects migrations complete — so a boot that starts
+/// while the cluster is still settling can be killed mid-migration, which is
+/// what poisons `.kibana_1` in the first place. We claim two fields the
+/// operator does not fight over, under our own field manager:
+///
+/// * `strategy.type = Recreate` — a one-replica bootstrap service must not
+///   roll; a stuck rollout leaves two pods racing the same migration, which
+///   is what made the incident's deadlock perpetual.
+/// * `startupProbe.failureThreshold = 90` — a 30-minute budget instead of
+///   ~210 seconds, sized for a first migration on a cluster that is still
+///   allocating shards.
+///
+/// Idempotent (server-side apply only claims what changed) and best-effort:
+/// if the patch cannot land, the stall diagnosis + remediation above are the
+/// backstop.
+async fn ensure_dashboards_survivability(client: &Client, namespace: &str, name: &str) {
+    use k8s_openapi::api::apps::v1::Deployment;
+
+    let deploy: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    let object = format!("{name}-dashboards");
+    let pp = PatchParams::apply("veloxsearch-dashboards-survivability").force();
+    let manifest = serde_json::json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": { "name": object, "namespace": namespace },
+        "spec": {
+            "strategy": { "type": "Recreate" },
+            "template": {
+                "spec": {
+                    "containers": [{
+                        "name": "dashboards",
+                        "startupProbe": { "failureThreshold": 90 }
+                    }]
+                }
+            }
+        }
+    });
+    if let Err(e) = deploy.patch(&object, &pp, &Patch::Apply(&manifest)).await {
+        tracing::warn!("#46 survivability patch for {namespace}/{object} failed: {e:#}");
+    }
+}
+
+/// Wait (bounded, best-effort) for the operator to materialize the Dashboards
+/// Deployment after a CR apply, then make it survivable. Spawned fire-and-
+/// forget from `create_cluster` so the create flow never blocks on the
+/// operator's reconcile cadence.
+async fn spawn_dashboards_survivability(namespace: String, name: String) {
+    // The operator creates the Deployment within seconds of accepting the CR;
+    // the window only needs to cover a slow reconcile, not the whole create.
+    for _ in 0..24 {
+        if let Ok(client) = client().await {
+            use k8s_openapi::api::apps::v1::Deployment;
+            let deploy: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
+            if deploy
+                .get_opt(&format!("{name}-dashboards"))
+                .await
+                .is_ok_and(|o| o.is_some())
+            {
+                ensure_dashboards_survivability(&client, &namespace, &name).await;
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    tracing::warn!(
+        "#46 Dashboards Deployment for {namespace}/{name} never appeared; \
+         survivability patch skipped (stall remediation remains the backstop)"
+    );
 }
 
 /// Message of the most recent `Warning`/`Upgrade` Event on a deployment's CR.
@@ -5218,6 +5563,48 @@ mod tests {
         // Nothing nameable → nothing to remediate: a stall without an index
         // is reported, not bounced.
         assert!(!should_remediate(9_999_999, false, None));
+    }
+
+    /// #46, same policy contract: the .kibana_1 remediation fires on a
+    /// crash-loop BUDGET (restarts, the clock that crash-loop backoff itself
+    /// keeps) under a cooldown, and only for a container Kubernetes actually
+    /// reports as crash-looping — anything else is reported, not deleted.
+    #[test]
+    fn dashboards_remediation_respects_budget_and_cooldown() {
+        use std::time::Duration;
+        // Budget: one restart is a slow cluster; three full cycles is a
+        // deterministically dying boot.
+        assert!(!should_remediate_dashboards(
+            DASHBOARDS_REMEDIATE_AFTER_RESTARTS - 1,
+            "CrashLoopBackOff",
+            None
+        ));
+        assert!(should_remediate_dashboards(
+            DASHBOARDS_REMEDIATE_AFTER_RESTARTS,
+            "CrashLoopBackOff",
+            None
+        ));
+        // Only a crash-loop arms it: a pod still in its first start (no
+        // waiting reason) or waiting for something else is left alone.
+        assert!(!should_remediate_dashboards(9_999, "Pending", None));
+        assert!(!should_remediate_dashboards(9_999, "", None));
+        // Cooldown: identical contract to the #27 half.
+        assert!(!should_remediate_dashboards(
+            9_999,
+            "CrashLoopBackOff",
+            Some(Duration::from_secs(60))
+        ));
+        let just_under = DASHBOARDS_REMEDIATE_COOLDOWN - Duration::from_secs(1);
+        assert!(!should_remediate_dashboards(
+            9_999,
+            "CrashLoopBackOff",
+            Some(just_under)
+        ));
+        assert!(should_remediate_dashboards(
+            9_999,
+            "CrashLoopBackOff",
+            Some(DASHBOARDS_REMEDIATE_COOLDOWN)
+        ));
     }
 
     // ── per-tenant isolation primitives (#81, ADR-044/051) ─────────────

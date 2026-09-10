@@ -104,6 +104,12 @@ function StallNotice({ a, lang }) {
   // #27: what the app already DID about it — stated as a fact, only after
   // the bounce happened (the backend sets the field on success).
   if (b.remediated_node) lines.push(fmt(t.act_stall_remediated, b.remediated_node));
+  // #46: the dashboards rung's own account — restarts and the verbatim
+  // waiting reason, and what a previous pass already did about the deadlock.
+  if (b.dashboards_restarts >= 0) {
+    lines.push(fmt(t.act_stall_dashboards, b.dashboards_waiting || "?", b.dashboards_restarts));
+  }
+  if (b.dashboards_remediated) lines.push(t.act_stall_dashboards_remediated);
   if (b.component && b.component_status) {
     lines.push(fmt(t.act_stall_component, b.component, b.component_status));
   }

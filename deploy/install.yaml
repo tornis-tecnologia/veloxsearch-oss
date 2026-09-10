@@ -62,9 +62,13 @@ rules:
     resources: ["opensearchsnapshotpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Workload discovery + operator/StatefulSet readiness (read-only, all ns).
+  # `patch` on deployments is the #46 exception, nothing wider: the Dashboards
+  # survivability fields (probe budget, Recreate) and the one-shot .kibana_1
+  # remediation's 0/1 scale — both claimed under our own field manager or a
+  # scalar merge, never a write to anything the operator owns wholesale.
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
   # Pod/namespace reads: discovery + parity with the velox-agent ClusterRole
   # we grant Fluent Bit (RBAC forbids granting perms we don't hold).
   - apiGroups: [""]

@@ -8,6 +8,23 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **A Dashboards crash-loop could hold a create hostage forever (#46):** the
+  operator's hardcoded ~210s startup probe killed the first saved-objects
+  migration mid-flight while the cluster was still settling, and the
+  half-migrated `.kibana_1` deadlocked every restart (observed live: 235
+  restarts over 17 hours). Creates now patch the Dashboards Deployment for
+  survivability — a 30-minute startup budget and a `Recreate` strategy so a
+  stuck rollout can never race two pods against the same migration — and a
+  stall on the dashboards rung self-heals once, cooldown-guarded, by scaling
+  to zero, deleting the dead `.kibana_1`, and scaling back (ADR-055; safe by
+  construction: a Deployment that never served cannot have user objects).
+  The stall panel now also states the Dashboards restart count and waiting
+  reason while the rung is held.
+- **`dashboards_ready` looked in the app's own namespace (#46):** a
+  per-tenant deployment's Dashboards Deployment was never found, so the rung
+  could silently never hold. It now reads the CR's namespace.
+
 ## [0.8.1] - 2026-08-27
 
 ### Fixed
