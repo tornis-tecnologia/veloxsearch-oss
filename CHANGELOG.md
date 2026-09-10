@@ -25,6 +25,25 @@ are called out explicitly.
   per-tenant deployment's Dashboards Deployment was never found, so the rung
   could silently never hold. It now reads the CR's namespace.
 
+### Fixed (provisioning)
+- **An exhausted provisioning schedule never retried itself when the
+  dependency healed (#47):** deferred provisioning that exhausted its five
+  attempts while Dashboards was unreachable stayed dead after Dashboards
+  recovered — the deployment reported nothing wrong, the monitors were simply
+  never installed (observed live: a full demo day). The metrics sampler now
+  re-arms exactly one fresh wave when an exhausted record still owes work and
+  the dependency is healthy again, bounded by the same CR counter as a human
+  retry (ADR-056). A spent schedule is also now a visible banner on the
+  deployment page — with the last error verbatim and a "re-apply now" button
+  riding the SSE frames — instead of one ERROR log line.
+- **The overview's "receiving" claimed self-telemetry as ingestion (#47):**
+  the tile derived it from the `velox-metrics` indexing rate, which flows on
+  a cluster with zero monitor data. It now derives from a bulk doc count over
+  the deployment's monitor indices (carried on `metrics_series` at its
+  existing 10s poll — the SSE stream gains no per-frame REST calls), and a
+  deployment with no monitors says "no monitors installed" instead of
+  claiming anything.
+
 ## [0.8.1] - 2026-08-27
 
 ### Fixed

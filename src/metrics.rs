@@ -212,6 +212,11 @@ pub async fn run_sampler() {
             }
         };
         for dep in deployments {
+            // #47: an exhausted provisioning schedule whose dependency healed
+            // re-arms here — independent of the sample, because a deployment
+            // whose sampling fails can still owe provisioning (a slow cluster
+            // is exactly the one that exhausted its settle budget).
+            crate::k8s::maybe_rearm_provisioning(&dep).await;
             if let Err(e) = sample_once(&dep).await {
                 tracing::debug!("sampler: {dep}: {e:#}");
             }
@@ -488,6 +493,9 @@ pub async fn series(
     Ok(MetricSeries {
         deployment: deployment.to_string(),
         points: downsample(&samples, bucket_ms),
+        // Filled by the handler (#47); the series itself only knows the
+        // self-telemetry points.
+        monitor_docs: None,
     })
 }
 

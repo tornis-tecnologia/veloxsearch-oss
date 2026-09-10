@@ -3831,6 +3831,54 @@ pub fn spawn_deferred_provisioning(dep: Deployment, snapshot: Option<SnapshotCon
     tokio::spawn(async move { run_deferred_provisioning(dep, snapshot).await });
 }
 
+/// The monitor ids a deployment's CR declares (annotation
+/// `veloxsearch.ai/monitors`), for surfaces that derive truth from the CR
+/// instead of from remembered state. Empty on any failure — an unreadable CR
+/// must read as "no claim", never as an error worth breaking a panel for.
+pub async fn monitors_of(dep: &Deployment) -> Vec<String> {
+    let Ok(client) = client().await else {
+        return Vec::new();
+    };
+    match os_api(&client, dep).get_opt(dep.name()).await {
+        Ok(Some(obj)) => monitors_from(obj.metadata.annotations.as_ref()),
+        _ => Vec::new(),
+    }
+}
+
+/// #47: the give-up was a verdict about a moment, not about the deployment.
+/// Called by the metrics sampler once per deployment per tick — the one
+/// always-on poller that survives a backend restart, and every input here is
+/// read back from the cluster, so invariant 6 holds.
+///
+/// When an EXHAUSTED record still owes work AND the dependency the attempts
+/// died on (Dashboards readiness — the saved-object imports go through its
+/// API) is healthy again, re-arm ONE fresh ADR-052 wave: the same two calls
+/// the retry route makes. `restart` clears `exhausted` on the CR before this
+/// returns, so the next tick is naturally a no-op — and the persisted
+/// attempt counter bounds the wave exactly as it bounds a human retry.
+pub async fn maybe_rearm_provisioning(dep: &Deployment) {
+    let Ok(client) = client().await else {
+        return;
+    };
+    let Ok(Some(state)) = read_deferred(&client, dep).await else {
+        return;
+    };
+    if !state.record.rearm_eligible(&state.purpose, &state.monitors) {
+        return;
+    }
+    if !dashboards_ready_in(&client, dep.namespace(), dep.name()).await {
+        return;
+    }
+    tracing::warn!(
+        "#47 re-arming the exhausted provisioning of {dep}: the dependency is healthy again"
+    );
+    if let Err(e) = begin_deferred_provisioning(dep).await {
+        tracing::warn!("#47 re-arm of {dep} failed to reset the schedule: {e:#}");
+        return;
+    }
+    spawn_deferred_provisioning(dep.clone(), None);
+}
+
 async fn run_deferred_provisioning(dep: Deployment, mut snapshot: Option<SnapshotConfig>) {
     use crate::provisioning::{retry_delay, settle_budget, Item, SETTLE_BUDGETS};
 
