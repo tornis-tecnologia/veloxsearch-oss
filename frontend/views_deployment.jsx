@@ -325,6 +325,48 @@ function UpgradeControl({ d, lang, onToast, openUpgrade }) {
 // use for their warning tone — the row emphasis and the bar color agree.
 const HOT_PCT = 75;
 
+/* --- #47: a spent provisioning schedule says so, in place, with the way out.
+ * The give-up used to be one ERROR log line while the page looked healthy
+ * (the overview even said "receiving" — self-telemetry). The verdict comes
+ * from the server (`d.provisioning`, ADR-052 rule 5); the SPA words it and
+ * offers the same retry the route exposes. The banner rides the SSE frames,
+ * so it clears itself when a re-armed wave finishes. */
+function ProvisioningBanner({ d, lang, onToast }) {
+  const t = STR[lang];
+  const p = d.provisioning;
+  const [busy, setBusy] = useState(false);
+  if (!p || p.state !== "failed") return null;
+  const retry = async () => {
+    setBusy(true);
+    try {
+      await API.retryProvisioning(d.id);
+      onToast(t.prov_retry_sent);
+    } catch {
+      onToast(t.prov_retry_fail);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="card" data-testid="prov-banner" style={{ marginTop: 18, borderColor: "var(--warn)" }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ color: "var(--warn)", fontWeight: 600 }}>{t.prov_failed_title}</span>
+        <span style={{ color: "var(--text-2)", flex: 1, minWidth: 220 }}>
+          {fmt(t.prov_failed_body, p.attempts)}
+        </span>
+        <Btn data-testid="prov-retry" onClick={retry} disabled={busy}>
+          {busy ? t.prov_retrying : t.prov_retry}
+        </Btn>
+      </div>
+      {/* The cluster's own words for the last failure, verbatim — the same
+       * treatment as upgrade.reason and snapshot.last_error (ADR-048/049). */}
+      {p.last_error ? (
+        <code data-testid="prov-last-error" style={{ display: "block", marginTop: 8, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{p.last_error}</code>
+      ) : null}
+    </div>
+  );
+}
+
 function OverviewTab({ d, lang, onToast, openUpgrade }) {
   const t = STR[lang];
   const [nodes, setNodes] = useState([]);
@@ -360,11 +402,14 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
   }, [d.id]);
 
   // The recent-window series: feeds both the ingestion tile and the trend
-  // sparklines, fetched once (see MetricsTimeSeries).
+  // sparklines, fetched once (see MetricsTimeSeries). Also carries the
+  // monitor-derived doc count (#47) — the only honest basis for the tile's
+  // "receiving" claim.
+  const [monitorDocs, setMonitorDocs] = useState(null);
   useEffect(() => {
     let alive = true;
     const load = () => API.metricsSeries(d.id)
-      .then(s => { if (alive) setPoints(adaptSeries(s).points); })
+      .then(s => { if (alive) { setPoints(adaptSeries(s).points); setMonitorDocs(adaptSeries(s).monitorDocs); } })
       .catch(() => {});
     load();
     const h = setInterval(load, 10000);
@@ -379,7 +424,13 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
 
   const last = points.length ? points[points.length - 1] : null;
   const rate = last ? last.rate : 0;
-  const receiving = rate > 0;
+  // #47: "receiving" is a claim about MONITOR data, and it used to be derived
+  // from the self-telemetry indexing rate — a cluster with zero monitor data
+  // flows self-telemetry happily, so the tile said "receiving" over an empty
+  // cluster for a whole demo day. With no monitors installed the tile says so
+  // instead of claiming anything.
+  const hasMonitors = monitorDocs !== null;
+  const monitorReceiving = hasMonitors && monitorDocs > 0;
   // Cluster-wide storage: the deployment's PVCs, not the host disks (ADR-031).
   const diskUsed = nodes.reduce((s, n) => s + (n.pvcBound ? n.diskUsed : 0), 0);
   const diskTotal = nodes.reduce((s, n) => s + (n.pvcBound ? n.diskTotal : 0), 0);
@@ -440,8 +491,9 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
           sub={last && points.length > 1 ? perMinute(points, lang) : "—"} />
         <StatTile label={t.ov_ingestion}
           value={last ? `${rate.toFixed(1)}${t.mt_per_sec}` : "—"}
-          sub={last ? (receiving ? t.ov_receiving : t.ov_no_data) : t.ov_awaiting}
-          tone={last ? (receiving ? "ok" : "warn") : ""} />
+          sub={!hasMonitors ? t.ov_no_monitors
+            : (monitorReceiving ? t.ov_receiving : t.ov_no_data)}
+          tone={hasMonitors ? (monitorReceiving ? "ok" : "warn") : ""} />
         <StatTile label={t.ov_storage}
           value={diskTotal ? `${gib(diskUsed)} / ${gib(diskTotal)}` : "—"}
           sub={diskTotal ? `${diskPct.toFixed(0)}%` : t.ov_awaiting}
@@ -1549,6 +1601,11 @@ function DeploymentView({ d, lang, hostNodes = [], tab, onTab, onToggleStack, on
           </button>
         ))}
       </nav>
+
+      {/* #47: above the tabs, on every tab — a deployment that gave up on its
+       * monitors is the first thing its operator needs to know, not a detail
+       * of one pane. */}
+      <ProvisioningBanner d={d} lang={lang} onToast={onToast} />
 
       {tab === "overview" && <OverviewTab d={d} lang={lang} onToast={onToast} openUpgrade={openUpgrade} />}
       {tab === "edit" && <EditTab d={d} lang={lang} onSave={onSaveEdit} locked={locked} />}

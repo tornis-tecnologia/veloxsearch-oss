@@ -512,6 +512,12 @@ pub struct MetricPoint {
 pub struct MetricSeries {
     pub deployment: String,
     pub points: Vec<MetricPoint>,
+    /// #47: total docs across the deployment's monitor indices. `None` when
+    /// the deployment has no monitors — the overview's "receiving" claim is
+    /// derived from THIS number, never from the self-telemetry indexing rate
+    /// that the points carry (a cluster with zero monitor data flows
+    /// self-telemetry happily, and saying "receiving" about it was a lie).
+    pub monitor_docs: Option<u64>,
 }
 
 // ───────────────── host-cluster capacity & health (Capacidade panel) ────────
@@ -2092,11 +2098,30 @@ mod server {
         let Some(dep) = scope.resolve(&req.name).await.unwrap_or(None) else {
             return Json(MetricSeries::default());
         };
-        Json(
-            crate::metrics::series(&dep, window, buckets)
-                .await
-                .unwrap_or_default(),
-        )
+        let mut series = crate::metrics::series(&dep, window, buckets)
+            .await
+            .unwrap_or_default();
+        // #47: the overview's "receiving" claim derives from the monitor
+        // indices, never from the self-telemetry rate the points carry. One
+        // bulk `_count` at this endpoint's existing 10s poll cadence — the
+        // SSE stream stays free of per-frame REST calls (ADR-050 invariant 5
+        // discipline, applied to a read).
+        let monitors = crate::k8s::monitors_of(&dep).await;
+        series.monitor_docs = if monitors.is_empty() {
+            None
+        } else {
+            let pattern = monitors
+                .iter()
+                .map(|m| crate::recipes::recipe_index(m))
+                .collect::<Vec<_>>()
+                .join(",");
+            Some(
+                crate::recipes::doc_count_of(&dep, &pattern)
+                    .await
+                    .unwrap_or(0),
+            )
+        };
+        Json(series)
     }
 
     // ───────────────────────── handlers: access / security ─────────────

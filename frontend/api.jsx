@@ -203,6 +203,12 @@ const API = {
   //      missing_packages: [{ node, package, reason,
   //                           install: { debian, ubuntu, arch } | null }] }
   storageStatus: () => call("storage_status", null, "GET"),
+
+  // ── deferred provisioning retry (#47 / ADR-052) ──────────────
+  // Re-run the deferred profile + monitors on a deployment reporting
+  // `pending`/`failed` — "monitores não aplicados". Accepted is 202; the
+  // outcome rides the deployment's `provisioning` field on the next frame.
+  retryProvisioning: (name) => call("retry_provisioning", { name }),
 };
 
 // ─────────────────────────── adapters ──────────────────────────
@@ -220,6 +226,10 @@ function adaptDeployment(cs) {
     purpose: cs.purpose || "observability",
     health: cs.health || "unknown",
     phase: cs.phase || "",
+    // #47: the server's provisioning verdict (complete | pending | failed),
+    // carried as-is — the SPA words it (ProvisioningBanner), never re-derives
+    // it (same discipline as `activity`).
+    provisioning: cs.provisioning || null,
     // ONE node pair for the whole SPA (ADR-050, issue #131). The server now
     // sends `nodes_ready`/`nodes_desired` already agreed with `activity` —
     // ready clamped, over the count the USER asked for
@@ -332,6 +342,10 @@ function adaptSeries(series) {
       docs: p.docs || 0,
       rate: p.indexing_rate || 0,
     })),
+    // #47: docs across the deployment's MONITOR indices; null = no monitors
+    // installed. The overview's "receiving" claim derives from this, never
+    // from the self-telemetry rate above.
+    monitorDocs: series?.monitor_docs ?? null,
   };
 }
 

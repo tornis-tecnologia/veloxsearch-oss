@@ -212,6 +212,26 @@ impl Record {
             .filter(|i| !self.done.iter().any(|k| *k == i.key()))
             .collect()
     }
+
+    /// #47: an exhausted schedule that still owes work is a verdict about the
+    /// moment it fired in, not about the deployment. When the dependency the
+    /// attempts died on (Dashboards readiness — the saved-object imports go
+    /// through its API) is healthy again, one fresh wave is legitimate. Pure
+    /// so the policy is testable without a cluster; `k8s.rs` decides when to
+    /// ask and performs the re-arm as the same two calls the retry route
+    /// makes, so the CR counter bounds the wave exactly as it bounds a human
+    /// retry.
+    ///
+    /// "Owes work" uses the same judgment `state_from` does: a pending-only
+    /// Dashboards default is cosmetic and never blocks, so it must not arm a
+    /// remediation wave either.
+    pub fn rearm_eligible(&self, purpose: &str, monitors: &[String]) -> bool {
+        self.exhausted
+            && self
+                .pending(purpose, monitors)
+                .iter()
+                .any(|i| !matches!(i, Item::DashboardsDefault(_)))
+    }
 }
 
 /// Read the record out of the annotation value.
@@ -636,6 +656,34 @@ mod tests {
             settle_budget(r.attempts).is_some(),
             "a retry has attempts to spend"
         );
+    }
+
+    /// #47: the incident, frozen as policy. The schedule exhausted while the
+    /// Dashboards API was unreachable (every saved-object import dies), the
+    /// dependency then healed — and the give-up stayed a verdict about the
+    /// deployment forever. An exhausted record that still owes work is
+    /// re-arm eligible; anything else is not.
+    #[test]
+    fn an_exhausted_schedule_with_work_owed_is_rearm_eligible() {
+        let mut r = Record::started("t0");
+        r.mark_failed("did not settle", "t1");
+        r.mark_exhausted("t2");
+        assert!(
+            r.rearm_eligible("observability", &monitors(&["kubernetes"])),
+            "exhausted with monitors still owed: the dependency healing is exactly the event that earns one fresh wave"
+        );
+        // Fully applied → nothing owed → nothing to re-arm (and in practice
+        // the record is removed on completion anyway).
+        let mut done = Record::started("t0");
+        done.mark_done(&Item::Profile("observability".into()), "t1");
+        done.mark_done(&Item::Monitor("kubernetes".into()), "t2");
+        done.mark_exhausted("t3");
+        assert!(!done.rearm_eligible("observability", &monitors(&["kubernetes"])));
+        // Not exhausted → the applier is still working; a re-arm on top of it
+        // would only duplicate a wave that has attempts left.
+        let mut pending = Record::started("t0");
+        pending.mark_failed("did not settle", "t1");
+        assert!(!pending.rearm_eligible("observability", &monitors(&["kubernetes"])));
     }
 
     /// The edit tab writes the monitors annotation on save. Before ADR-052 the
