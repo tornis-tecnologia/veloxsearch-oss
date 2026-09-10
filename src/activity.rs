@@ -160,6 +160,43 @@ impl Default for ClusterBlock {
     }
 }
 
+/// The Dashboards half of a stall (#46): what Kubernetes already knows about
+/// the `<name>-dashboards` pods, gathered by `k8s.rs` only for a deployment
+/// that stalled ON the dashboards rung — nodes green, security done, and the
+/// Dashboards Deployment never reaching a ready replica.
+///
+/// Deliberately NOT the crash logs. Reading previous-container logs needs
+/// `pods/log`, which the runtime grant refuses as a tenant-boundary widening
+/// (ADR-044; the refusal is written at `activity_log`). The restart count and
+/// the waiting reason are enough to arm the `.kibana_1` remediation safely,
+/// because its guard does not depend on WHY Dashboards crashes — only on the
+/// fact that it never served (see `remediate_kibana_deadlock` in `k8s.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardsBlock {
+    /// `restartCount` of the most-restarted Dashboards container. `-1` =
+    /// unknown (no pod answered), which is not the same as "no restarts".
+    pub restarts: i32,
+    /// The waiting reason, verbatim (`CrashLoopBackOff`) — the cluster's own
+    /// vocabulary, the same treatment as `recovery_stage`.
+    pub waiting_reason: String,
+    /// Set when a previous pass already deleted the dead `.kibana_1` and
+    /// restarted the Deployment (#46); the panel states a fact, not an
+    /// intention.
+    pub remediated: bool,
+}
+
+impl Default for DashboardsBlock {
+    /// Same rule as [`ClusterBlock::default`]: unknown is `-1`/empty, never a
+    /// confident zero.
+    fn default() -> Self {
+        Self {
+            restarts: -1,
+            waiting_reason: String::new(),
+            remediated: false,
+        }
+    }
+}
+
 /// Why a stalled deployment is stuck — structured facts, never a sentence.
 ///
 /// The SPA turns these into words in the user's language; the wire carries no
@@ -188,6 +225,15 @@ pub struct Blocked {
     /// Set when the app already bounced the wedged node itself (#27); the
     /// UI states what was done while the stall persists.
     pub remediated_node: Option<String>,
+    /// Dashboards container restarts at the dashboards rung (#46). `-1` =
+    /// unknown or not fetched (the gather is stage-gated).
+    pub dashboards_restarts: i32,
+    /// Waiting reason of the Dashboards pod, verbatim
+    /// (`CrashLoopBackOff`), same treatment as `recovery_stage`.
+    pub dashboards_waiting: String,
+    /// A previous pass already deleted the dead `.kibana_1` and restarted
+    /// the Deployment (#46).
+    pub dashboards_remediated: bool,
 }
 
 impl Default for Blocked {
@@ -202,6 +248,9 @@ impl Default for Blocked {
             recovery_stage: c.recovery_stage,
             recovery_secs: c.recovery_secs,
             remediated_node: None,
+            dashboards_restarts: -1,
+            dashboards_waiting: String::new(),
+            dashboards_remediated: false,
         }
     }
 }
@@ -261,6 +310,11 @@ pub struct ActivityInput {
     /// What OpenSearch says about the block, when it was worth asking. See
     /// [`ClusterBlock`].
     pub cluster: Option<ClusterBlock>,
+    /// What the Dashboards pods say about a dashboards-rung stall, when it was
+    /// worth asking (#46). Absent for every other stall — `k8s.rs` fetches it
+    /// only when the first-pass verdict landed exactly on the `dashboards`
+    /// rung, so a nodes-side stall still costs what it always did.
+    pub dashboards: Option<DashboardsBlock>,
 }
 
 /// `componentsStatus` values that mean "this reconciler is done". Anything else
@@ -430,6 +484,7 @@ fn blocked_of(i: &ActivityInput) -> Blocked {
         .map(|(c, s)| (c.clone(), s.clone()))
         .unwrap_or_default();
     let c = i.cluster.clone().unwrap_or_default();
+    let d = i.dashboards.clone().unwrap_or_default();
     Blocked {
         health: i.health.clone(),
         unassigned_shards: c.unassigned_shards,
@@ -439,6 +494,9 @@ fn blocked_of(i: &ActivityInput) -> Blocked {
         recovery_stage: c.recovery_stage,
         recovery_secs: c.recovery_secs,
         remediated_node: c.remediated_node,
+        dashboards_restarts: d.restarts,
+        dashboards_waiting: d.waiting_reason,
+        dashboards_remediated: d.remediated,
     }
 }
 
@@ -582,6 +640,7 @@ mod tests {
             components: vec![("RollingRestart".into(), "Finished".into())],
             since_secs: 30,
             cluster: None,
+            dashboards: None,
         }
     }
 
@@ -919,6 +978,76 @@ mod tests {
         assert_eq!(a.blocked.recovery_index, ".opendistro_security");
         assert_eq!(a.blocked.recovery_stage, "init");
         assert_eq!(a.blocked.recovery_secs, 57_240);
+    }
+
+    // ── issue #46: the dashboards rung must say why, and heal itself ────────
+
+    /// The incident, frozen as data: nodes green and settled-in-every-way
+    /// except Dashboards, whose pod has been crash-looping on the half-migrated
+    /// `.kibana_1` for hours — 235 restarts observed live. Everything the
+    /// Kubernetes half can say without reading container logs.
+    fn stuck_dashboards() -> ActivityInput {
+        ActivityInput {
+            dashboards_ready: false,
+            since_secs: 57_240,
+            dashboards: Some(DashboardsBlock {
+                restarts: 235,
+                waiting_reason: "CrashLoopBackOff".into(),
+                remediated: false,
+            }),
+            ..steady()
+        }
+    }
+
+    /// A stall on the dashboards rung carries the pods' own account: restarts
+    /// and the waiting reason, verbatim — the panel words them, the wire never
+    /// does (ADR-019).
+    #[test]
+    fn a_dashboards_stall_carries_its_own_facts() {
+        let a = evaluate(&stuck_dashboards());
+        assert!(!a.settled);
+        assert_eq!(
+            a.stage, "dashboards",
+            "everything else is up; only the rung is missing"
+        );
+        assert!(a.stalled, "16 hours on the dashboards rung is a stall");
+        assert_eq!(a.blocked.dashboards_restarts, 235);
+        assert_eq!(a.blocked.dashboards_waiting, "CrashLoopBackOff");
+        assert!(!a.blocked.dashboards_remediated);
+    }
+
+    /// The dashboards half is fetched ONLY for a dashboards-rung stall: every
+    /// other stall keeps carrying the unknown defaults, so the panel never
+    /// says something it does not know. The #131 roll never asks Dashboards
+    /// anything, and the fields must show that.
+    #[test]
+    fn dashboards_facts_do_not_leak_into_other_stalls() {
+        let a = evaluate(&stuck_roll());
+        assert!(a.stalled);
+        assert_ne!(a.stage, "dashboards");
+        assert_eq!(
+            a.blocked.dashboards_restarts, -1,
+            "unknown, not zero — a nodes-side stall never asked Dashboards"
+        );
+        assert_eq!(a.blocked.dashboards_waiting, "");
+        assert!(!a.blocked.dashboards_remediated);
+    }
+
+    /// What a previous remediation pass did is a fact on the wire, stated
+    /// while the stall persists — the same contract as `remediated_node`.
+    #[test]
+    fn a_remediated_kibana_is_stated_as_fact() {
+        let input = ActivityInput {
+            dashboards: Some(DashboardsBlock {
+                restarts: 240,
+                waiting_reason: "CrashLoopBackOff".into(),
+                remediated: true,
+            }),
+            ..stuck_dashboards()
+        };
+        let a = evaluate(&input);
+        assert!(a.stalled, "the remediation is a fact, not a cure claim");
+        assert!(a.blocked.dashboards_remediated);
     }
 
     /// Below the threshold a deployment is just starting, and saying otherwise
