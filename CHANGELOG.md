@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-10
+
 ### Fixed
 - **A Dashboards crash-loop could hold a create hostage forever (#46):** the
   operator's hardcoded ~210s startup probe killed the first saved-objects
