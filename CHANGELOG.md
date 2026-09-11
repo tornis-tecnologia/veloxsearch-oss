@@ -8,6 +8,17 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+- **K3S monitoring is a choice, not a baseline (#52):** every non-search
+  deployment used to ship the `kubernetes` monitor unconditionally — the
+  wizard's data-sources step was gone, `sources` was hardcoded on, and the
+  create path re-seeded it on any empty selection. The Review step now shows
+  a default-checked toggle ("K3S monitoring (this cluster)"), and an empty
+  monitor selection — unchecking it, or an API create with no monitors — is
+  respected verbatim: the deployment comes up with no collector, the
+  Integrations tab remains the enable path, and the overview says
+  "no monitors installed" honestly (#47).
+
 ## [0.9.0] - 2026-09-10
 
 ### Fixed

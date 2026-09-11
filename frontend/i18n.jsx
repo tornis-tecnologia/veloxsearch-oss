@@ -542,6 +542,7 @@ const STR = {
     cpu: "CPU", heap: "Heap JVM",
     review_name: "Nome do cluster", review_purpose: "Propósito", review_size: "Tamanho",
     review_sources: "Fontes de dados", review_none: "nenhuma", review_backup: "Backup",
+    rev_k3s_label: "Monitoramento do K3S (este cluster)",
     next_steps: "Próximos passos",
     created_h: "Cluster criado",
     // storage / Longhorn auto-install (ADR-031) — install + inform, never ask
@@ -1107,6 +1108,7 @@ const STR = {
     cpu: "CPU", heap: "JVM heap",
     review_name: "Cluster name", review_purpose: "Purpose", review_size: "Size",
     review_sources: "Data sources", review_none: "none", review_backup: "Backup",
+    rev_k3s_label: "K3S monitoring (this cluster)",
     next_steps: "Next steps",
     created_h: "Cluster created",
     // storage / Longhorn auto-install (ADR-031) — install + inform, never ask
@@ -1676,6 +1678,7 @@ const STR = {
     cpu: "CPU", heap: "Heap JVM",
     review_name: "Nombre del clúster", review_purpose: "Propósito", review_size: "Tamaño",
     review_sources: "Fuentes de datos", review_none: "ninguna", review_backup: "Backup",
+    rev_k3s_label: "Monitorización de K3S (este clúster)",
     next_steps: "Próximos pasos",
     created_h: "Clúster creado",
     // almacenamiento / autoinstalación de Longhorn (ADR-031) — instalar e informar, nunca preguntar

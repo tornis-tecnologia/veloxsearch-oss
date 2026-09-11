@@ -79,11 +79,12 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
     version.startsWith("3.8");
   const [customVersion, setCustomVersion] = useState("");
   const [size, setSize] = useState("small");
-  // No longer a form field: the data-sources step moved to the Integrations
-  // tab. Kept as the create payload's value so a new deployment still gets the
-  // always-on K3S monitoring (ADR-018) — and Review says so, rather than the
-  // wizard deriving it from a scan the user cannot see.
-  const [sources] = useState({ kubernetes: true, "k8s-events": false });
+  // K3S monitoring is a choice, not a baseline (#52): the Review step shows
+  // one default-checked toggle. The payload keeps the `sources` shape, so an
+  // unchecked toggle means the deployment is created with no monitors — the
+  // Integrations tab is the enable path after create, and the overview says
+  // "no monitors installed" honestly (#47).
+  const [sources, setSources] = useState({ kubernetes: true, "k8s-events": false });
   // Workloads discover() found in the cluster, filtered to ones with a recipe
   // we can ship (Detected.recipe). Drives the data-step pre-fill (#2 / ADR-018).
   const [advanced, setAdvanced] = useState(false);
@@ -105,10 +106,8 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   // default and costs nothing: the Backup tab configures it later just as well.
   const [snapshot, setSnapshot] = useState(null);
 
-  // The data-sources step is gone: enabling an integration is a day-2 decision
-  // and the Integrations tab is where it lives, with live doc counts the wizard
-  // could never show. `sources` keeps its default so a new deployment still
-  // gets the always-on K3S monitoring (ADR-018) — Review states it.
+  // The data-sources step stays gone (day-2 integrations live in their tab);
+  // `sources` is decided on Review via the K3S toggle above (#52).
   const steps = [t.step_purpose, t.step_size, t.step_backup, t.step_review];
   const lastStep = steps.length - 1;
   const sz = sizes[size] || sizeMeta(size);
@@ -375,10 +374,13 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
               <div className="kvrow">
                 <span className="k">{t.review_sources}</span>
                 <span className="v">
-                  {purpose === "search" ? "API" :
-                    Object.keys(sources).filter(k => sources[k]).length
-                      ? Object.keys(sources).filter(k => sources[k]).join(", ")
-                      : t.review_none}
+                  {purpose === "search" ? "API" : (
+                    <label data-testid="rev-k3s-toggle" style={{ display: "inline-flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
+                      <input type="checkbox" checked={!!sources.kubernetes}
+                        onChange={e => setSources(s => ({ ...s, kubernetes: e.target.checked }))} />
+                      {sources.kubernetes ? t.rev_k3s_label : t.review_none}
+                    </label>
+                  )}
                 </span>
               </div>
               <div className="kvrow">

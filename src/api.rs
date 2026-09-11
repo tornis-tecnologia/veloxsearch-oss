@@ -1152,28 +1152,9 @@ mod server {
         })
     }
 
-    /// Baseline collection agent that ships on EVERY non-search deployment.
-    /// `kubernetes` (all cluster/pod logs) is the always-on default — see
-    /// `with_baseline_monitors`.
-    pub const BASELINE_MONITOR: &str = "kubernetes";
-
-    /// Guarantee a pre-configured Fluent Bit collector out of the box (#53).
-    ///
-    /// A non-search deployment must never come up "integrated" yet collecting
-    /// nothing. The frontend wizard defaults the `kubernetes` source on, but the
-    /// operator can uncheck it (or create via the API with no monitors at all) —
-    /// which previously left the deployment with zero collection until someone
-    /// later clicked Enable in the Integrations tab. Seed the always-on baseline
-    /// when the selection is empty so the agent is deployed FROM creation by the
-    /// existing deferred recipe machinery (ADR-018), never deferred to a manual
-    /// step. An explicit non-empty selection is respected verbatim; `search`
-    /// installs no agents (ADR-028), so it is left empty.
-    pub fn with_baseline_monitors(mut monitors: Vec<String>, purpose: &str) -> Vec<String> {
-        if purpose != "search" && monitors.is_empty() {
-            monitors.push(BASELINE_MONITOR.to_string());
-        }
-        monitors
-    }
+    // #52: the `kubernetes` baseline that used to be force-seeded here is
+    // gone. The wizard's default-checked K3S toggle (frontend) keeps the
+    // common path identical; the API path respects the selection verbatim.
 
     // ───────────────────────── auth helpers ────────────────────────────
 
@@ -1472,10 +1453,11 @@ mod server {
         if purpose == "search" {
             ov.monitors.clear();
         }
-        // Pre-configured collection out of the box (#53): never let a non-search
-        // deployment come up integrated yet collecting nothing — seed the
-        // always-on baseline collector when no integration was selected.
-        ov.monitors = with_baseline_monitors(ov.monitors, &purpose);
+        // #52: the monitor selection is respected verbatim — empty means no
+        // monitors, the Integrations tab is the enable path after create, and
+        // the overview already says "no monitors installed" honestly (#47).
+        // The wizard's default-checked K3S toggle keeps the common path
+        // identical to what the old forced baseline produced.
         // The wizard's version choice (ADR-048 rev. 2). Only the create path
         // passes it on; `save_cluster` deliberately does not.
         ov.version = req.version.clone();
@@ -2540,35 +2522,41 @@ mod server {
     mod tests {
         use super::*;
 
-        /// #53: an observability/security deployment created with no integration
-        /// selected still ships the always-on baseline collector, so its Fluent
-        /// Bit agent is deployed from creation rather than left for a manual click.
+        /// #52: the monitor selection is respected verbatim at create — the
+        /// old forced baseline (empty selection re-seeded `kubernetes`) is
+        /// gone, so an API create with no monitors now means no monitors.
+        /// The deferred plan for that state (purpose profile only, no agent)
+        /// is proven by `provisioning::tests` against `plan()`.
         #[test]
-        fn empty_selection_seeds_baseline_for_non_search() {
-            for purpose in ["observability", "security"] {
-                assert_eq!(
-                    with_baseline_monitors(vec![], purpose),
-                    vec![BASELINE_MONITOR.to_string()],
-                    "{purpose} with no selection must seed the baseline collector",
-                );
-            }
-        }
-
-        /// An explicit selection is respected verbatim — the baseline is a floor,
-        /// not an override (never steals the per-deployment×recipe choice).
-        #[test]
-        fn explicit_selection_is_left_untouched() {
-            let chosen = vec!["nginx".to_string(), "postgres".to_string()];
-            assert_eq!(
-                with_baseline_monitors(chosen.clone(), "observability"),
-                chosen,
+        fn an_empty_selection_stays_empty() {
+            let ov = parse_overrides(
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                Some(String::new()),
+            )
+            .unwrap();
+            assert!(
+                ov.monitors.is_empty(),
+                "no baseline re-seed: empty means no monitors"
             );
         }
 
-        /// `search` installs no agents (ADR-028): an empty selection stays empty.
+        /// `search` installs no agents (ADR-028) — unchanged by #52: the
+        /// wizard sends no sources for a search deployment, and the create
+        /// path no longer adds anything to any selection.
         #[test]
         fn search_never_seeds_an_agent() {
-            assert!(with_baseline_monitors(vec![], "search").is_empty());
+            let ov = parse_overrides(
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                Some(String::new()),
+            )
+            .unwrap();
+            assert!(ov.monitors.is_empty());
         }
 
         fn overrides(nodes: &str) -> Result<crate::k8s::CreateOverrides, String> {
