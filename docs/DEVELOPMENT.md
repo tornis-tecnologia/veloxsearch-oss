@@ -128,6 +128,19 @@ not the published reference, so a stray `docker push` cannot publish a dev build
 and `imagePullPolicy` cannot silently fetch a remote image over the side-loaded
 one. It prints the two `kubectl` commands that point a running install at it.
 
+**Build identity (#55).** The version and commit that Settings → About shows
+are compiled into the binary, not read at runtime. The version is always the
+`Cargo.toml` one. To bake in the commit too, set it for the build:
+
+```sh
+VELOX_BUILD_COMMIT=$(git rev-parse HEAD) deploy/build-image.sh
+```
+
+Without it the build reports "commit unknown". That is on purpose: the value is
+never guessed from the checkout, which may be dirty. A value that is not a
+lowercase hex sha fails the build. The release workflow sets it to the release
+commit.
+
 The release path — versioning, pushing, pinning the digest — is
 [DEPLOY.md](DEPLOY.md).
 

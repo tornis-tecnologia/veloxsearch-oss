@@ -1,20 +1,70 @@
 // Copyright (C) 2026 Tornis Desenvolvimento
 // SPDX-License-Identifier: AGPL-3.0-only
 /* ============================================================
-   Settings view — dashboard access (port-forward / ingress).
+   Settings view — dashboard access (port-forward / ingress), plus the
+   About block (#55): which build is serving.
    Self-loads from /api/access_settings, saves via /api/save_access_settings.
+   Build info is fetched once by the app shell and passed in.
    ============================================================ */
 import { useState, useEffect } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Field, Btn, Icon } from "./ui.jsx";
+import { Field, Btn, Icon, Copyable } from "./ui.jsx";
 
 // Local, tiny: this view had no formatter and needs exactly one.
 function fmtS(s, ...args) {
   return args.reduce((acc, v, i) => acc.replaceAll(`{${i}}`, v), s || "");
 }
 
-function SettingsView({ lang, onToast }) {
+// What the backend sends for a runtime fact it could not read.
+const UNAVAILABLE = "unavailable";
+
+// `sha256:` + 12 hex — the length `docker images` shows; the copy button
+// still copies the full value.
+function shortDigest(d) {
+  return d.startsWith("sha256:") ? d.slice(0, 19) : d;
+}
+
+// About this installation (#55). Every value is the server's word: version and
+// commit compiled into the binary, digest and operator read from the cluster.
+// When a fact is unavailable the reason is shown, not hidden.
+function AboutBlock({ info, t, onToast }) {
+  const copied = () => onToast(t.copied);
+  const unavailable = (note) => (
+    <span style={{ color: "var(--text-3)" }} title={note || undefined}>{t.about_unavailable}</span>
+  );
+  const rows = [
+    [t.about_version, <span data-testid="about-version">{info.version}</span>],
+    [t.about_commit, info.commit === "unknown"
+      ? <span data-testid="about-commit" style={{ color: "var(--text-3)" }}>{t.about_commit_unknown}</span>
+      : <span data-testid="about-commit"><Copyable text={info.commit} display={info.commit.slice(0, 7)} onCopy={copied} /></span>],
+    [t.about_image, info.image_digest === UNAVAILABLE
+      ? unavailable(info.image_note)
+      : <Copyable text={info.image_digest} display={shortDigest(info.image_digest)} onCopy={copied} />],
+    [t.about_operator, info.operator_image === UNAVAILABLE
+      ? unavailable(info.operator_note)
+      : <span title={info.operator_deployment}>{info.operator_image}</span>],
+    [t.about_catalog, <span style={{ wordBreak: "break-all" }}>{info.catalog_source}</span>],
+  ];
+  const notes = [info.image_note, info.operator_note].filter(Boolean);
+  return (
+    <div className="card pad" style={{ maxWidth: 560, marginTop: 18 }} data-testid="about-panel">
+      <h3 className="section-title" style={{ marginTop: 0 }}>{t.about_h}</h3>
+      <p style={{ fontSize: 12.5, color: "var(--text-3)" }}>{t.about_lead}</p>
+      {rows.map(([k, v]) => (
+        <div className="kvrow" key={k}><span className="k">{k}</span><span className="v">{v}</span></div>
+      ))}
+      {/* One note per distinct reason: off-cluster both facts fail for the
+          same reason, and saying it twice reads like two problems. */}
+      {[...new Set(notes)].map(n => (
+        <p key={n} data-testid="about-note"
+          style={{ fontSize: 12, color: "var(--text-3)", fontFamily: "var(--font-mono)", marginBottom: 0, overflowWrap: "anywhere" }}>{n}</p>
+      ))}
+    </div>
+  );
+}
+
+function SettingsView({ lang, onToast, buildInfo }) {
   const t = STR[lang];
   const [access, setAccess] = useState("portforward");
   const [domain, setDomain] = useState("");
@@ -167,6 +217,8 @@ function SettingsView({ lang, onToast }) {
 
         <Btn variant="primary" icon="check" disabled={busy || blocked} onClick={save} style={{ marginTop: 6 }}>{t.save}</Btn>
       </div>
+
+      {buildInfo && <AboutBlock info={buildInfo} t={t} onToast={onToast} />}
     </div>
   );
 }

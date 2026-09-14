@@ -21,6 +21,11 @@
 #
 # The default tag is derived from the crate version so the manifest, the binary
 # and the image never drift: deploy/install.yaml pins the same version.
+#
+# Build identity (#55): set VELOX_BUILD_COMMIT to the full git sha being built
+# and cargo compiles it into the binary (GET /api/build_info). The release
+# workflow sets it; unset, the build reports "commit unknown" — deliberately
+# never derived from the local checkout here, which may be dirty.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -85,8 +90,17 @@ cp "$REPO_ROOT/deploy/Dockerfile" "$STAGE/Dockerfile"
 # AGPL-3.0-only: the Dockerfile COPYs it, so it has to be staged here too.
 cp "$REPO_ROOT/LICENSE" "$STAGE/LICENSE"
 
+# The OCI labels only mirror what the binary already carries; the binary is the
+# authority. With --skip-build this script cannot know which commit the staged
+# binary was compiled with, so it stamps no revision rather than a guess.
+REVISION=""
+if [ "$SKIP_BUILD" = "no" ]; then REVISION="${VELOX_BUILD_COMMIT:-}"; fi
+
 echo ">> docker build $TAG"
-$DOCKER build -t "$TAG" "$STAGE"
+$DOCKER build -t "$TAG" \
+  --build-arg VELOX_VERSION="$VERSION" \
+  --build-arg VELOX_BUILD_COMMIT="$REVISION" \
+  "$STAGE"
 
 if [ "$PUSH" = "yes" ]; then
   echo ">> docker push $TAG"

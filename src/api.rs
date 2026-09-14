@@ -454,6 +454,28 @@ pub struct OtelComponentInfo {
     pub image: String,
 }
 
+/// Which build is serving (#55). `version`/`commit` are compiled into the
+/// binary; the image and operator fields are read back from the cluster and
+/// say `"unavailable"` (with a `*_note`) when they cannot be.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BuildInfo {
+    /// The crate version — the string `min_core_version` refusals quote.
+    pub version: String,
+    /// Git commit baked in at build time, or `"unknown"`.
+    pub commit: String,
+    /// `sha256:…` of the image the kubelet is running for this Pod.
+    pub image_digest: String,
+    /// The raw `imageID` the digest was taken from (empty when unavailable).
+    pub image_id: String,
+    pub image_note: String,
+    pub operator_image: String,
+    /// `namespace/name` of the operator Deployment the image came from.
+    pub operator_deployment: String,
+    pub operator_note: String,
+    /// Where integration packages are fetched from (credentials redacted).
+    pub catalog_source: String,
+}
+
 /// One OpenSearch node's live stats (`_nodes/stats`) for the Overview blocks.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NodeStat {
@@ -1350,6 +1372,13 @@ mod server {
             .map(bootstrap_dto)
             .map(Json)
             .map_err(ApiError::internal)
+    }
+
+    /// Build identity (#55). Installation-level: the image digest and operator
+    /// are facts about the host install, not about any tenant's deployment.
+    async fn build_info(scope: Scope) -> Result<Json<BuildInfo>, ApiError> {
+        scope.require_admin()?;
+        Ok(Json(crate::build_info::collect().await))
     }
 
     async fn bootstrap_ensure(scope: Scope) -> Result<Json<BootstrapStatus>, ApiError> {
@@ -2449,6 +2478,7 @@ mod server {
         RoutePolicy { path: "/request_password_reset", policy: Public, note: "#79; answers 202 whether or not the account exists." },
         RoutePolicy { path: "/reset_password", policy: Public, note: "#79; single-use token IS the authorization." },
         // -- installation-level --------------------------------------------
+        RoutePolicy { path: "/build_info", policy: AdminOnly, note: "version + commit, this Pod's image digest and the operator image (#55) — install-level facts a tenant has no use for." },
         RoutePolicy { path: "/bootstrap_status", policy: AdminOnly, note: "operator/cert-manager/Longhorn state of the HOST cluster." },
         RoutePolicy { path: "/bootstrap_ensure", policy: AdminOnly, note: "installs cluster-wide components; never a tenant action." },
         RoutePolicy { path: "/storage_status", policy: AdminOnly, note: "host StorageClass classification (ADR-043)." },
@@ -2529,6 +2559,7 @@ mod server {
             .route(p("/request_password_reset"), post(request_password_reset))
             .route(p("/reset_password"), post(reset_password))
             // -- end tenant auth routes (#79)
+            .route(p("/build_info"), get(build_info))
             .route(p("/bootstrap_status"), get(bootstrap_status))
             .route(p("/bootstrap_ensure"), post(bootstrap_ensure))
             .route(p("/storage_status"), get(storage_status))
