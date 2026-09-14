@@ -100,6 +100,7 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-054 | Registry and signing live on GitHub and Docker Hub — the public `veloxsearch-registry` repo, cosign-keyless Docker Hub image, signing key held outside the repo (supersedes the internal-registry plan) |
 | ADR-055 | VeloxSearch may surgically patch the operator's Dashboards Deployment — survivability fields under a dedicated field manager, one-shot `.kibana_1` remediation, container logs stay unread |
 | ADR-056 | A healed dependency re-arms one exhausted provisioning wave — the metrics sampler triggers it, the CR counter still bounds it (amends ADR-052 rule 4) |
+| ADR-058 | Multiple integration catalog sources — sources as Secret-backed config, per-source key pinning with admin-approved keys, `source/id` provenance, install records so uninstall outlives a source, collector configs confined (proposed) |
 
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and
