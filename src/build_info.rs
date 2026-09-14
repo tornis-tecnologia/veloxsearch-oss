@@ -39,20 +39,24 @@ pub const COMMIT_UNKNOWN: &str = "unknown";
 const COMMIT_RAW: Option<&str> = option_env!("VELOX_BUILD_COMMIT");
 
 /// The git commit this binary was built from, or [`COMMIT_UNKNOWN`].
-pub const COMMIT: &str = match COMMIT_RAW {
-    Some(c) if !c.is_empty() => c,
-    _ => COMMIT_UNKNOWN,
-};
+pub const COMMIT: &str = commit_or_unknown(COMMIT_RAW);
 
-/// A malformed commit fails the build rather than shipping a binary that
-/// displays garbage as its identity.
-const _: () = assert!(
-    match COMMIT_RAW {
-        Some(c) => c.is_empty() || is_git_sha(c),
-        None => true,
-    },
-    "VELOX_BUILD_COMMIT must be a lowercase hex git sha (7-40 chars) or empty"
-);
+/// Unset or empty → [`COMMIT_UNKNOWN`]. A malformed value panics, and because
+/// [`COMMIT`] is a `const`, that panic is a compile error: a bad value fails
+/// the build rather than shipping a binary that displays garbage as its
+/// identity. (Validation lives here, on the path that produces `COMMIT`, not
+/// in a separate `const _` assertion — rustc 1.88, our MSRV, does not count a
+/// call from an anonymous const as a use and fails `-D dead-code`.)
+const fn commit_or_unknown(raw: Option<&'static str>) -> &'static str {
+    match raw {
+        None => COMMIT_UNKNOWN,
+        Some(c) if c.is_empty() => COMMIT_UNKNOWN,
+        Some(c) if is_git_sha(c) => c,
+        Some(_) => {
+            panic!("VELOX_BUILD_COMMIT must be a lowercase hex git sha (7-40 chars) or empty")
+        }
+    }
+}
 
 const fn is_git_sha(s: &str) -> bool {
     let b = s.as_bytes();
@@ -269,6 +273,21 @@ mod tests {
     #[test]
     fn commit_is_a_sha_or_unknown() {
         assert!(COMMIT == COMMIT_UNKNOWN || is_git_sha(COMMIT), "{COMMIT:?}");
+    }
+
+    #[test]
+    fn unset_or_empty_commit_is_unknown_never_a_guess() {
+        assert_eq!(commit_or_unknown(None), COMMIT_UNKNOWN);
+        assert_eq!(commit_or_unknown(Some("")), COMMIT_UNKNOWN);
+        assert_eq!(commit_or_unknown(Some("9897468")), "9897468");
+    }
+
+    /// At runtime the same refusal is a panic; in the `COMMIT` const it is the
+    /// compile error `cargo build` reports.
+    #[test]
+    #[should_panic(expected = "VELOX_BUILD_COMMIT must be a lowercase hex git sha")]
+    fn malformed_commit_is_refused() {
+        commit_or_unknown(Some("main"));
     }
 
     #[test]
