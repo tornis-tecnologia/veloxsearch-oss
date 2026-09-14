@@ -89,7 +89,10 @@ An upgrade is a rollout of a new VeloxSearch release. It may change:
    only the image, because a release may need RBAC the previous one lacked.
 5. **`deploy/install.yaml` is kept in lockstep with `Cargo.toml`.** CI's
    `manifest-version` job fails any tree whose manifest image tag is not the crate
-   version, so applying the file from a checkout cannot roll an install back.
+   version, so applying the file from a checkout cannot roll an install back. The
+   `velox` CLI compiles the same file in (the 0.9.0 CLI installed 0.8.1), so a
+   unit test in `src/bin/velox.rs` holds the invariant on the embedded copy
+   wherever `cargo test` runs, release re-verification included.
 6. **The contract is tested.** `.github/workflows/upgrade.yml` installs the
    previous release on minikube, brings a deployment to green, rolls the
    candidate out over it, and asserts the operator Deployment spec and image,
