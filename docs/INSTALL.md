@@ -179,11 +179,13 @@ minikube start --memory=12288 --cpus=4 --disk-size=60g
 # the node:
 minikube ssh -- 'sudo apt-get update && sudo apt-get install -y open-iscsi && sudo systemctl enable --now iscsid'
 
-# Side-load the image INTO the minikube node (the host docker daemon is NOT the
-# cluster runtime):
-minikube image load veloxsearch.tar
+# Air-gapped only (§2c): side-load the image INTO the minikube node (the host
+# docker daemon is NOT the cluster runtime). With registry egress, skip this —
+# the public image is pulled (§2a).
+# minikube image load veloxsearch.tar
 
-kubectl apply -f deploy/install.yaml
+# The release artifact (§5b), never `deploy/install.yaml` from a checkout.
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 kubectl -n veloxsearch-system rollout status deployment/veloxsearch --timeout=120s
 
 kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
@@ -191,8 +193,8 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 ```
 
 minikube gotchas:
-- **`minikube image load` is mandatory** — an image only in your host docker
-  daemon is invisible to the cluster.
+- **Side-loading (air-gapped only): `minikube image load` is mandatory** — an
+  image only in your host docker daemon is invisible to the cluster.
 - For **ingress mode** instead of port-forward: `minikube addons enable ingress`,
   then keep `minikube tunnel` running so the IngressClass `nginx` gets an address.
 
@@ -206,9 +208,10 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml      # or copy it to ~/.kube/config
 # bootstrap. Install the prereq on every node:
 sudo apt-get install -y open-iscsi && sudo systemctl enable --now iscsid
 
-sudo k3s ctr -n k8s.io images import veloxsearch.tar
+# Air-gapped only (§2c) — with registry egress the public image is pulled (§2a):
+# sudo k3s ctr -n k8s.io images import veloxsearch.tar
 
-kubectl apply -f deploy/install.yaml
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 kubectl -n veloxsearch-system rollout status deployment/veloxsearch --timeout=120s
 
 kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
@@ -232,9 +235,10 @@ export KUBECONFIG=~/.kube/config
 # Install the prereq on every node:
 sudo apt-get install -y open-iscsi && sudo systemctl enable --now iscsid
 
-sudo k0s ctr -n k8s.io images import veloxsearch.tar
+# Air-gapped only (§2c) — with registry egress the public image is pulled (§2a):
+# sudo k0s ctr -n k8s.io images import veloxsearch.tar
 
-kubectl apply -f deploy/install.yaml
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 kubectl -n veloxsearch-system rollout status deployment/veloxsearch --timeout=120s
 
 # Bare k0s has no ingress controller ⇒ port-forward is the only access mode (R8):
@@ -260,7 +264,7 @@ offers only port-forward).
 # default ⇒ used as-is, no Longhorn. A bare kubeadm cluster usually has NO
 # default SC ⇒ Longhorn bootstraps; install open-iscsi on every node first.
 
-kubectl apply -f deploy/install.yaml
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 kubectl -n veloxsearch-system rollout status deployment/veloxsearch --timeout=120s
 
 kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
@@ -286,11 +290,15 @@ This shape is **expected-correct but not conformance-tested** — verify against
    a failure. Any hard ✗ (e.g. Kubernetes < 1.30, < 8 GiB RAM, arm64, a foreign
    operator) makes the installer **refuse to start** rather than half-install.
 4. **Self-bootstrap** — once the probe passes, the app installs cert-manager +
-   the OpenSearch operator from vendored bundles (`deploy/bootstrap/`), and
-   Longhorn if needed. This needs the one-time `veloxsearch-bootstrap`
-   cluster-admin binding, which the app **revokes itself** when bootstrap
-   completes (ADR-027). Re-apply `install.yaml` only if you ever need to
-   re-bootstrap (e.g. a component upgrade).
+   the OpenSearch operator from vendored bundles (`deploy/bootstrap/`). Longhorn,
+   if needed, is installed later, when the first deployment is created (step 5).
+   This needs the one-time `veloxsearch-bootstrap` cluster-admin binding, which
+   the app **revokes itself** once bootstrap and storage are complete (ADR-027). Bootstrap installs only what is **absent**: a component
+   that is installed but not Ready is waited on, never re-installed, and an
+   operator that differs from the one this release vendors is reported as R9,
+   never changed (ADR-057). Upgrading VeloxSearch later re-creates the binding;
+   the running app revokes it again — see
+   [DEPLOY.md, "Rolling out an upgrade"](DEPLOY.md#rolling-out-an-upgrade).
 5. **Create your first deployment** — name + size preset + purpose
    (Observability / Security / Search). Creation is gated on storage-ready;
    OpenSearch comes up green (3 nodes for quorum), and selected recipes ship
@@ -349,7 +357,7 @@ Three places serve an install manifest. They are not equivalent:
 | --- | --- |
 | `releases/latest/download/install.yaml` | **Use this.** A release artifact with the image pinned to a **digest**. Immutable: the same URL applied twice gives the same bytes and the same image |
 | `releases/download/v0.7.1/install.yaml` | The same, pinned to one version instead of following the newest |
-| `deploy/install.yaml` on `main` | The source the release is built from. The image is a version **tag**, not a digest, and `main` moves. Right for development, wrong for a cluster you care about |
+| `deploy/install.yaml` on `main` | The source the release is built from. The image is a version **tag**, not a digest, and `main` moves. CI keeps the tag equal to `Cargo.toml`'s version, so it never names an older release than the tree (#54) — but it is still right for development, wrong for a cluster you care about |
 | `https://get.veloxsearch.ai/install.yml` | A convenience redirect maintained by hand, outside this repository's release process. **It can lag behind the current release** — prefer the release artifact when the version matters |
 
 ### Verifying the image

@@ -32,9 +32,15 @@ Open one pull request containing exactly three things:
    a minor version may break, and the changelog is the only place that says so.
    The release notes are lifted verbatim from this section, so write it for the
    person reading the release page.
-3. **`deploy/install.yaml`** — the image tag, to the new version.
+3. **`deploy/install.yaml`** — the image tag, to the new version. CI's
+   `manifest-version` job fails the PR if you forget: the tag must equal
+   `Cargo.toml`'s version on every commit, so applying the file from a checkout
+   can never roll an install back.
 
-Get it reviewed and merge it. That is the release.
+Get it reviewed and merge it. That is the release. A release PR also runs the
+**upgrade lane** (`.github/workflows/upgrade.yml`): the previous release is
+installed on minikube, a deployment is brought to green, and the candidate is
+rolled out over it under the contract in [ADR-057](adr/ADR-057-upgrade-contract.md).
 
 ### What the workflow then does
 
@@ -88,10 +94,50 @@ repository holds registry credentials, and nothing should.
 
 ## Rolling out an upgrade
 
+An upgrade changes the VeloxSearch Pod — its image, RBAC and non-secret config —
+and, through migrations, its database. It does not change the OpenSearch
+operator, its CRDs, cert-manager, or your `OpenSearchCluster`s
+([ADR-057](adr/ADR-057-upgrade-contract.md)).
+
+Apply the **release artifact of the version you are moving to** — never
+`deploy/install.yaml` from a checkout, and never an older release than the one
+running:
+
 ```sh
-kubectl apply -f deploy/install.yaml
+VERSION=0.9.0   # the release you are upgrading TO
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/v$VERSION/install.yaml
 kubectl -n veloxsearch-system rollout status deploy/veloxsearch
 ```
+
+To see what runs before you pick `VERSION`:
+`kubectl -n veloxsearch-system get deploy/veloxsearch -o jsonpath='{..image}'`
+prints a digest for a release-artifact install; `docker buildx imagetools inspect
+docker.io/tornistecnologia/veloxsearch-oss:<version>` prints the digest a version
+points at.
+
+The whole manifest is applied, not just the image (`kubectl set image`), because
+a release can need RBAC the previous one did not have — ADR-055 added `patch` on
+`apps/deployments`, for example — and an image-only upgrade would start the new
+binary without it.
+
+**The bootstrap binding comes back, and goes away again.** The manifest
+re-creates the `veloxsearch-bootstrap` cluster-admin ClusterRoleBinding. The new
+Pod deletes it again within about a minute, once cert-manager, the operator and
+Longhorn are all ready — the same condition the first bootstrap revokes on
+(ADR-027). Confirm it:
+
+```sh
+kubectl get clusterrolebinding veloxsearch-bootstrap   # expect: NotFound
+```
+
+If it is still there after a few minutes, the conformity report says which
+component is not ready. On a cluster where Longhorn is already installed you can
+also delete the binding by hand; the day-to-day `veloxsearch-runtime` role does
+not need it.
+
+**An operator that is restarting during the rollout is left alone.** Bootstrap
+installs only what is absent. A component that is installed but not Ready is
+waited on and reported, never re-installed over.
 
 The Deployment is a single replica by design: the control plane holds no
 in-memory state that a second replica could serve, and two replicas racing on
@@ -113,13 +159,42 @@ Migrations are forward-only. Rolling the image back to a version that predates a
 migration is not supported and is not tested — if a release needs to be undone
 after its migrations ran, cut a forward release that reverses the change.
 
+## Operator version drift
+
+Each release vendors one OpenSearch operator (`deploy/bootstrap/operator.yaml`).
+Bootstrap installs it on a cluster that has no operator. On a cluster that
+already runs one, it never replaces it: not during an upgrade, and not while that
+operator is restarting (ADR-057).
+
+When the running operator's image differs from the vendored one, the conformity
+report shows **R9 ⚠**, and a notice appears above the main navigation. Nothing is
+changed. What to do depends on why:
+
+- **You run a different operator on purpose.** Nothing to do. R9 is
+  informational and never blocks anything.
+- **You want the operator this release vendors.** That is an operator upgrade,
+  and you own it. Read the operator's release notes for CRD changes, take a
+  snapshot, then apply the bundle from the release tag, retargeted from the
+  namespace it was rendered into to the app namespace:
+
+  ```sh
+  VERSION=0.9.0
+  curl -fsSL https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/v$VERSION/deploy/bootstrap/operator.yaml \
+    | sed 's/veloxsearch-test/veloxsearch-system/g' \
+    | kubectl apply --server-side --field-manager=veloxsearch-bootstrap --force-conflicts -f -
+  ```
+
+  This is the same apply bootstrap does on a fresh cluster. CI does not
+  exercise it as an upgrade, so treat it as the operator upgrade it is.
+
 ## Air-gapped and side-loaded installs
 
 Build once, carry the tarball, import per platform:
 
 ```sh
-deploy/build-image.sh --tag veloxsearch:0.7.0
-docker save veloxsearch:0.7.0 -o veloxsearch.tar
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)   # what deploy/install.yaml pins
+deploy/build-image.sh --tag veloxsearch:$VERSION
+docker save veloxsearch:$VERSION -o veloxsearch.tar
 ```
 
 | Platform | Import command |
@@ -170,8 +245,8 @@ Everything below the line is the workflow's job. Yours is the pull request.
 
 - [ ] `Cargo.toml` version bumped, `Cargo.lock` updated
 - [ ] `CHANGELOG.md` section written for a reader, breaking changes called out
-- [ ] `deploy/install.yaml` image tag bumped to the new version
-- [ ] CI green on the release PR
+- [ ] `deploy/install.yaml` image tag bumped to the new version (CI enforces it)
+- [ ] CI green on the release PR, including the N-1 → N upgrade lane
 
 ---
 

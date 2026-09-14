@@ -30,6 +30,30 @@ jobs:
       - name: Every source file carries the licence header
         run: ./.github/scripts/check-headers.sh
 
+  # The repo's install.yaml must pin the image of the version this tree IS (#54).
+  # It drifted once: `main` said 0.9.0 in Cargo.toml while install.yaml still
+  # pinned 0.8.1, so `kubectl apply -f deploy/install.yaml` from a checkout
+  # silently rolled a 0.9.0 install back past its forward-only migrations. A
+  # release PR that forgets the tag bump now fails here, not in production.
+  manifest-version:
+    name: install.yaml pins the crate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Image tag equals Cargo.toml version
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tags=$(sed -n 's|^[[:space:]]*image: docker\.io/tornistecnologia/veloxsearch-oss:\(.*\)$|\1|p' deploy/install.yaml)
+          [ -n "$tags" ] || { echo "::error file=deploy/install.yaml::no veloxsearch-oss image line found"; exit 1; }
+          for tag in $tags; do
+            if [ "$tag" != "$version" ]; then
+              echo "::error file=deploy/install.yaml::image tag $tag != Cargo.toml version $version — bump the tag in the same PR as the version"
+              exit 1
+            fi
+          done
+          echo "install.yaml pins veloxsearch-oss:$version"
+
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest

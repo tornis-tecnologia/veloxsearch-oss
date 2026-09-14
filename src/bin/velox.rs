@@ -613,6 +613,29 @@ OPTIONS (init):
             assert!(m.summaries().iter().all(|s| !s.contains("?/")));
         }
 
+        /// `velox init` applies THIS embedded copy, so a manifest that pins an
+        /// older image than the crate version makes the released CLI install an
+        /// older release: the 0.9.0 `velox` binary installed 0.8.1 (#54). The
+        /// `manifest-version` CI job checks the same thing on the file; this
+        /// test holds it wherever `cargo test` runs, including release.yml's
+        /// re-verification of the release commit.
+        #[test]
+        fn embedded_manifest_pins_the_crate_version() {
+            let prefix = "image: docker.io/tornistecnologia/veloxsearch-oss:";
+            let tags: Vec<&str> = INSTALL_YAML
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix(prefix))
+                .collect();
+            assert!(!tags.is_empty(), "no veloxsearch-oss image in install.yaml");
+            for tag in tags {
+                assert_eq!(
+                    tag,
+                    env!("CARGO_PKG_VERSION"),
+                    "deploy/install.yaml pins {tag}; bump it with Cargo.toml's version"
+                );
+            }
+        }
+
         #[test]
         fn finds_the_deployment_to_wait_on() {
             let m = Manifest::parse(INSTALL_YAML).unwrap();

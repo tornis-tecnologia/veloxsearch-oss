@@ -75,7 +75,9 @@ manifest to a GitOps pipeline instead of applying it directly.
 If you already run the External Secrets Operator, you do not need
 `--pull-token` at all: `deploy/secrets/external-secrets.aws.example.yaml`
 contains a worked `ExternalSecret` that materialises `velox-pull` from a vault
-entry. Apply that instead, then `kubectl apply -f deploy/install.yaml`.
+entry. Apply that instead, then apply the release's manifest
+(`kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml`),
+not `deploy/install.yaml` from a checkout.
 
 The vault entry is a JSON object:
 
@@ -89,5 +91,6 @@ The vault entry is a JSON object:
   Longhorn are installed by the app itself on first run — see
   [PREMISES.md](PREMISES.md).
 - It does not create the admin account. That happens on the first-run screen.
-- It does not upgrade anything. Rolling out a new version is
-  `kubectl apply -f deploy/install.yaml`; see [DEPLOY.md](DEPLOY.md).
+- It does not upgrade anything. Rolling out a new version is applying that
+  release's `install.yaml` artifact; see
+  [DEPLOY.md](DEPLOY.md#rolling-out-an-upgrade).

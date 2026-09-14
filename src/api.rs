@@ -599,6 +599,15 @@ pub struct BootstrapStatus {
     pub requirements: Vec<ReqCheck>,
     /// Any hard failure — the installer refuses to run on this cluster.
     pub unsupported: bool,
+    /// Image of the operator VeloxSearch installed, as it runs (ADR-057).
+    #[serde(default)]
+    pub operator_image_running: Option<String>,
+    /// Image this release's vendored operator bundle would install.
+    #[serde(default)]
+    pub operator_image_vendored: Option<String>,
+    /// Both images are known and differ — the R9 warning the UI renders.
+    #[serde(default)]
+    pub operator_drift: bool,
 }
 
 /// Read-only storage classification for the "auto-install + notify" Longhorn
@@ -1094,6 +1103,9 @@ mod server {
                 })
                 .collect(),
             unsupported: s.unsupported,
+            operator_image_running: s.operator_images.running,
+            operator_image_vendored: s.operator_images.vendored.map(str::to_string),
+            operator_drift: s.operator_images.drift,
         }
     }
 

@@ -18,7 +18,7 @@ import { STR } from "./i18n.jsx";
 import { API, adaptDeployment } from "./api.jsx";
 import { Logo, Icon, Toast } from "./ui.jsx";
 import { AuthView } from "./views_auth.jsx";
-import { BootstrapView } from "./views_bootstrap.jsx";
+import { BootstrapView, OperatorDriftNotice } from "./views_bootstrap.jsx";
 import { StatusView } from "./views_status.jsx";
 import { CreateView } from "./views_create.jsx";
 import { CapacityView } from "./views_capacity.jsx";
@@ -75,6 +75,9 @@ function App() {
   // both warnings stay silent rather than guessing.
   const [hostNodes, setHostNodes] = useState([]);
   const [sseDead, setSseDead] = useState(false);
+  // The conformity probe the boot gate took. Kept for the operator-drift
+  // notice (ADR-057), which matters most on clusters that PASS the gate.
+  const [bootStatus, setBootStatus] = useState(null);
   const [toast, setToast] = useState({ msg: "", show: false });
   const toastTimer = useRef(null);
 
@@ -106,6 +109,7 @@ function App() {
       // to the main UI, which surfaces its own problems.
       try {
         const bs = await API.bootstrapStatus();
+        setBootStatus(bs);
         setBoot(bs && bs.ready ? "ready" : "bootstrap");
       } catch (e) {
         setBoot("ready");
@@ -320,6 +324,8 @@ function App() {
               onClick={() => go({ name: n.key })}>{n.label}</button>
           ))}
         </nav>
+
+        <OperatorDriftNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
 
         {route.name === "status" && (
           <StatusView deployments={deployments} lang={lang}
