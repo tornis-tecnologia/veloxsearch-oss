@@ -67,6 +67,11 @@ const STR = {
     boot_elapsed: "há {0} nesta etapa",
     boot_st_ready: "pronto", boot_st_installing: "instalando", boot_st_pending: "aguardando",
     boot_req_pass: "ok", boot_req_warn: "atenção", boot_req_fail: "falhou",
+    // ADR-057: installed-but-not-ready is waited on, never re-installed; and a
+    // running operator that differs from the vendored one is reported, not changed.
+    boot_waiting: "Aguardando componente já instalado ficar pronto:",
+    boot_drift_title: "Versão do operador diferente da desta versão do VeloxSearch",
+    boot_drift: "Em execução: {0}. Esta versão traz: {1}. O VeloxSearch não altera o operador em execução; atualizá-lo é um passo separado e explícito (docs/DEPLOY.md, \"Operator version drift\").",
     // create wizard
     name_err_chars: "use apenas letras minúsculas, números e hífen; comece e termine com letra ou número",
     name_err_long: "no máximo 40 caracteres",
@@ -639,6 +644,9 @@ const STR = {
     boot_elapsed: "{0} on this step",
     boot_st_ready: "ready", boot_st_installing: "installing", boot_st_pending: "pending",
     boot_req_pass: "ok", boot_req_warn: "warning", boot_req_fail: "failed",
+    boot_waiting: "Waiting for an already-installed component to become ready:",
+    boot_drift_title: "OpenSearch operator differs from this VeloxSearch release",
+    boot_drift: "Running: {0}. This release vendors: {1}. VeloxSearch leaves the running operator alone; upgrading it is a separate, explicit step (docs/DEPLOY.md, \"Operator version drift\").",
     // create wizard
     name_err_chars: "use lowercase letters, digits and hyphens; start and end with a letter or digit",
     name_err_long: "40 characters at most",
@@ -1205,6 +1213,9 @@ const STR = {
     boot_elapsed: "{0} en este paso",
     boot_st_ready: "listo", boot_st_installing: "instalando", boot_st_pending: "pendiente",
     boot_req_pass: "ok", boot_req_warn: "atención", boot_req_fail: "falló",
+    boot_waiting: "Esperando que un componente ya instalado esté listo:",
+    boot_drift_title: "El operador de OpenSearch difiere de esta versión de VeloxSearch",
+    boot_drift: "En ejecución: {0}. Esta versión incluye: {1}. VeloxSearch no modifica el operador en ejecución; actualizarlo es un paso aparte y explícito (docs/DEPLOY.md, \"Operator version drift\").",
     // asistente de creación
     name_err_chars: "usa solo letras minúsculas, números y guiones; empieza y termina con letra o número",
     name_err_long: "40 caracteres como máximo",
