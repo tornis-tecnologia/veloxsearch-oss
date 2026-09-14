@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # develop is the integration branch: every push runs the full set,
+    # including the push-only Smoke (minikube) job. main is release-only
+    # (see release.yml) and is reached by promotion PRs from develop.
+    branches: [develop]
   pull_request:
   workflow_dispatch:
 

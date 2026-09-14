@@ -131,7 +131,7 @@ unit-testable without a cluster. Keep new logic on the pure side and let
 
 1. **Open an issue first** for anything beyond a bug fix or a doc correction. It
    is cheaper to disagree about an approach in an issue than in a finished PR.
-2. **Branch from `main`.** Name it for what it does: `fix/pending-pvc-message`,
+2. **Branch from `develop`.** Name it for what it does: `fix/pending-pvc-message`,
    `feat/kafka-recipe`.
 3. **Keep the PR to one concern.** A refactor and a behaviour change in the same
    diff take three times as long to review.
@@ -139,7 +139,15 @@ unit-testable without a cluster. Keep new logic on the pure side and let
    `nav.tabs` structure, check `tests/*_check.py` — the end-to-end tests drive
    rendered widgets, not URLs, so a UI rename can break them.
 5. **Sign off your commits** (see below).
-6. **Open the PR** against `main` and fill in the template.
+6. **Open the PR** against `develop` and fill in the template.
+
+### Branch model
+
+`develop` is the integration branch: feature PRs target it and run the fast
+CI set. Every push to `develop` runs the full set, including the push-only
+Smoke (minikube) job. `main` is release-only — it is reached by a promotion
+PR from `develop`, and a promotion that changes `version` in `Cargo.toml`
+publishes the release (see [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
 ### Commit messages
 
@@ -166,7 +174,7 @@ submit it under the AGPL-3.0-only license. Use your real name and a real email.
 To sign off commits you already made:
 
 ```sh
-git rebase --signoff main
+git rebase --signoff develop
 ```
 
 ## What CI checks
