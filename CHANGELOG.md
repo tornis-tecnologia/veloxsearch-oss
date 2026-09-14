@@ -8,18 +8,19 @@ are called out explicitly.
 
 ## [Unreleased]
 
-### Fixed
-- **A double-clicked "Create cluster" could create two deployments (#56):**
-  the wizard only disabled its submit button when the create was going to
-  install Longhorn, so on the common path the button stayed live while the
-  request was out. Every create generates a fresh `<name>-<suffix>`, so a
-  second click was not a re-apply — it was a second deployment with its own
-  deferred provisioning. The button now disables from the first click and
-  shows "Submitting…" with a spinner, re-arming if the create fails, and the
-  backend refuses a create of the same name in the same namespace with 409
-  while an earlier one is still being handled. `tests/create_submit_check.py`
-  proves the button half without a cluster; `tests/journey_check.py` now
-  submits with a double click and asserts one deployment.
+### Added
+- **Which build is serving, in the app (#55):** a new admin-only
+  `GET /api/build_info` returns the version and git commit compiled into the
+  binary. No env var on the Deployment can change them, and a local build
+  without a commit reports "commit unknown". It also returns the image digest
+  the kubelet reports for the app's own Pod, the operator image, and the
+  integration catalog source. Settings has an "About this installation"
+  block, with a short digest and a copy button, and the top bar shows a
+  `v<version> · <commit>` chip. Release images get the commit through
+  `VELOX_BUILD_COMMIT`. `install.yaml` now passes `POD_NAME` through the
+  downward API, used only to locate the Pod. `min_core_version` refusals
+  quote the same version string, and the smoke lane asserts that
+  `build_info.version` matches `Cargo.toml`.
 
 ### Changed
 - **K3S monitoring is a choice, not a baseline (#52):** every non-search
@@ -38,6 +39,17 @@ are called out explicitly.
   demo-request link — in all three languages.
 
 ### Fixed
+- **A double-clicked "Create cluster" could create two deployments (#56):**
+  the wizard only disabled its submit button when the create was going to
+  install Longhorn, so on the common path the button stayed live while the
+  request was out. Every create generates a fresh `<name>-<suffix>`, so a
+  second click was not a re-apply — it was a second deployment with its own
+  deferred provisioning. The button now disables from the first click and
+  shows "Submitting…" with a spinner, re-arming if the create fails, and the
+  backend refuses a create of the same name in the same namespace with 409
+  while an earlier one is still being handled. `tests/create_submit_check.py`
+  proves the button half without a cluster; `tests/journey_check.py` now
+  submits with a double click and asserts one deployment.
 - **Install docs described pre-0.9.0 behaviour (#61):** `docs/INSTALL.md`
   still said a foreign CSI default StorageClass is used as-is (ADR-043 made
   Longhorn the only deployment storage), that the manifest creates no

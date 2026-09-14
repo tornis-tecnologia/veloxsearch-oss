@@ -51,6 +51,11 @@ mod registry_golden;
 #[cfg(feature = "ssr")]
 pub mod bootstrap;
 
+// #55: which build is serving — compiled-in version + commit, plus the image
+// digest and operator image read back from the cluster.
+#[cfg(feature = "ssr")]
+pub mod build_info;
+
 #[cfg(feature = "ssr")]
 pub mod access;
 

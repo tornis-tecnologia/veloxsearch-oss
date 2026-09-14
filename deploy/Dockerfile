@@ -26,6 +26,14 @@ RUN apt-get update \
 RUN useradd --uid 10001 --user-group --no-create-home \
       --shell /usr/sbin/nologin velox
 
+# Build identity (#55), as standard OCI labels so registries and scanners can
+# show it. Informational only: the version and commit the app reports are
+# compiled into the binary, not read from these or from any env var.
+ARG VELOX_VERSION=""
+ARG VELOX_BUILD_COMMIT=""
+LABEL org.opencontainers.image.version="${VELOX_VERSION}" \
+      org.opencontainers.image.revision="${VELOX_BUILD_COMMIT}"
+
 WORKDIR /app
 COPY veloxsearch /app/veloxsearch
 COPY dist /app/dist

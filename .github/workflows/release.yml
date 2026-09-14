@@ -124,6 +124,10 @@ jobs:
       # arm64 needs a conformance fixture before it can be claimed; see ROADMAP.
       - name: Build and push
         id: push
+        env:
+          # Compiled into the binary (#55): the release image reports the exact
+          # commit it was built from, which no Deployment env var can override.
+          VELOX_BUILD_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
           deploy/build-image.sh --profile release --push
