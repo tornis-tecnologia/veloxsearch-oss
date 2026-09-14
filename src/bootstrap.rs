@@ -371,6 +371,9 @@ pub struct State {
     /// Any requirement failed — the installer refuses to run (ADR-026:
     /// unsupported clusters get a clear refusal, never a half-install).
     pub unsupported: bool,
+    /// Running vs vendored OpenSearch operator image (ADR-057). Drift is
+    /// reported as the R9 warning, never acted on.
+    pub operator_images: OperatorImages,
 }
 
 /// One evaluated requirement row (id matches docs/REQUIREMENTS.md).
@@ -604,6 +607,11 @@ async fn check_requirements(
         Err(e) => out.push(req("r8", "warn", format!("ingress probe failed: {e}"))),
     }
 
+    // R9 — the running operator is the one this release vendors (ADR-057).
+    // Warn-only: drift is reported, and upgrading the operator is a separate,
+    // explicit act — never something a VeloxSearch rollout does as a side effect.
+    out.push(operator_r9(operators, vendored_operator_image()));
+
     out
 }
 
@@ -803,6 +811,133 @@ fn operator_r7(p: &OperatorPresence, allow_foreign: bool) -> Option<Requirement>
             format!("operator probe failed: {e} — a pre-existing operator cannot be ruled out"),
         )),
         OperatorPresence::Absent | OperatorPresence::Ours { .. } => None,
+    }
+}
+
+// --- Operator drift: reported, never applied (ADR-057, #54) -----------------
+
+/// The controller image the vendored operator bundle installs, read out of the
+/// bundle itself so it can never disagree with what `run_install` would apply.
+/// Only documents that declare a Deployment are parsed — the bundle is ~18k
+/// lines of CRDs that this question does not need.
+fn bundle_operator_image(bundle: &str) -> Option<String> {
+    bundle
+        .split("\n---")
+        .filter(|doc| doc.contains("kind: Deployment"))
+        .filter_map(|doc| serde_yaml::from_str::<Deployment>(doc).ok())
+        .find(|d| d.metadata.name.as_deref() == Some(OPERATOR_DEPLOY))
+        .and_then(|d| operator_container_image(&d))
+}
+
+/// The vendored operator image, parsed once per process.
+pub fn vendored_operator_image() -> Option<&'static str> {
+    static IMAGE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    IMAGE
+        .get_or_init(|| bundle_operator_image(OPERATOR_BUNDLE))
+        .as_deref()
+}
+
+/// Two image references name the same image. Kubernetes stores the reference
+/// as written, and `opensearchproject/x` and `docker.io/opensearchproject/x`
+/// are the same pull; anything else (another tag, a digest pin) is drift.
+fn same_image(a: &str, b: &str) -> bool {
+    fn norm(i: &str) -> &str {
+        let i = i.strip_prefix("docker.io/").unwrap_or(i);
+        i.strip_prefix("library/").unwrap_or(i)
+    }
+    norm(a) == norm(b)
+}
+
+/// Running vs vendored operator image — the fact behind R9, exposed on its own
+/// so other surfaces (an About panel, #55) can show it without re-deriving it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OperatorImages {
+    /// Image of OUR operator's controller, `None` when ours is not running
+    /// (absent, foreign, or the probe failed).
+    pub running: Option<String>,
+    /// Image the vendored bundle of this release installs.
+    pub vendored: Option<&'static str>,
+    /// Both are known and they differ.
+    pub drift: bool,
+}
+
+impl OperatorImages {
+    fn from_presence(p: &OperatorPresence) -> Self {
+        let running = match p {
+            OperatorPresence::Ours { image, .. } => image.clone(),
+            _ => None,
+        };
+        let vendored = vendored_operator_image();
+        let drift =
+            matches!((running.as_deref(), vendored), (Some(r), Some(v)) if !same_image(r, v));
+        OperatorImages {
+            running,
+            vendored,
+            drift,
+        }
+    }
+}
+
+/// Running vs vendored operator image without the rest of the conformity probe.
+pub async fn operator_images() -> Result<OperatorImages> {
+    let client = crate::k8s::client().await?;
+    let presence = scan_operators(&client)
+        .await
+        .context("probing the OpenSearch operator")?;
+    Ok(OperatorImages::from_presence(&presence))
+}
+
+/// The R9 row. Never `fail`: a drifted operator is still an operator that
+/// serves, and refusing on it would turn "a release vendors a newer operator"
+/// into "every existing install is locked out until it upgrades the operator"
+/// — exactly the coupling ADR-057 removes. The UI renders the warning's text
+/// from the structured `operator_images` (i18n, ADR-019); `detail` is the
+/// English fallback and the log line.
+fn operator_r9(p: &OperatorPresence, vendored: Option<&str>) -> Requirement {
+    let Some(vendored) = vendored else {
+        return req(
+            "r9",
+            "warn",
+            "the vendored operator bundle declares no controller image — drift cannot be checked",
+        );
+    };
+    match p {
+        OperatorPresence::Absent | OperatorPresence::UnmanagedCrds => req(
+            "r9",
+            "pass",
+            format!("not installed — bootstrap installs {vendored}"),
+        ),
+        OperatorPresence::Foreign { .. } => req(
+            "r9",
+            "pass",
+            "operator not installed by VeloxSearch — not compared with the vendored bundle",
+        ),
+        OperatorPresence::Unknown(_) => req(
+            "r9",
+            "warn",
+            "operator probe failed — running image not compared",
+        ),
+        OperatorPresence::Ours { image: None, .. } => req(
+            "r9",
+            "warn",
+            "the operator Deployment reports no container image — drift cannot be checked",
+        ),
+        OperatorPresence::Ours {
+            image: Some(running),
+            ..
+        } if same_image(running, vendored) => req("r9", "pass", running.clone()),
+        OperatorPresence::Ours {
+            image: Some(running),
+            ..
+        } => req(
+            "r9",
+            "warn",
+            format!(
+                "operator drift: running {running}, this release vendors {vendored}. VeloxSearch \
+                 leaves the running operator alone (ADR-057); upgrading it is a separate, explicit \
+                 step — see docs/DEPLOY.md, \"Operator version drift\""
+            ),
+        ),
     }
 }
 
@@ -1023,6 +1158,7 @@ pub async fn status() -> Result<State> {
     );
     let requirements = check_requirements(&client, ready, installing.is_some(), &operators).await;
     let unsupported = requirements.iter().any(|r| r.status == "fail");
+    let operator_images = OperatorImages::from_presence(&operators);
     Ok(State {
         ready,
         cert_manager_installed,
@@ -1033,6 +1169,7 @@ pub async fn status() -> Result<State> {
         error,
         requirements,
         unsupported,
+        operator_images,
     })
 }
 
@@ -2087,6 +2224,130 @@ parameters:
         assert_eq!(row.status, "warn");
         assert!(row.detail.contains("forbidden"), "{}", row.detail);
         assert_eq!(operator_flags(&unknown), (false, false));
+    }
+
+    // --- Operator drift (ADR-057, #54) -------------------------------------
+
+    /// The vendored image is read from the bundle `run_install` applies, so the
+    /// R9 comparison and the install can never name different images.
+    #[test]
+    fn the_vendored_operator_image_is_read_from_the_real_bundle() {
+        let image = vendored_operator_image().expect("the bundle declares an operator image");
+        assert!(
+            image.starts_with("opensearchproject/opensearch-operator:"),
+            "{image}"
+        );
+        assert_eq!(
+            bundle_operator_image(OPERATOR_BUNDLE).as_deref(),
+            Some(image)
+        );
+    }
+
+    #[test]
+    fn bundle_image_ignores_other_deployments() {
+        let bundle = "---\nkind: ConfigMap\napiVersion: v1\nmetadata: {name: x}\n\
+---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {name: sidecar}\n\
+spec: {selector: {}, template: {spec: {containers: [{name: a, image: other:1}]}}}\n\
+---\napiVersion: apps/v1\nkind: Deployment\nmetadata: {name: opensearch-operator}\n\
+spec: {selector: {}, template: {spec: {containers: [\
+{name: proxy, image: kube-rbac-proxy:0.1}, \
+{name: manager, image: opensearchproject/opensearch-operator:9.9.9}]}}}\n";
+        assert_eq!(
+            bundle_operator_image(bundle).as_deref(),
+            Some("opensearchproject/opensearch-operator:9.9.9"),
+            "the operator's own container, not the first one, not another Deployment"
+        );
+        assert_eq!(bundle_operator_image("kind: ConfigMap\n"), None);
+    }
+
+    #[test]
+    fn image_equality_ignores_only_the_implicit_registry() {
+        let v = "opensearchproject/opensearch-operator:3.0.0-alpha";
+        assert!(same_image(v, v));
+        assert!(same_image(
+            "docker.io/opensearchproject/opensearch-operator:3.0.0-alpha",
+            v
+        ));
+        assert!(!same_image(
+            "opensearchproject/opensearch-operator:2.8.0",
+            v
+        ));
+        assert!(
+            !same_image(&format!("{v}@sha256:abc"), v),
+            "a digest pin is a different reference — report it"
+        );
+    }
+
+    #[test]
+    fn drift_is_a_warning_with_remediation_never_a_failure() {
+        let v = VENDORED_IMAGE_FIXTURE;
+        let running_old = OperatorPresence::Ours {
+            name: OPERATOR_DEPLOY.into(),
+            ready: true,
+            image: Some("opensearchproject/opensearch-operator:2.8.0".into()),
+        };
+        let row = operator_r9(&running_old, Some(v));
+        assert_eq!(row.id, "r9");
+        assert_eq!(row.status, "warn", "drift must not lock an install out");
+        assert!(
+            row.detail.contains("2.8.0") && row.detail.contains(v),
+            "{}",
+            row.detail
+        );
+        assert!(row.detail.contains("ADR-057"), "{}", row.detail);
+
+        assert_eq!(operator_r9(&ours(true), Some(v)).status, "pass");
+        // Every state the scan can report yields a row and none of them fails:
+        // R9 can never make `unsupported` true.
+        for p in [
+            OperatorPresence::Absent,
+            OperatorPresence::UnmanagedCrds,
+            ours(false),
+            running_old.clone(),
+            OperatorPresence::Foreign {
+                namespace: "opensearch".into(),
+                name: "opensearch-operator".into(),
+                ready: true,
+            },
+            OperatorPresence::Unknown("forbidden".into()),
+        ] {
+            assert_ne!(operator_r9(&p, Some(v)).status, "fail", "{p:?}");
+            assert_ne!(operator_r9(&p, None).status, "fail", "{p:?}");
+        }
+    }
+
+    #[test]
+    fn operator_images_only_compare_our_own_operator() {
+        let vendored = vendored_operator_image().expect("vendored image");
+        let drifted = OperatorPresence::Ours {
+            name: OPERATOR_DEPLOY.into(),
+            ready: true,
+            image: Some("opensearchproject/opensearch-operator:0.0.1".into()),
+        };
+        let imgs = OperatorImages::from_presence(&drifted);
+        assert!(imgs.drift);
+        assert_eq!(imgs.vendored, Some(vendored));
+
+        let matching = OperatorPresence::Ours {
+            name: OPERATOR_DEPLOY.into(),
+            ready: false,
+            image: Some(format!("docker.io/{vendored}")),
+        };
+        assert!(!OperatorImages::from_presence(&matching).drift);
+
+        // A foreign operator is not ours to compare; nothing running, no drift.
+        for p in [
+            OperatorPresence::Absent,
+            OperatorPresence::Foreign {
+                namespace: "opensearch".into(),
+                name: "opensearch-operator".into(),
+                ready: true,
+            },
+        ] {
+            let imgs = OperatorImages::from_presence(&p);
+            assert_eq!(imgs.running, None);
+            assert!(!imgs.drift);
+        }
     }
 
     // --- Install only what is absent (ADR-057, #54) ------------------------
