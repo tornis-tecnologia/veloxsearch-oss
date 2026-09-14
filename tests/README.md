@@ -16,7 +16,8 @@ when you reshape a screen.
 | `smoke_check.py <base>` | stdlib only | Install-and-boot: the app is up and serving. The minikube CI lane. |
 | `day2_check.py <base> <user> <pw>` | stdlib only | Day-2 operations against a live cluster |
 | `firstrun_check.py <base> <user> <pw> pass\|reject [shot.png]` | Playwright | The first-run conformity gate, in both outcomes |
-| `journey_check.py <base> <user> <pw>` | Playwright | The create-deployment journey |
+| `journey_check.py <base> <user> <pw>` | Playwright | The create-deployment journey, submitted with a double click that must yield one deployment |
+| `create_submit_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | The create button disables from the first click and sends one request; it holds `create_cluster` in the browser, so it never provisions anything (#56) |
 | `browser_check.py <base> <user> <pw>` | Playwright | Browser smoke plus a network gate: the console must stay free of hydration and panic errors |
 
 `<base>` is the URL the app is reachable at, e.g. `http://localhost:3000` behind

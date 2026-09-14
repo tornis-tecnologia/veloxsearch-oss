@@ -8,6 +8,19 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **A double-clicked "Create cluster" could create two deployments (#56):**
+  the wizard only disabled its submit button when the create was going to
+  install Longhorn, so on the common path the button stayed live while the
+  request was out. Every create generates a fresh `<name>-<suffix>`, so a
+  second click was not a re-apply — it was a second deployment with its own
+  deferred provisioning. The button now disables from the first click and
+  shows "Submitting…" with a spinner, re-arming if the create fails, and the
+  backend refuses a create of the same name in the same namespace with 409
+  while an earlier one is still being handled. `tests/create_submit_check.py`
+  proves the button half without a cluster; `tests/journey_check.py` now
+  submits with a double click and asserts one deployment.
+
 ### Changed
 - **K3S monitoring is a choice, not a baseline (#52):** every non-search
   deployment used to ship the `kubernetes` monitor unconditionally — the
