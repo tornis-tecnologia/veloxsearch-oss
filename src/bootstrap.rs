@@ -1325,6 +1325,94 @@ async fn revoke_bootstrap(client: &Client) {
     }
 }
 
+/// The ServiceAccount `deploy/install.yaml` binds both RBAC phases to.
+const APP_SERVICE_ACCOUNT: &str = "veloxsearch";
+
+/// How often the running app looks for a re-created bootstrap binding. One
+/// GET per interval while the binding is absent, which is the steady state.
+const REVOKE_WATCH_SECS: u64 = 60;
+
+/// True when this `veloxsearch-bootstrap` binding grants OUR ServiceAccount in
+/// OUR namespace. The watch below deletes without a human in the loop, so it
+/// only ever deletes the binding that names this very app: a dev binary running
+/// off-cluster resolves `ns()` to the inert `veloxsearch-dev` namespace
+/// (CONTRIBUTING, off-cluster safety) and therefore never matches a real one.
+fn binding_is_ours(b: &k8s_openapi::api::rbac::v1::ClusterRoleBinding, own_ns: &str) -> bool {
+    b.subjects.as_ref().is_some_and(|subjects| {
+        subjects.iter().any(|s| {
+            s.kind == "ServiceAccount"
+                && s.name == APP_SERVICE_ACCOUNT
+                && s.namespace.as_deref() == Some(own_ns)
+        })
+    })
+}
+
+/// The ADR-027 revoke condition, probed directly: cert-manager and the
+/// operator serving with no foreign-operator block, and Longhorn in place
+/// (the deferred Longhorn install is the last thing that needs cluster-admin,
+/// ADR-031). The same condition `ensure()` and `run_install` revoke on.
+async fn bootstrap_complete(client: &Client) -> Result<bool> {
+    let cert_manager_ready =
+        cert_manager_step(&cert_manager_deploys(client).await) == InstallStep::Ready;
+    let presence = scan_operators(client)
+        .await
+        .context("probing the OpenSearch operator")?;
+    let (_, operator_ready) = operator_flags(&presence);
+    Ok(bootstrap_ready(
+        cert_manager_ready,
+        operator_ready,
+        &presence,
+        allow_foreign_operator(),
+    ) && classify_storage(client).await?.longhorn_ready())
+}
+
+/// Background watch (spawned once in `main`): drop the `veloxsearch-bootstrap`
+/// cluster-admin binding whenever it exists while bootstrap is already complete.
+///
+/// Why this exists (ADR-057, #54): the binding is re-created by every
+/// `kubectl apply` of `install.yaml`, which is how an upgrade is rolled out.
+/// ADR-027 made its revocation one-shot, but the only callers ran during a
+/// first bootstrap or from the conformity screen — which an already-conformant
+/// cluster never shows — so an upgraded install kept cluster-admin forever.
+/// Checking on an interval rather than once at startup also covers a re-apply
+/// that does not restart the Pod (same image), and a rollout during which the
+/// operator was briefly not Ready.
+///
+/// Never while an install job runs: the create-flow Longhorn install needs the
+/// binding until it finishes, and the `longhorn` StorageClass appears before it
+/// does (`install_longhorn` still demotes default classes after that).
+pub async fn run_revoke_watch() {
+    use k8s_openapi::api::rbac::v1::ClusterRoleBinding;
+    let mut tick = tokio::time::interval(Duration::from_secs(REVOKE_WATCH_SECS));
+    loop {
+        tick.tick().await;
+        if job_snapshot().0.is_some() {
+            continue;
+        }
+        let Ok(client) = crate::k8s::client().await else {
+            continue;
+        };
+        let api: Api<ClusterRoleBinding> = Api::all(client.clone());
+        match api.get_opt(BOOTSTRAP_BINDING).await {
+            Ok(Some(b)) if binding_is_ours(&b, ns()) => {}
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::debug!("revoke watch: reading {BOOTSTRAP_BINDING}: {e}");
+                continue;
+            }
+        }
+        match bootstrap_complete(&client).await {
+            // Re-check the job right before the delete: an install may have
+            // started while the probes above ran.
+            Ok(true) if job_snapshot().0.is_none() => revoke_bootstrap(&client).await,
+            Ok(_) => tracing::debug!(
+                "revoke watch: {BOOTSTRAP_BINDING} present, bootstrap not complete yet — kept"
+            ),
+            Err(e) => tracing::debug!("revoke watch: completion probe failed, binding kept: {e:#}"),
+        }
+    }
+}
+
 pub async fn wait_deploy(client: &Client, ns: &str, name: &str, secs: u64) -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(secs);
     while std::time::Instant::now() < deadline {
@@ -2224,6 +2312,58 @@ parameters:
         assert_eq!(row.status, "warn");
         assert!(row.detail.contains("forbidden"), "{}", row.detail);
         assert_eq!(operator_flags(&unknown), (false, false));
+    }
+
+    // --- Bootstrap binding re-revocation (ADR-057, #54) ---------------------
+
+    fn crb(
+        subjects: &[(&str, &str, Option<&str>)],
+    ) -> k8s_openapi::api::rbac::v1::ClusterRoleBinding {
+        use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
+        ClusterRoleBinding {
+            metadata: kube::api::ObjectMeta {
+                name: Some(BOOTSTRAP_BINDING.into()),
+                ..Default::default()
+            },
+            role_ref: RoleRef {
+                api_group: "rbac.authorization.k8s.io".into(),
+                kind: "ClusterRole".into(),
+                name: "cluster-admin".into(),
+            },
+            subjects: Some(
+                subjects
+                    .iter()
+                    .map(|(kind, name, namespace)| Subject {
+                        kind: (*kind).into(),
+                        name: (*name).into(),
+                        namespace: namespace.map(str::to_string),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The watch deletes unattended, so it must only ever touch the binding
+    /// naming THIS app — never a same-named binding for another install, and
+    /// never anything from a dev binary whose `ns()` is the inert fallback.
+    #[test]
+    fn the_revoke_watch_only_touches_the_binding_for_this_app() {
+        let ours = crb(&[("ServiceAccount", "veloxsearch", Some(OWN_NS))]);
+        assert!(binding_is_ours(&ours, OWN_NS));
+        assert!(
+            !binding_is_ours(&ours, "veloxsearch-dev"),
+            "off-cluster fallback namespace"
+        );
+        assert!(!binding_is_ours(
+            &crb(&[("ServiceAccount", "someone-else", Some(OWN_NS))]),
+            OWN_NS
+        ));
+        assert!(!binding_is_ours(
+            &crb(&[("User", "veloxsearch", Some(OWN_NS))]),
+            OWN_NS
+        ));
+        assert!(!binding_is_ours(&crb(&[]), OWN_NS));
     }
 
     // --- Operator drift (ADR-057, #54) -------------------------------------
