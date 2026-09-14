@@ -33,8 +33,8 @@ older releases are not backported.
 
 | Version | Supported |
 | --- | --- |
-| 0.7.x | ✅ |
-| < 0.7 | ❌ |
+| 0.9.x | ✅ |
+| < 0.9 | ❌ |
 
 ## Threat model
 
