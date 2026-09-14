@@ -23,6 +23,8 @@ Ao participar você concorda com o [Código de Conduta](CODE_OF_CONDUCT.md).
 - **Reproduções.** Um relato preciso de bug contra uma distribuição e versão
   nomeadas vale muito: o envelope suportado está escrito em
   [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md), e furos nele são achados.
+- **Teste de primeira instalação.** Instale partindo só do README e relate onde
+  tropeçou: [docs/EXTERNAL-VALIDATION.pt-BR.md](docs/EXTERNAL-VALIDATION.pt-BR.md).
 
 ## Preparando o ambiente
 
