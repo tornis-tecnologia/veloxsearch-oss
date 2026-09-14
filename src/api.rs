@@ -693,6 +693,9 @@ mod server {
         fn unauthorized(message: impl Into<String>) -> Self {
             Self::new(StatusCode::UNAUTHORIZED, message)
         }
+        fn conflict(message: impl Into<String>) -> Self {
+            Self::new(StatusCode::CONFLICT, message)
+        }
     }
 
     /// A refusal from the ownership layer is an API error verbatim — same
@@ -1439,8 +1442,63 @@ mod server {
         Ok(StatusCode::OK)
     }
 
+    /// Creates whose request is still being handled, keyed by
+    /// [`create_key`]. See [`claim_create`].
+    static CREATES_IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+    /// One create of `<namespace>/<base name>` while its request is in flight.
+    /// Dropping it — success, `?` on any error, or the client hanging up and
+    /// axum dropping the handler future — releases the name.
+    struct CreateClaim<'a> {
+        set: &'a std::sync::Mutex<std::collections::BTreeSet<String>>,
+        key: String,
+    }
+
+    impl Drop for CreateClaim<'_> {
+        fn drop(&mut self) {
+            self.set
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.key);
+        }
+    }
+
+    /// The key a create is deduplicated on: the namespace it writes into and
+    /// the base name as `unique_name` will sanitize it, so `Logs` and `logs `
+    /// are the same request.
+    fn create_key(namespace: &str, base: &str) -> String {
+        format!("{namespace}/{}", crate::k8s::sanitize_label(base))
+    }
+
+    /// #56: `None` when a create for the same key is already being handled.
+    ///
+    /// Every create generates a fresh `<name>-<suffix>` (ADR-020), so a repeat
+    /// submit never re-applies onto the first deployment — it silently creates
+    /// a SECOND one, with its own deferred provisioning task. The double-click
+    /// window is the request itself (version check against the registry, the
+    /// storage gate — minutes when it installs Longhorn — then the apply), so
+    /// that is what is guarded. Once the first response is out, another create
+    /// of the same base name is a new intent and is allowed, as before.
+    ///
+    /// In-process only: the backend runs as one replica, and a restart drops
+    /// the in-flight requests this guards along with the set.
+    fn claim_create(
+        set: &std::sync::Mutex<std::collections::BTreeSet<String>>,
+        key: String,
+    ) -> Option<CreateClaim<'_>> {
+        let fresh = set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone());
+        fresh.then_some(CreateClaim { set, key })
+    }
+
     /// Create a NEW deployment. Generates a unique `<name>-<suffix>` (ADR-020)
     /// and returns the generated name (a bare JSON string) so the UI can link to it.
+    ///
+    /// A second create of the same base name while the first is still being
+    /// handled is a 409 (#56) — see [`claim_create`].
     async fn create_cluster(
         scope: Scope,
         Json(req): Json<ClusterReq>,
@@ -1469,6 +1527,18 @@ mod server {
         if let Some(s) = snapshot.as_ref() {
             crate::snapshot::validate(s).map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
         }
+        // Claimed before the first await, so two requests racing in on the
+        // same tick cannot both pass.
+        let _in_flight = claim_create(
+            &CREATES_IN_FLIGHT,
+            create_key(&scope.write_namespace(), &req.name),
+        )
+        .ok_or_else(|| {
+            ApiError::conflict(format!(
+                "a deployment named '{}' is already being created — wait for it to finish",
+                req.name.trim()
+            ))
+        })?;
         let final_name = crate::k8s::unique_name(&scope, &req.name)
             .await
             .map_err(ApiError::internal)?;
@@ -2567,6 +2637,33 @@ mod server {
                 String::new(),
                 None,
             )
+        }
+
+        /// #56: a double-submitted create is refused while the first is in
+        /// flight, only for the same namespace and base name, and the name is
+        /// free again the moment the first request finishes — on any path.
+        #[test]
+        fn a_create_in_flight_refuses_its_duplicate_until_it_finishes() {
+            let set = std::sync::Mutex::new(std::collections::BTreeSet::new());
+            let first = claim_create(&set, create_key("legacy", "logs"));
+            assert!(first.is_some(), "the first create goes through");
+            assert!(
+                claim_create(&set, create_key("legacy", " Logs ")).is_none(),
+                "the same base name, as sanitized, is the same create"
+            );
+            assert!(
+                claim_create(&set, create_key("legacy", "metrics")).is_some(),
+                "another name is another create"
+            );
+            assert!(
+                claim_create(&set, create_key("tenant-a", "logs")).is_some(),
+                "another namespace is another create"
+            );
+            drop(first);
+            assert!(
+                claim_create(&set, create_key("legacy", "logs")).is_some(),
+                "a finished (or failed) create frees its name"
+            );
         }
 
         /// #52: an empty node count means "keep the preset"; a number is used;
