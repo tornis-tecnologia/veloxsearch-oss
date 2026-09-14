@@ -114,6 +114,7 @@ const STR = {
     review_h: "Revise e crie",
     review_p: "Confira as escolhas. Você pode redimensionar depois; o propósito é fixo.",
     create_btn: "Criar cluster",
+    create_submitting: "Enviando…",
     back: "Voltar", next: "Continuar",
     keeps_data: "Retém dados", collects: "Coleta", sets_up: "Configura", best_for: "Ideal para",
     // purposes
@@ -691,6 +692,7 @@ const STR = {
     review_h: "Review & create",
     review_p: "Check your choices. You can resize later; purpose is fixed.",
     create_btn: "Create cluster",
+    create_submitting: "Submitting…",
     back: "Back", next: "Continue",
     keeps_data: "Keeps data", collects: "Collects", sets_up: "Sets up", best_for: "Best for",
     p_obs_t: "Observability", p_sec_t: "Security", p_search_t: "Search",
@@ -1263,6 +1265,7 @@ const STR = {
     review_h: "Revisa y crea",
     review_p: "Comprueba tus elecciones. Puedes redimensionar después; el propósito es fijo.",
     create_btn: "Crear clúster",
+    create_submitting: "Enviando…",
     back: "Atrás", next: "Continuar",
     keeps_data: "Conserva datos", collects: "Recopila", sets_up: "Configura", best_for: "Ideal para",
     // propósitos

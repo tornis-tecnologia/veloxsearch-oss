@@ -32,6 +32,33 @@ are called out explicitly.
   respected verbatim: the deployment comes up with no collector, the
   Integrations tab remains the enable path, and the overview says
   "no monitors installed" honestly (#47).
+- **The READMEs lead with the install command (#61):** what VeloxSearch is,
+  the AGPL in plain words, the single `kubectl apply`, a "starting from zero"
+  path (new `docs/INSTALL.md` §0), four static screenshots in place of the
+  demo GIF (now referenced from INSTALL.md), benefits, the roadmap and the
+  demo-request link — in all three languages.
+
+### Fixed
+- **A double-clicked "Create cluster" could create two deployments (#56):**
+  the wizard only disabled its submit button when the create was going to
+  install Longhorn, so on the common path the button stayed live while the
+  request was out. Every create generates a fresh `<name>-<suffix>`, so a
+  second click was not a re-apply — it was a second deployment with its own
+  deferred provisioning. The button now disables from the first click and
+  shows "Submitting…" with a spinner, re-arming if the create fails, and the
+  backend refuses a create of the same name in the same namespace with 409
+  while an earlier one is still being handled. `tests/create_submit_check.py`
+  proves the button half without a cluster; `tests/journey_check.py` now
+  submits with a double click and asserts one deployment.
+- **Install docs described pre-0.9.0 behaviour (#61):** `docs/INSTALL.md`
+  still said a foreign CSI default StorageClass is used as-is (ADR-043 made
+  Longhorn the only deployment storage), that the manifest creates no
+  Ingress, and that its ServiceAccount carries `imagePullSecrets` — it does
+  not, so the documented private-mirror steps never used the pull Secret;
+  they now patch the ServiceAccount. The side-load tag matches the manifest's
+  image reference, the create wizard is described as its four steps with the
+  optional K3S monitoring toggle, and `docs/INSTALLER.md` covers the released
+  `velox-linux-amd64` binary and what `--dry-run` really prints.
 
 ## [0.9.0] - 2026-09-10
 

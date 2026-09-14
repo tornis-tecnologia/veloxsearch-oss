@@ -189,6 +189,8 @@ function App() {
   function go(r) { setRoute(r); window.scrollTo({ top: 0 }); }
 
   // ── API-backed handlers ────────────────────────────────────────
+  // Toast AND rethrow (same contract as toggleOtelStack): the wizard keeps its
+  // submit button disabled until this settles and must re-arm it on failure.
   async function createCluster({ name, purpose, size, sources, extra, memory, disk, version, snapshot }) {
     const monitors = Object.keys(sources || {}).filter(k => sources[k]).join(",");
     try {
@@ -217,6 +219,7 @@ function App() {
       go({ name: "deployment", id: finalName, tab: "overview" });
     } catch (e) {
       showToast(e.message);
+      throw e;
     }
   }
 

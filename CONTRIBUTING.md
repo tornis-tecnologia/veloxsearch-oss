@@ -22,6 +22,8 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 - **Reproductions.** A precise bug report against a named distro and version is
   worth a lot: the supported envelope is written down in
   [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md), and gaps in it are findings.
+- **First-install testing.** Install it from the README alone and report what
+  tripped you up: [docs/EXTERNAL-VALIDATION.md](docs/EXTERNAL-VALIDATION.md).
 
 ## Getting set up
 

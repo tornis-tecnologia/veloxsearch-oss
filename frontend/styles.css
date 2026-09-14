@@ -773,6 +773,18 @@ h1.page-title {
   @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 }
 
+/* in-button progress (#56): a submitted request is acknowledged in place.
+   Without motion it is still a visible ring next to the "Submitting…" label. */
+.btn-spinner {
+  width: 13px; height: 13px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent;
+}
+.btn[aria-busy="true"]:disabled { opacity: .8; cursor: progress; }
+@media (prefers-reduced-motion: no-preference) {
+  .btn-spinner { animation: btn-spin .7s linear infinite; }
+  @keyframes btn-spin { to { transform: rotate(360deg); } }
+}
+
 /* responsive */
 @media (max-width: 720px) {
   .purpose-grid { grid-template-columns: 1fr; }
