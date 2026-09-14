@@ -15,6 +15,7 @@ when you reshape a screen.
 | --- | --- | --- |
 | `smoke_check.py <base>` | stdlib only | Install-and-boot: the app is up and serving. The minikube CI lane. |
 | `day2_check.py <base> <user> <pw>` | stdlib only | Day-2 operations against a live cluster |
+| `upgrade_check.py <subcommand> …` | stdlib + `kubectl` | The N-1 → N upgrade contract (ADR-057): driven step by step by `.github/workflows/upgrade.yml` on a throwaway minikube. Creates an admin and a deployment — never run it against a cluster you care about |
 | `firstrun_check.py <base> <user> <pw> pass\|reject [shot.png]` | Playwright | The first-run conformity gate, in both outcomes |
 | `journey_check.py <base> <user> <pw>` | Playwright | The create-deployment journey |
 | `browser_check.py <base> <user> <pw>` | Playwright | Browser smoke plus a network gate: the console must stay free of hydration and panic errors |
