@@ -306,7 +306,7 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
 
 /// Coerce arbitrary user input into a valid DNS-1123 label fragment: lowercase,
 /// only `[a-z0-9-]`, no leading/trailing `-`, capped so `<base>-<suffix>` fits.
-fn sanitize_label(s: &str) -> String {
+pub(crate) fn sanitize_label(s: &str) -> String {
     let mapped: String = s
         .trim()
         .to_lowercase()
