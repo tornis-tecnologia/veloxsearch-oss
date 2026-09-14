@@ -619,6 +619,28 @@ async fn deploy_ready(client: &Client, ns: &str, name: &str) -> bool {
     }
 }
 
+/// Each cert-manager controller Deployment: `None` when it does not exist,
+/// `Some(ready)` when it does — the input [`cert_manager_step`] decides on. A
+/// failed read counts as present-and-not-ready: the step then waits and
+/// reports instead of applying a bundle over something it could not see.
+async fn cert_manager_deploys(client: &Client) -> Vec<(&'static str, Option<bool>)> {
+    let api: Api<Deployment> = Api::namespaced(client.clone(), CERT_MANAGER_NS);
+    let mut out = Vec::with_capacity(CERT_MANAGER_DEPLOYS.len());
+    for name in CERT_MANAGER_DEPLOYS {
+        let state = match api.get_opt(name).await {
+            Ok(None) => None,
+            Ok(Some(d)) => Some(
+                d.status
+                    .and_then(|s| s.ready_replicas)
+                    .is_some_and(|r| r >= 1),
+            ),
+            Err(_) => Some(false),
+        };
+        out.push((*name, state));
+    }
+    out
+}
+
 async fn crd_present(client: &Client, name: &str) -> bool {
     let api: Api<CustomResourceDefinition> = Api::all(client.clone());
     matches!(api.get_opt(name).await, Ok(Some(_)))
@@ -656,6 +678,9 @@ struct OperatorDeploy {
     namespace: String,
     name: String,
     ready: bool,
+    /// The controller container's image as the Deployment spec states it —
+    /// what drift detection compares against the vendored bundle (ADR-057).
+    image: Option<String>,
 }
 
 /// What the cluster says about OpenSearch operators, cluster-wide.
@@ -663,8 +688,14 @@ struct OperatorDeploy {
 enum OperatorPresence {
     /// No operator CRDs and no operator Deployment anywhere.
     Absent,
-    /// An operator runs in our own namespace — the one we installed.
-    Ours { ready: bool },
+    /// An operator runs in our own namespace — the one we installed. `name` is
+    /// what bootstrap waits on when it is installed but not serving (ADR-057);
+    /// `image` is what drift detection compares.
+    Ours {
+        name: String,
+        ready: bool,
+        image: Option<String>,
+    },
     /// An operator runs in a namespace we do not own: a conflict, because both
     /// controllers watch the same cluster-scoped CRDs.
     Foreign {
@@ -716,7 +747,11 @@ fn classify_operator(
         };
     }
     if let Some(d) = deploys.iter().find(|d| d.namespace == own_ns) {
-        return OperatorPresence::Ours { ready: d.ready };
+        return OperatorPresence::Ours {
+            name: d.name.clone(),
+            ready: d.ready,
+            image: d.image.clone(),
+        };
     }
     if crds.iter().any(|c| OPERATOR_CRDS.contains(&c.as_str())) {
         return OperatorPresence::UnmanagedCrds;
@@ -732,7 +767,7 @@ fn operator_flags(p: &OperatorPresence) -> (bool, bool) {
     match p {
         OperatorPresence::Absent | OperatorPresence::Unknown(_) => (false, false),
         OperatorPresence::UnmanagedCrds => (true, false),
-        OperatorPresence::Ours { ready } => (true, *ready),
+        OperatorPresence::Ours { ready, .. } => (true, *ready),
         OperatorPresence::Foreign { ready, .. } => (true, *ready),
     }
 }
@@ -805,6 +840,124 @@ fn bootstrap_ready(
     cert_manager_ready && operator_ready && foreign_operator_block(p, allow_foreign).is_none()
 }
 
+// --- Install only what is absent (ADR-057, #54) ------------------------------
+//
+// The upgrade contract: rolling out a new VeloxSearch changes the VeloxSearch
+// Pod, never the operator or cert-manager it finds running. The one path that
+// used to break that was bootstrap applying its vendored bundle whenever a
+// component was "not ready" at the instant it probed — and a Pod that is
+// rescheduling, restarting or waiting on cert-manager during the very same
+// rollout window is not ready. So readiness no longer decides whether to
+// install; PRESENCE of the controller Deployment does.
+
+/// What bootstrap may do about one component.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InstallStep {
+    /// Present and serving: nothing to do.
+    Ready,
+    /// Installed but not serving right now. Wait for this Deployment and report;
+    /// never re-apply the bundle over it.
+    Wait { namespace: String, name: String },
+    /// No controller Deployment at all: apply the vendored bundle.
+    Install,
+    /// The probe could not establish which of the above holds. Applying a
+    /// bundle is not undoable, so this refuses rather than guesses.
+    Unprovable(String),
+}
+
+/// The decision for cert-manager, from each controller Deployment's state
+/// (`None` = the Deployment does not exist, `Some(ready)` otherwise).
+///
+/// Presence is ANY of the three Deployments existing. A partial set is far more
+/// likely to be someone's own cert-manager than an interrupted install of ours
+/// (the bundle lands all three in one apply round), and re-applying our bundle
+/// over a foreign cert-manager is exactly what the contract forbids. CRDs alone
+/// do not count as presence: that is what an install interrupted before the
+/// Deployments landed leaves behind, and treating it as "installed" would wedge
+/// the retry on a wait for Deployments that will never appear.
+fn cert_manager_step(deploys: &[(&str, Option<bool>)]) -> InstallStep {
+    if deploys.iter().all(|(_, d)| d.is_none()) {
+        return InstallStep::Install;
+    }
+    match deploys.iter().find(|(_, d)| *d != Some(true)) {
+        None => InstallStep::Ready,
+        Some((name, _)) => InstallStep::Wait {
+            namespace: CERT_MANAGER_NS.to_string(),
+            name: (*name).to_string(),
+        },
+    }
+}
+
+/// The decision for the OpenSearch operator. The foreign-operator refusal
+/// (`foreign_operator_block`) runs BEFORE this and is independent of it; a
+/// `Foreign` reaching here was adopted through the override, and an adopted
+/// operator is waited on like ours — installing ours next to it is the `#115`
+/// dual-operator state.
+///
+/// `UnmanagedCrds` installs: CRDs with no controller is what an interrupted
+/// install of ours leaves (see the variant's doc), and R7 already warns that the
+/// pinned CRDs will be applied over them.
+fn operator_step(p: &OperatorPresence, own_ns: &str) -> InstallStep {
+    match p {
+        OperatorPresence::Absent | OperatorPresence::UnmanagedCrds => InstallStep::Install,
+        OperatorPresence::Ours { ready: true, .. }
+        | OperatorPresence::Foreign { ready: true, .. } => InstallStep::Ready,
+        OperatorPresence::Ours {
+            name, ready: false, ..
+        } => InstallStep::Wait {
+            namespace: own_ns.to_string(),
+            name: name.clone(),
+        },
+        OperatorPresence::Foreign {
+            namespace,
+            name,
+            ready: false,
+        } => InstallStep::Wait {
+            namespace: namespace.clone(),
+            name: name.clone(),
+        },
+        OperatorPresence::Unknown(e) => InstallStep::Unprovable(format!(
+            "operator probe failed: {e} — cannot tell an installed operator from an absent one"
+        )),
+    }
+}
+
+/// How long bootstrap waits on a component that is installed but not serving
+/// before it gives up and reports. Same budget the install path already used
+/// for a fresh Deployment to come up.
+const WAIT_INSTALLED_SECS: u64 = 300;
+
+/// Wait on an installed-but-not-ready Deployment; on timeout, say WHY nothing
+/// was applied, so the refusal reads as a decision and not as a hang.
+async fn wait_installed(client: &Client, namespace: &str, name: &str) -> Result<()> {
+    job_set(Job::Running(format!("wait:{name}")));
+    wait_deploy(client, namespace, name, WAIT_INSTALLED_SECS)
+        .await
+        .with_context(|| {
+            format!(
+                "{namespace}/{name} is installed but not Ready — VeloxSearch does not re-apply \
+                 its bundle over an installed component (ADR-057). Check \
+                 `kubectl -n {namespace} describe deploy/{name}`, then retry"
+            )
+        })
+}
+
+/// The container image of an operator controller Deployment. The chart's
+/// controller container is the one whose image names the operator; a
+/// hand-rolled install with a single container falls back to that container.
+fn operator_container_image(d: &Deployment) -> Option<String> {
+    let containers = &d.spec.as_ref()?.template.spec.as_ref()?.containers;
+    containers
+        .iter()
+        .find(|c| {
+            c.image
+                .as_deref()
+                .is_some_and(|i| i.contains(OPERATOR_LABEL_VALUE))
+        })
+        .or(containers.first())
+        .and_then(|c| c.image.clone())
+}
+
 /// Probe the cluster for OpenSearch operators: the CRDs (cluster-scoped) plus
 /// controller Deployments in EVERY namespace. The all-namespace Deployment list
 /// mirrors what `discovery.rs` already does and needs no RBAC beyond the
@@ -835,6 +988,7 @@ async fn scan_operators(client: &Client) -> Result<OperatorPresence, kube::Error
                     .as_ref()
                     .and_then(|s| s.ready_replicas)
                     .is_some_and(|r| r >= 1),
+                image: operator_container_image(&d),
             })
         })
         .collect();
@@ -926,16 +1080,25 @@ pub async fn ensure() -> Result<State> {
 async fn run_install() -> Result<()> {
     let client = crate::k8s::client().await?;
 
-    // 1. cert-manager (the operator's webhook certs depend on it).
-    let st = status().await?;
-    if !st.cert_manager_ready {
-        job_set(Job::Running("cert-manager".into()));
-        apply_bundle(&client, CERT_MANAGER_BUNDLE, BOOTSTRAP_BINDING)
-            .await
-            .context("installing cert-manager")?;
-        for d in CERT_MANAGER_DEPLOYS {
-            wait_deploy(&client, CERT_MANAGER_NS, d, 300).await?;
+    // 1. cert-manager (the operator's webhook certs depend on it). Installed
+    //    only when ABSENT; installed-but-not-ready is waited on (ADR-057).
+    match cert_manager_step(&cert_manager_deploys(&client).await) {
+        InstallStep::Ready => {}
+        InstallStep::Install => {
+            job_set(Job::Running("cert-manager".into()));
+            apply_bundle(&client, CERT_MANAGER_BUNDLE, BOOTSTRAP_BINDING)
+                .await
+                .context("installing cert-manager")?;
+            for d in CERT_MANAGER_DEPLOYS {
+                wait_deploy(&client, CERT_MANAGER_NS, d, 300).await?;
+            }
         }
+        InstallStep::Wait { .. } => {
+            for d in CERT_MANAGER_DEPLOYS {
+                wait_installed(&client, CERT_MANAGER_NS, d).await?;
+            }
+        }
+        InstallStep::Unprovable(why) => bail!("{why}"),
     }
 
     // 2. our namespace must exist before the operator lands in it.
@@ -968,13 +1131,24 @@ async fn run_install() -> Result<()> {
         bail!("{why}");
     }
 
-    let st = status().await?;
-    if !st.operator_ready {
-        job_set(Job::Running("opensearch-operator".into()));
-        apply_bundle(&client, &operator_bundle(), BOOTSTRAP_BINDING)
-            .await
-            .context("installing opensearch-operator")?;
-        wait_deploy(&client, ns(), OPERATOR_DEPLOY, 300).await?;
+    // The install decision comes from the SAME probe the guard above just took,
+    // not a fresh `status()`: a second probe could see a different world.
+    // Installed-but-not-ready waits and never applies (ADR-057, #54) — the old
+    // `if !operator_ready { apply }` force-applied the vendored bundle, CRDs
+    // included, over an operator that was merely restarting.
+    match operator_step(&presence, ns()) {
+        InstallStep::Ready => {}
+        InstallStep::Install => {
+            job_set(Job::Running("opensearch-operator".into()));
+            apply_bundle(&client, &operator_bundle(), BOOTSTRAP_BINDING)
+                .await
+                .context("installing opensearch-operator")?;
+            wait_deploy(&client, ns(), OPERATOR_DEPLOY, 300).await?;
+        }
+        InstallStep::Wait { namespace, name } => {
+            wait_installed(&client, &namespace, &name).await?;
+        }
+        InstallStep::Unprovable(why) => bail!("{why}"),
     }
 
     // 4. Storage (ADR-031/043): Longhorn install is DEFERRED to first cluster
@@ -1710,6 +1884,18 @@ parameters:
             namespace: namespace.into(),
             name: name.into(),
             ready,
+            image: Some(VENDORED_IMAGE_FIXTURE.into()),
+        }
+    }
+
+    const VENDORED_IMAGE_FIXTURE: &str = "opensearchproject/opensearch-operator:3.0.0-alpha";
+
+    /// Our own operator as the scan reports the bundle's Deployment.
+    fn ours(ready: bool) -> OperatorPresence {
+        OperatorPresence::Ours {
+            name: OPERATOR_DEPLOY.into(),
+            ready,
+            image: Some(VENDORED_IMAGE_FIXTURE.into()),
         }
     }
 
@@ -1842,8 +2028,8 @@ parameters:
         for presence in [
             OperatorPresence::Absent,
             OperatorPresence::UnmanagedCrds,
-            OperatorPresence::Ours { ready: false },
-            OperatorPresence::Ours { ready: true },
+            ours(false),
+            ours(true),
         ] {
             assert!(
                 foreign_operator_block(&presence, false).is_none(),
@@ -1860,7 +2046,7 @@ parameters:
             &[op_deploy(OWN_NS, OPERATOR_DEPLOY, true)],
             OWN_NS,
         );
-        assert_eq!(presence, OperatorPresence::Ours { ready: true });
+        assert_eq!(presence, ours(true));
         assert!(
             operator_r7(&presence, false).is_none(),
             "no operator row — cert-manager decides"
@@ -1901,6 +2087,137 @@ parameters:
         assert_eq!(row.status, "warn");
         assert!(row.detail.contains("forbidden"), "{}", row.detail);
         assert_eq!(operator_flags(&unknown), (false, false));
+    }
+
+    // --- Install only what is absent (ADR-057, #54) ------------------------
+
+    /// The #54 regression: an operator that is installed but not Ready at the
+    /// instant bootstrap probes — rescheduling, restarting, waiting on
+    /// cert-manager, scaled to 0 during a rollout — must be WAITED on. The
+    /// pre-#54 predicate was `!operator_ready`, which applied the vendored
+    /// bundle (CRDs included, with `.force()`) over it.
+    #[test]
+    fn an_installed_operator_that_is_not_ready_is_waited_on_never_reinstalled() {
+        let step = operator_step(&ours(false), OWN_NS);
+        assert_eq!(
+            step,
+            InstallStep::Wait {
+                namespace: OWN_NS.into(),
+                name: OPERATOR_DEPLOY.into(),
+            }
+        );
+        // The pre-#54 decision on the same state, to pin what changed.
+        let (_, ready) = operator_flags(&ours(false));
+        assert!(
+            !ready,
+            "the old `if !operator_ready` would have applied here"
+        );
+    }
+
+    #[test]
+    fn only_an_absent_operator_is_installed() {
+        assert_eq!(
+            operator_step(&OperatorPresence::Absent, OWN_NS),
+            InstallStep::Install
+        );
+        // An interrupted install of ours: CRDs but no controller. Installing is
+        // what un-wedges the retry (R7 warns about the CRDs).
+        assert_eq!(
+            operator_step(&OperatorPresence::UnmanagedCrds, OWN_NS),
+            InstallStep::Install
+        );
+        assert_eq!(operator_step(&ours(true), OWN_NS), InstallStep::Ready);
+        // Exhaustive over what the scan can report: nothing else installs.
+        for p in [
+            ours(false),
+            ours(true),
+            OperatorPresence::Foreign {
+                namespace: "opensearch".into(),
+                name: "opensearch-operator".into(),
+                ready: false,
+            },
+            OperatorPresence::Foreign {
+                namespace: "opensearch".into(),
+                name: "opensearch-operator".into(),
+                ready: true,
+            },
+            OperatorPresence::Unknown("forbidden".into()),
+        ] {
+            assert_ne!(
+                operator_step(&p, OWN_NS),
+                InstallStep::Install,
+                "{p:?} has a controller (or cannot be proven not to) — never install over it"
+            );
+        }
+    }
+
+    /// An adopted foreign operator (override set) that is restarting is waited
+    /// on in ITS namespace — installing ours beside it is the `#115` state.
+    #[test]
+    fn an_adopted_foreign_operator_is_waited_on_where_it_lives() {
+        let p = OperatorPresence::Foreign {
+            namespace: "opensearch".into(),
+            name: "os-op".into(),
+            ready: false,
+        };
+        assert_eq!(
+            operator_step(&p, OWN_NS),
+            InstallStep::Wait {
+                namespace: "opensearch".into(),
+                name: "os-op".into(),
+            }
+        );
+    }
+
+    /// A probe failure refuses: applying a bundle is not undoable.
+    #[test]
+    fn an_unprovable_operator_probe_refuses_to_install() {
+        let step = operator_step(&OperatorPresence::Unknown("timeout".into()), OWN_NS);
+        assert!(
+            matches!(step, InstallStep::Unprovable(ref why) if why.contains("timeout")),
+            "{step:?}"
+        );
+    }
+
+    #[test]
+    fn cert_manager_installs_only_when_no_controller_exists() {
+        let all = |s: Option<bool>| -> Vec<(&str, Option<bool>)> {
+            CERT_MANAGER_DEPLOYS.iter().map(|n| (*n, s)).collect()
+        };
+        assert_eq!(cert_manager_step(&all(None)), InstallStep::Install);
+        assert_eq!(cert_manager_step(&all(Some(true))), InstallStep::Ready);
+        // Installed, restarting: wait, never re-apply.
+        assert_eq!(
+            cert_manager_step(&all(Some(false))),
+            InstallStep::Wait {
+                namespace: CERT_MANAGER_NS.into(),
+                name: "cert-manager".into(),
+            }
+        );
+        // One controller up, the webhook still starting: wait on the webhook.
+        let partial = [
+            ("cert-manager", Some(true)),
+            ("cert-manager-webhook", Some(false)),
+            ("cert-manager-cainjector", Some(true)),
+        ];
+        assert_eq!(
+            cert_manager_step(&partial),
+            InstallStep::Wait {
+                namespace: CERT_MANAGER_NS.into(),
+                name: "cert-manager-webhook".into(),
+            }
+        );
+        // A partial set (someone's own cert-manager without cainjector) is
+        // present, not absent: wait and report, never apply ours over it.
+        let foreign_partial = [
+            ("cert-manager", Some(true)),
+            ("cert-manager-webhook", Some(true)),
+            ("cert-manager-cainjector", None),
+        ];
+        assert!(matches!(
+            cert_manager_step(&foreign_partial),
+            InstallStep::Wait { ref name, .. } if name == "cert-manager-cainjector"
+        ));
     }
 
     /// Operator Deployments are recognised by chart label first (any helm
