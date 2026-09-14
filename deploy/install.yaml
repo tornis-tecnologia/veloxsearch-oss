@@ -362,6 +362,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Locator for this Pod's own object, so the About panel can read the
+            # image digest the kubelet actually runs (#55). The identity comes
+            # from Pod status, never from this value.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             # The only secret in the account-mail config (#79). Optional, so an
             # install that never sends mail needs no Secret at all; provision
             # it from the vault per ADR-034 (deploy/secrets/) when SMTP is used.
