@@ -75,6 +75,10 @@ function App() {
   // both warnings stay silent rather than guessing.
   const [hostNodes, setHostNodes] = useState([]);
   const [sseDead, setSseDead] = useState(false);
+  // Which build is serving (#55). Installation-level and admin-only, so a
+  // tenant session never asks (the route would 404 for it).
+  const [isTenant, setIsTenant] = useState(false);
+  const [buildInfo, setBuildInfo] = useState(null);
   const [toast, setToast] = useState({ msg: "", show: false });
   const toastTimer = useRef(null);
 
@@ -102,6 +106,7 @@ function App() {
       const a = await API.authState();
       if (a && a.first_run) { setBoot("setup"); return; }
       if (!a || !a.authenticated) { setBoot("login"); return; }
+      setIsTenant(!!a.tenant);
       // Authenticated → conformity gate (ADR-014). Probe errors fall through
       // to the main UI, which surfaces its own problems.
       try {
@@ -151,6 +156,16 @@ function App() {
     }
     return () => { alive = false; if (es) es.close(); };
   }, [boot]);
+
+  // ── build identity: fixed for the life of this pod, so fetch once ──
+  useEffect(() => {
+    if (boot !== "ready" || isTenant) return;
+    let alive = true;
+    API.buildInfo()
+      .then(b => { if (alive && b) setBuildInfo(b); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [boot, isTenant]);
 
   // ── fallback poll: advances only while the SSE stream is dead ──
   useEffect(() => {
@@ -246,6 +261,7 @@ function App() {
     try { await API.logout(); } catch (e) {}
     setDeployments([]);
     setLoaded(false);
+    setBuildInfo(null); // the next session may be a tenant's
     probeBoot();
   }
 
@@ -292,6 +308,13 @@ function App() {
           </div>
         )}
         <span className="spacer" />
+        {buildInfo && (
+          <button className="badge" data-testid="version-chip" title={tr.about_chip_tip}
+            style={{ textTransform: "none", cursor: "pointer" }}
+            onClick={() => go({ name: "settings" })}>
+            v{buildInfo.version}{buildInfo.commit !== "unknown" && <> · {buildInfo.commit.slice(0, 7)}</>}
+          </button>
+        )}
         {/* The live stream is down and the app is on its 5s fallback poll. The
             user was never told; the list just went quiet. */}
         {sseDead && (
@@ -337,7 +360,7 @@ function App() {
           <CapacityView lang={lang} />
         )}
         {route.name === "settings" && (
-          <SettingsView lang={lang} onToast={showToast} />
+          <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} />
         )}
         {route.name === "deployment" && (current
           ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}

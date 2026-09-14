@@ -8,7 +8,8 @@
    matches the backend router (src/api.rs): pure no-arg reads are GET,
    everything with a body (mutations + arg'd reads) is POST.
      GET  /api/auth_state, bootstrap_status, discover,
-          list_deployments, access_settings   (reads; auth_state public)
+          list_deployments, access_settings, build_info
+                                              (reads; auth_state public)
      SSE  /api/events  -> Vec<ClusterStatus> every 3s   (auth-gated)
      POST everything else, JSON body matching the old fn params
 
@@ -190,6 +191,14 @@ const API = {
   getAccessSettings: () => call("access_settings", null, "GET"),
   saveAccessSettings: (mode, base_domain, ingress_class, tls_secret = "", tls_cert = "", tls_key = "") =>
     call("save_access_settings", { mode, base_domain, ingress_class, tls_secret, tls_cert, tls_key }),
+
+  // ── build identity (#55) ─────────────────────────────────────
+  // Admin-only. version/commit are compiled into the server binary; the image
+  // digest and operator image are read back from the cluster ("unavailable"
+  // plus a *_note when they cannot be).
+  // -> { version, commit, image_digest, image_id, image_note,
+  //      operator_image, operator_deployment, operator_note, catalog_source }
+  buildInfo: () => call("build_info", null, "GET"),
 
   // ── bootstrap / conformity ───────────────────────────────────
   bootstrapStatus: () => call("bootstrap_status", null, "GET"),
