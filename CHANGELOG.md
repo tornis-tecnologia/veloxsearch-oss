@@ -8,6 +8,30 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **Upgrading could re-install the OpenSearch operator, grant cluster-admin
+  back, or downgrade (#54, ADR-057):** bootstrap applied its vendored operator
+  bundle (CRDs included, force-applied) whenever the operator was not Ready at
+  the moment it probed — which an operator restarting during a rollout is.
+  Bootstrap now installs only what is **absent**; an installed component that
+  is not Ready is waited on and reported, never re-applied. The
+  `veloxsearch-bootstrap` cluster-admin binding that every `install.yaml`
+  re-apply re-creates is revoked again by the running app once bootstrap and
+  storage are complete. `deploy/install.yaml` on `main` pinned 0.8.1 while the
+  crate was 0.9.0 (so did the 0.9.0 `velox` CLI, which embeds it); it now pins
+  0.9.0 and CI fails when the two differ. DEPLOY.md's upgrade applies the
+  versioned release artifact.
+
+### Added
+- **Operator drift is reported (R9, ADR-057):** the conformity report and a
+  notice above the main navigation show when the running operator's image
+  differs from the one this release vendors. Warn-only; nothing is changed.
+- **N-1 → N upgrade lane** (`.github/workflows/upgrade.yml`): installs the
+  previous release on minikube, brings a deployment to green, rolls the
+  candidate out, and asserts the operator, CRDs and `OpenSearchCluster` specs
+  are unchanged and no bootstrap binding is left — plus a variant with the
+  operator scaled to 0 during the rollout.
+
 ### Changed
 - **K3S monitoring is a choice, not a baseline (#52):** every non-search
   deployment used to ship the `kubernetes` monitor unconditionally — the
