@@ -290,10 +290,10 @@ This shape is **expected-correct but not conformance-tested** — verify against
    a failure. Any hard ✗ (e.g. Kubernetes < 1.30, < 8 GiB RAM, arm64, a foreign
    operator) makes the installer **refuse to start** rather than half-install.
 4. **Self-bootstrap** — once the probe passes, the app installs cert-manager +
-   the OpenSearch operator from vendored bundles (`deploy/bootstrap/`), and
-   Longhorn if needed. This needs the one-time `veloxsearch-bootstrap`
-   cluster-admin binding, which the app **revokes itself** when bootstrap
-   completes (ADR-027). Bootstrap installs only what is **absent**: a component
+   the OpenSearch operator from vendored bundles (`deploy/bootstrap/`). Longhorn,
+   if needed, is installed later, when the first deployment is created (step 5).
+   This needs the one-time `veloxsearch-bootstrap` cluster-admin binding, which
+   the app **revokes itself** once bootstrap and storage are complete (ADR-027). Bootstrap installs only what is **absent**: a component
    that is installed but not Ready is waited on, never re-installed, and an
    operator that differs from the one this release vendors is reported as R9,
    never changed (ADR-057). Upgrading VeloxSearch later re-creates the binding;

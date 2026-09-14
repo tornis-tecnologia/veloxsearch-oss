@@ -192,8 +192,9 @@ changed. What to do depends on why:
 Build once, carry the tarball, import per platform:
 
 ```sh
-deploy/build-image.sh --tag veloxsearch:0.7.0
-docker save veloxsearch:0.7.0 -o veloxsearch.tar
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)   # what deploy/install.yaml pins
+deploy/build-image.sh --tag veloxsearch:$VERSION
+docker save veloxsearch:$VERSION -o veloxsearch.tar
 ```
 
 | Platform | Import command |
