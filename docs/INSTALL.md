@@ -1,41 +1,34 @@
 # Installing VeloxSearch — minikube · k0s · k3s · vanilla k8s
 
-This is the **canonical install guide.** It installs VeloxSearch onto a cluster you
-already have, and it covers two distinct actions you should not conflate:
+This is the **canonical install guide.** On a cluster you already have, installing
+is one command — the image is published to a **public registry**, so the cluster
+pulls it anonymously and there is no client binary to install:
 
-- **Install the `velox` CLI/wizard** onto your machine — the recommended start.
-  One command fetches the CLI, checksum-verifies it, and puts it on your PATH; a
-  second deploys VeloxSearch:
+```bash
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
+kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
+# open http://localhost:3000 — first run: create the admin account
+```
 
-  ```bash
-  curl -fsSL https://get.veloxsearch.ai/install.sh | sh   # installs the velox CLI
-  velox init                                              # deploys VeloxSearch
-  ```
-
-- **Deploy OpenSearch in one command** — the dependency-free alternative, no client
-  binary. The image is published to a **public registry**, so the cluster pulls it
-  anonymously:
-
-  ```bash
-  kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
-  ```
-
-Both land the same thing: `velox init` server-side-applies the same manifest, waits
-for the rollout, and prints the first-run URL; `kubectl apply` does the apply and
-you port-forward yourself. The CLI is **linux-amd64** only today — on macOS/arm64
-use the `kubectl apply` path, which has no client-side dependency.
+No cluster yet? Start at [§0](#0-no-kubernetes-cluster-yet). Pulling from a
+private mirror instead of the public image? That is the one case the `velox` CLI
+exists for — see [§2b](#2b-private-mirror-authenticated-pull--alternative) and
+[`INSTALLER.md`](INSTALLER.md).
 
 This guide also covers the four supported single-cluster shapes and, for clusters
-that can't reach the public image, an offline **side-load** alternative (and a
-private authenticated-pull mirror).
+that can't reach the public image, an offline **side-load** alternative.
 
-VeloxSearch ships as **one manifest** (`deploy/install.yaml`, ADR-027): namespace
-`veloxsearch-system`, the service account + two-phase RBAC, the wizard Deployment,
-and a Service. It creates **no Ingress** — port-forward is the zero-assumption
-default. On first run the app checks your cluster against
+VeloxSearch ships as **one manifest** (`deploy/install.yaml`, ADR-027): the
+`veloxsearch-system` and `velox-agents` namespaces, the service account +
+two-phase RBAC, the wizard Deployment and its Service, a small bundled Postgres
+StatefulSet, and a catch-all Ingress with no host and no `ingressClassName`. On a
+cluster with a default IngressClass (a fresh k3s, say) that Ingress answers on
+`http://<node-ip>/`; on a cluster without one it stays inert and port-forward is
+the way in. On first run the app checks your cluster against
 [`REQUIREMENTS.md`](REQUIREMENTS.md) (R1–R8) and self-installs cert-manager + the
-OpenSearch operator (and Longhorn, if your default StorageClass is node-local or
-absent — see R3).
+OpenSearch operator. Longhorn — the only supported deployment storage (R3,
+ADR-043) — is installed when you create your first deployment, unless it is
+already there.
 
 > **Read first:** [`REQUIREMENTS.md`](REQUIREMENTS.md) is the platform contract.
 > Everything below assumes Kubernetes ≥ 1.30, amd64 nodes, ≥ 8 GiB schedulable
@@ -44,34 +37,64 @@ absent — see R3).
 
 ---
 
+## 0. No Kubernetes cluster yet?
+
+VeloxSearch installs *into* a Kubernetes cluster; it does not create one. The
+shortest path from a bare machine:
+
+- **A Linux server or VM** (amd64, ≥ 12 GiB RAM / 4 vCPU recommended — see R4):
+  install single-node k3s with its official one-liner, then follow
+  [§3b](#3b-k3s-verified--k3s-greenfield) for the Longhorn node packages and
+  the kubeconfig:
+
+  ```bash
+  curl -sfL https://get.k3s.io | sh -    # k3s quick start: https://docs.k3s.io/quick-start
+  ```
+
+- **A laptop** with Docker or a hypervisor: minikube, sized above the R4 floor —
+  [§3a](#3a-minikube) has the exact `minikube start` line.
+
+Either way, once `kubectl get nodes` shows a `Ready` node, the one-command install
+at the top of this page is all that is left.
+
+---
+
 ## 1. Supported platforms
 
-| Platform | Default StorageClass | Longhorn self-bootstrap? | Ingress out of the box | Conformance status |
+| Platform | Default StorageClass | Longhorn installed? | Ingress out of the box | Conformance status |
 |---|---|---|---|---|
-| **minikube** | `standard` (`k8s.io/minikube-hostpath`) — node-local | **Yes** — node-local default ⇒ Longhorn installs (R3) | No (addon: `minikube addons enable ingress`) | Documented, **expected** (not in the conformance fleet) |
-| **k0s** (bare, `--single`) | none | **Yes** — absent default ⇒ Longhorn installs (R3) | No (port-forward only, R8) | **Verified ✓** — `k0s-bare` (k0s v1.35.4) |
-| **k3s** | `local-path` (`rancher.io/local-path`) — node-local | **Yes** — node-local default ⇒ Longhorn installs (R3) | Traefik present, but install defaults to port-forward | **Verified ✓** — `k3s-greenfield` (k3s v1.35.5); also a 3-node k3s cluster (real `longhorn` default ⇒ bootstrap no-ops) |
-| **vanilla k8s** (kubeadm/EKS/GKE/AKS) | depends on the cluster | **Conditional** — a real CSI default is used as-is; a node-local/absent default ⇒ Longhorn installs | depends on the cluster | Documented, **expected** (kubeadm/EKS/GKE/AKS untested) |
+| **minikube** | `standard` (`k8s.io/minikube-hostpath`) — node-local | **Yes**, at first deployment create (R3) | No (addon: `minikube addons enable ingress`) | Install-and-boot smoke-tested on every push to `main` (CI lane `Smoke (minikube)`); not a full conformance run |
+| **k0s** (bare, `--single`) | none | **Yes**, at first deployment create (R3) | No (port-forward only, R8) | In the conformance fleet (`k0s-bare`) |
+| **k3s** | `local-path` (`rancher.io/local-path`) — node-local | **Yes**, at first deployment create (R3) | Traefik is the default IngressClass, so the manifest's catch-all Ingress answers on `http://<node-ip>/` | In the conformance fleet (`k3s-greenfield`, a 3-node Longhorn cluster, and the `k3s-undersized` refusal fixture) |
+| **vanilla k8s** (kubeadm/EKS/GKE/AKS) | depends on the cluster | **Yes**, at first deployment create, unless a `longhorn` StorageClass already exists (R3) | depends on the cluster | Documented, **expected** (kubeadm/EKS/GKE/AKS untested) |
 
-**How the storage decision works (R3 / ADR-031).** The wizard inspects your
-default StorageClass:
+What each fleet row last proved, and on which version, is recorded per row in
+[`REQUIREMENTS.md`](REQUIREMENTS.md#tested-platforms-the-conformance-fleet-adr-026) — this table does not repeat
+the dates so it cannot drift from them.
 
-- **Real CSI default** (e.g. `longhorn`, EBS, PD, Azure Disk) → used as-is,
-  Longhorn bootstrap is a no-op.
-- **Node-local default** (`rancher.io/local-path`, hostpath, minikube-hostpath,
-  openebs-local) **or no default at all** → VeloxSearch installs Longhorn so
-  OpenSearch PVCs survive a pod reschedule.
+**How storage works (R3 / ADR-043, amending ADR-031).** Longhorn is the **only
+supported deployment storage**: OpenSearch PVCs are pinned to the `longhorn`
+StorageClass, whatever your cluster's default is.
 
-> **Longhorn node prerequisite:** every node needs `open-iscsi` installed and
-> `iscsid` running. Without it the storage-ready gate refuses (informatively)
-> rather than leaving PVCs `Pending`. On Debian/Ubuntu:
+- **A `longhorn` StorageClass already present** → used as-is; nothing is installed.
+- **Anything else** — a node-local default (`rancher.io/local-path`, hostpath,
+  minikube-hostpath), no default at all, **or a foreign CSI default** (EBS, PD,
+  Azure Disk, Ceph…) → VeloxSearch installs Longhorn when you create your first
+  deployment. It informs rather than asks: the wizard's review step says the
+  install will happen, and shows its progress while it runs.
+
+> **Longhorn node prerequisites:** every node needs `open-iscsi` (with `iscsid`
+> running), an NFS client and `dmsetup`. A node missing one is named in the UI
+> with the install command for its distro, and deployment creation is refused
+> until Longhorn is usable — PVCs are never left `Pending`. On Debian/Ubuntu,
+> for `open-iscsi`:
 > `sudo apt-get install -y open-iscsi && sudo systemctl enable --now iscsid`.
 
-**Verified vs expected.** Only **k3s** and **k0s** have a live
-conformance fixture that drives the whole journey end-to-end (install → first-run
-→ bootstrap → create deployment → data in dashboards). **minikube** and **vanilla
-k8s** are documented from the same contract and the `default_storage()` branch
-logic, but have **not** been run through the fleet — treat their command blocks as
+**Verified vs expected.** **k3s** and **k0s** have live conformance fixtures
+that drive the journey end-to-end (install → first-run → bootstrap → create
+deployment). **minikube** has continuous install-and-boot evidence from CI but no
+full-journey run, and **vanilla k8s** is documented from the same contract without
+having been run through the fleet — treat those command blocks as
 expected-correct, not conformance-proven.
 
 ---
@@ -81,67 +104,62 @@ expected-correct, not conformance-proven.
 ### 2a. Public pull (the default) — zero credentials
 
 The image is published to a **public registry**, so a cluster with outbound
-registry egress pulls it anonymously — no namespace to pre-create, no pull secret.
-Two ways to drive it.
-
-**Primary — the `velox` CLI.** Install `velox` (linux-amd64; it verifies its own
-checksum), then `velox init` server-side-applies the manifest, waits for the
-Deployment rollout, and prints the first-run URL:
-
-```bash
-curl -fsSL https://get.veloxsearch.ai/install.sh | sh   # installs the velox CLI
-velox init                                              # deploys VeloxSearch
-```
-
-The installer fetches `https://get.veloxsearch.ai/velox` and its `velox.sha256`,
-verifies the checksum, makes it executable, and (with sudo if needed) drops it in
-`/usr/local/bin`. To grab the binary by hand instead:
-
-```bash
-curl -fsSL https://get.veloxsearch.ai/velox -o velox && chmod +x velox && ./velox init
-```
-
-> **Platform:** `velox` is published for **linux-amd64** only today; macOS and
-> arm64 are a future follow-up. On other platforms use the `kubectl apply` path
-> below, which has no client-side dependency.
-
-**No-dependency alternative — `kubectl apply`.** Skip the CLI and apply the
-manifest directly; it creates its own `veloxsearch-system` namespace, ServiceAccount
-and RBAC, and the kubelet pulls the public image:
+registry egress pulls it anonymously — no namespace to pre-create, no pull secret,
+no client binary. Apply the release manifest; it creates its own namespaces,
+ServiceAccount and RBAC, and the kubelet pulls the public image:
 
 ```bash
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
+kubectl -n veloxsearch-system rollout status deployment/veloxsearch --timeout=300s
 ```
+
+Works from any workstation `kubectl` runs on — macOS and arm64 laptops included;
+only the cluster's nodes need to be amd64 (R5).
 
 ### 2b. Private mirror (authenticated pull) — alternative
 
 If you mirror the image into a **private** registry (e.g. your own
-`registry.gitlab.com/...` project), the cluster needs a credential to pull it.
-Create a pull secret and let the manifest's ServiceAccount consume it:
+`registry.example.com/...` project), the cluster needs a credential to pull it.
+The release manifest's ServiceAccount carries **no** `imagePullSecrets` (the
+default image is public), so create the pull Secret, attach it to the
+ServiceAccount, and point the Deployment at your mirror:
 
 ```bash
-kubectl create namespace veloxsearch-system    # idempotent; the manifest also creates it
+kubectl create namespace veloxsearch-system    # the manifest also creates it
 kubectl -n veloxsearch-system create secret docker-registry velox-pull \
-  --docker-server=registry.gitlab.com \
+  --docker-server=registry.example.com \
   --docker-username=<deploy-token-username> \
   --docker-password=<deploy-token>
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
+kubectl -n veloxsearch-system patch serviceaccount veloxsearch \
+  -p '{"imagePullSecrets":[{"name":"velox-pull"}]}'
+kubectl -n veloxsearch-system set image deploy/veloxsearch \
+  veloxsearch=registry.example.com/veloxsearch-oss:0.9.0
 ```
 
-The one-command equivalent is `velox init --pull-token <token>` (with
-`--registry` / `--pull-user` to match your mirror): it creates the `velox-pull`
-Secret, server-side-applies the manifest, waits for the rollout, and prints the
-next steps.
+The ServiceAccount patch must come before `set image`: a pod picks up its
+ServiceAccount's pull secrets when it is created, and `set image` is what creates
+the new pod. `velox init --pull-token` creates the same `velox-pull` Secret
+before applying the manifest it was built with; the ServiceAccount patch and the
+image change are still yours to do — see [`INSTALLER.md`](INSTALLER.md).
 
 ### 2c. Side-load (offline / air-gapped) — no registry at all
 
 Build or obtain the image tarball, then import it into each platform's container
-runtime. To produce the tar from a local build:
+runtime. The tag you import must be **exactly** the `image:` reference of the
+manifest you apply — the kubelet looks the image up by that name.
+`deploy/build-image.sh` tags `docker.io/tornistecnologia/veloxsearch-oss:<version>`
+by default, `<version>` being the one in `Cargo.toml`:
 
 ```bash
-deploy/build-image.sh --tag veloxsearch:0.7.0   # see DEPLOY.md
-docker save veloxsearch:0.7.0 -o veloxsearch.tar
+deploy/build-image.sh                                              # see DEPLOY.md
+docker save docker.io/tornistecnologia/veloxsearch-oss:0.9.0 -o veloxsearch.tar
+grep -n 'image: docker.io/tornistecnologia' deploy/install.yaml     # must name the same tag
 ```
+
+The release manifest pins the image by **digest**, which a locally built image
+does not carry — for a side-load, apply a manifest whose `image:` line names the
+tag you imported.
 
 Import per platform:
 
@@ -152,9 +170,10 @@ Import per platform:
 | **k0s** | `sudo k0s ctr -n k8s.io images import veloxsearch.tar` |
 | **vanilla k8s** | per node: `sudo ctr -n k8s.io images import veloxsearch.tar` (or `sudo nerdctl -n k8s.io load -i veloxsearch.tar`) — run on **every** schedulable node, or push to a registry the cluster can pull |
 
-The Deployment uses `imagePullPolicy: IfNotPresent`, so once `veloxsearch:0.7.0`
-is present in the runtime, `kubectl apply -f deploy/install.yaml` schedules
-against the local image without any registry contact.
+The Deployment uses `imagePullPolicy: IfNotPresent`, so once that tag is present
+in the runtime the pod schedules against the local image without any registry
+contact. The bundled Postgres (`docker.io/library/postgres:16-alpine`) is pulled
+the same way and needs side-loading too.
 
 ---
 
@@ -215,11 +234,11 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # open http://localhost:3000  → first run: /setup
 ```
 
-Conformance-verified on `k3s-greenfield` (k3s v1.35.5, single node): install →
-all R1–R8 ✓ → cert-manager + operator auto-installed → Longhorn bootstrapped from
-the local-path default → deployment green with 3 OpenSearch pods co-scheduled on
-one node. The live 3-node prod cluster has a real `longhorn` default, so the
-bootstrap no-ops there.
+The `k3s-greenfield` fixture (single node) runs this path: install → R1–R8 ✓ →
+cert-manager + operator auto-installed → Longhorn installed at first create from
+the local-path default. A 3-node k3s cluster that already has a `longhorn`
+StorageClass skips the Longhorn install. What each run last proved is in
+[`REQUIREMENTS.md`](REQUIREMENTS.md#tested-platforms-the-conformance-fleet-adr-026).
 
 ### 3c. k0s (verified — `k0s-bare`)
 
@@ -242,9 +261,11 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # open http://localhost:3000  → first run: /setup
 ```
 
-Conformance-verified on `k0s-bare` (k0s v1.35.4, single node): absent-default
-Longhorn bootstrap path + port-forward-only honesty (no IngressClass ⇒ the UI
-offers only port-forward).
+The `k0s-bare` fixture (single node) runs this path: absent-default Longhorn
+install + port-forward-only honesty (no IngressClass ⇒ the UI offers only
+port-forward, and the manifest's catch-all Ingress stays inert). What each run
+last proved is in
+[`REQUIREMENTS.md`](REQUIREMENTS.md#tested-platforms-the-conformance-fleet-adr-026).
 
 ### 3d. vanilla k8s (kubeadm / EKS / GKE / AKS — expected, untested)
 
@@ -256,9 +277,10 @@ offers only port-forward).
 #   sudo ctr -n k8s.io images import veloxsearch.tar
 #   (or: sudo nerdctl -n k8s.io load -i veloxsearch.tar)
 
-# Storage: a managed cloud default (gp2/gp3, pd-*, managed-csi) is a real CSI
-# default ⇒ used as-is, no Longhorn. A bare kubeadm cluster usually has NO
-# default SC ⇒ Longhorn bootstraps; install open-iscsi on every node first.
+# Storage: Longhorn is the only supported deployment storage (R3, ADR-043) — a
+# managed cloud default (gp2/gp3, pd-*, managed-csi) is NOT used; Longhorn is
+# installed at first create unless a `longhorn` StorageClass already exists.
+# Install open-iscsi, an NFS client and dmsetup on every node first.
 
 kubectl apply -f deploy/install.yaml
 kubectl -n veloxsearch-system rollout status deployment/veloxsearch --timeout=120s
@@ -276,13 +298,17 @@ This shape is **expected-correct but not conformance-tested** — verify against
 
 ## 4. First run
 
+A 24-second recording of this whole flow — setup, conformity, a green deployment,
+the create wizard — is at [`.github/assets/demo.gif`](../.github/assets/demo.gif)
+(recorded against a mock API; nothing is provisioned in it).
+
 1. **Open the wizard** at `http://localhost:3000` (or your ingress host).
 2. **`/setup`** — create the admin account on first boot (ADR-023). The password
    is bcrypt-hashed into the `veloxsearch-credentials` Secret; there are no env
    credentials baked into the manifest. Sessions survive pod restarts.
 3. **Conformity probe** — the app checks R1–R8 ([`REQUIREMENTS.md`](REQUIREMENTS.md))
-   and renders each as ✓ / ⚠ / ✗ with remediation text. A node-local/absent
-   StorageClass shows as a remediation ("VeloxSearch will install Longhorn"), not
+   and renders each as ✓ / ⚠ / ✗ with remediation text. A missing `longhorn`
+   StorageClass shows as a remediation (VeloxSearch will install Longhorn), not
    a failure. Any hard ✗ (e.g. Kubernetes < 1.30, < 8 GiB RAM, arm64, a foreign
    operator) makes the installer **refuse to start** rather than half-install.
 4. **Self-bootstrap** — once the probe passes, the app installs cert-manager +
@@ -291,10 +317,21 @@ This shape is **expected-correct but not conformance-tested** — verify against
    cluster-admin binding, which the app **revokes itself** when bootstrap
    completes (ADR-027). Re-apply `install.yaml` only if you ever need to
    re-bootstrap (e.g. a component upgrade).
-5. **Create your first deployment** — name + size preset + purpose
-   (Observability / Security / Search). Creation is gated on storage-ready;
-   OpenSearch comes up green (3 nodes for quorum), and selected recipes ship
-   their collection agents + out-of-the-box dashboards.
+5. **Create your first deployment** — a four-step wizard (ADR-053):
+   - **Purpose** — the name, the OpenSearch version, and what the deployment is
+     for: Observability, Security or Search.
+   - **Size** — a preset (small / medium / large) or a custom size. Every
+     deployment is 3 nodes for quorum; presets vary memory, heap and disk.
+   - **Snapshot** — an optional S3 snapshot repository. Skipping it costs
+     nothing; the deployment's Backup tab configures it later.
+   - **Review** — for Observability and Security deployments, a default-checked
+     **K3S monitoring (this cluster)** toggle. Leave it on to ship the Kubernetes
+     log collector with the deployment; uncheck it and the deployment is created
+     with no monitors — install them later from its Integrations tab, and the
+     overview says "no monitors installed" until you do (#52).
+
+   Creation is gated on storage-ready (this is when Longhorn is installed, if it
+   is missing); OpenSearch then comes up node by node and turns green at the end.
 
 ---
 
@@ -348,9 +385,9 @@ Three places serve an install manifest. They are not equivalent:
 | Source | What it is |
 | --- | --- |
 | `releases/latest/download/install.yaml` | **Use this.** A release artifact with the image pinned to a **digest**. Immutable: the same URL applied twice gives the same bytes and the same image |
-| `releases/download/v0.7.1/install.yaml` | The same, pinned to one version instead of following the newest |
+| `releases/download/v0.9.0/install.yaml` | The same, pinned to one version instead of following the newest |
 | `deploy/install.yaml` on `main` | The source the release is built from. The image is a version **tag**, not a digest, and `main` moves. Right for development, wrong for a cluster you care about |
-| `https://get.veloxsearch.ai/install.yml` | A convenience redirect maintained by hand, outside this repository's release process. **It can lag behind the current release** — prefer the release artifact when the version matters |
+| `https://get.veloxsearch.ai/install.yml` | A convenience redirect to `releases/latest/download/install.yaml`. The daily `Mirror watch` workflow fails if it stops redirecting there or its bytes differ from the release asset (#37) |
 
 ### Verifying the image
 
@@ -360,7 +397,7 @@ to the workflow that built it, recorded in the public Rekor transparency log.
 Verifying is checking *which workflow, in which repository* produced the image:
 
 ```bash
-cosign verify docker.io/tornistecnologia/veloxsearch-oss:0.7.1 \
+cosign verify docker.io/tornistecnologia/veloxsearch-oss:0.9.0 \
   --certificate-identity-regexp '^https://github\.com/tornis-tecnologia/veloxsearch-oss/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -378,16 +415,16 @@ it. See [`integrations/signing.md`](integrations/signing.md).
 
 ## 6. Status / honesty note
 
-- **Default path:** the manifest references a **public image**, so the `velox` CLI
-  (`curl … | sh` then `velox init`) — or, with no client binary,
-  `kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml` — pulls it with **zero
-  credentials**, no namespace or pull secret to pre-create (§2a).
+- **Default path:** the manifest references a **public image**, so
+  `kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml`
+  pulls it with **zero credentials** and no client binary, no namespace or pull
+  secret to pre-create (§2a).
 - **Air-gapped:** the **side-load + `kubectl apply`** path (§2c, §3) still works
   for clusters with no registry egress, and is what the conformance fleet runs.
-- **Private mirror:** if you mirror the image into a private registry, the
-  manifest's `veloxsearch` ServiceAccount carries `imagePullSecrets: [velox-pull]`,
-  and `velox init --pull-token` (or a `kubectl create secret docker-registry`)
-  supplies the credential (§2b).
+- **Private mirror:** if you mirror the image into a private registry, create
+  the `velox-pull` Secret (by hand or with `velox init --pull-token`), attach it
+  to the `veloxsearch` ServiceAccount — the manifest ships it without
+  `imagePullSecrets` — and point the Deployment at your mirror (§2b).
 
 See [`REQUIREMENTS.md`](REQUIREMENTS.md) for the full platform contract,
 [`PREMISES.md`](PREMISES.md) for the three operational premises behind the

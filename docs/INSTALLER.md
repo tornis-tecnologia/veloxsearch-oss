@@ -1,15 +1,27 @@
 # The `velox` installer CLI
 
-`velox` is a small operator CLI whose only job is the step
+`velox` is a small operator CLI whose install-time job is the step
 `kubectl apply -f install.yaml` cannot do by itself: creating an image-pull
-Secret **before** the manifest that needs it.
+Secret **before** applying the manifest.
 
 **Most installs do not need it.** The default image is public and pulls
-anonymously, so the two-command quickstart in the [README](../README.md) is the
+anonymously, so the one-command install in the [README](../README.md) is the
 whole story. Reach for `velox` when you are pulling VeloxSearch from a private
 mirror.
 
 ## Installing
+
+Each release publishes a `velox-linux-amd64` binary next to `install.yaml`, with
+both checksums in `SHA256SUMS`:
+
+```sh
+base=https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download
+curl -fsSLO "$base/velox-linux-amd64" && curl -fsSLO "$base/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS      # velox-linux-amd64: OK
+install -m 0755 velox-linux-amd64 ~/.local/bin/velox
+```
+
+The binary is linux-amd64 only. On any other platform, build it from source:
 
 ```sh
 cargo build --release --bin velox     # target/release/velox
@@ -47,17 +59,19 @@ velox init \
 ```
 
 This creates the `velox-pull` Secret in `veloxsearch-system`, then applies the
-manifest. The ServiceAccount references `velox-pull` in `imagePullSecrets`, so
-the Deployment can pull immediately — no ordering race, no ImagePullBackOff on
-first apply.
-
-To use a mirrored image, also change the `image:` line in
-`deploy/install.yaml`, or patch it after applying:
+manifest. The manifest's `veloxsearch` ServiceAccount does **not** reference
+`velox-pull` — it ships without `imagePullSecrets`, because the default image is
+public — so attach the Secret, then point the Deployment at your mirror:
 
 ```sh
+kubectl -n veloxsearch-system patch serviceaccount veloxsearch \
+  -p '{"imagePullSecrets":[{"name":"velox-pull"}]}'
 kubectl -n veloxsearch-system set image deploy/veloxsearch \
-  veloxsearch=registry.example.com/veloxsearch-oss:0.7.0
+  veloxsearch=registry.example.com/veloxsearch-oss:0.9.0
 ```
+
+Patch the ServiceAccount first: a pod takes its ServiceAccount's pull secrets
+when it is created, and `set image` is what creates the new pod.
 
 ## Seeing what it will do
 
@@ -66,16 +80,19 @@ velox init --dry-run
 velox init --dry-run --pull-token fake | less
 ```
 
-`--dry-run` renders every object, including the pull Secret, and touches no
-cluster. Use it to diff against what is already installed, or to hand the
-manifest to a GitOps pipeline instead of applying it directly.
+`--dry-run` lists every object it would apply — as `Kind/name (namespace)`, plus
+the pull Secret when `--pull-token` is given, with the token redacted — and
+touches no cluster. It prints names, not YAML: for the full manifest, read the
+`install.yaml` asset of the same release.
 
 ## Managing the pull Secret with External Secrets
 
 If you already run the External Secrets Operator, you do not need
 `--pull-token` at all: `deploy/secrets/external-secrets.aws.example.yaml`
 contains a worked `ExternalSecret` that materialises `velox-pull` from a vault
-entry. Apply that instead, then `kubectl apply -f deploy/install.yaml`.
+entry. Apply that instead, then `kubectl apply -f deploy/install.yaml`, and
+attach the Secret to the ServiceAccount as in
+[Private-mirror install](#private-mirror-install).
 
 The vault entry is a JSON object:
 
