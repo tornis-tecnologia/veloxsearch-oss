@@ -89,5 +89,6 @@ The vault entry is a JSON object:
   Longhorn are installed by the app itself on first run — see
   [PREMISES.md](PREMISES.md).
 - It does not create the admin account. That happens on the first-run screen.
-- It does not upgrade anything. Rolling out a new version is
-  `kubectl apply -f deploy/install.yaml`; see [DEPLOY.md](DEPLOY.md).
+- It does not upgrade anything. Rolling out a new version is applying that
+  release's `install.yaml` artifact; see
+  [DEPLOY.md](DEPLOY.md#rolling-out-an-upgrade).
