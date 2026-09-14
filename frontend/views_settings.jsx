@@ -50,13 +50,16 @@ function AboutBlock({ info, t, onToast }) {
   return (
     <div className="card pad" style={{ maxWidth: 560, marginTop: 18 }} data-testid="about-panel">
       <h3 className="section-title" style={{ marginTop: 0 }}>{t.about_h}</h3>
-      <p className="hint">{t.about_lead}</p>
+      <p style={{ fontSize: 12.5, color: "var(--text-3)" }}>{t.about_lead}</p>
       {rows.map(([k, v]) => (
         <div className="kvrow" key={k}><span className="k">{k}</span><span className="v">{v}</span></div>
       ))}
       {/* One note per distinct reason: off-cluster both facts fail for the
           same reason, and saying it twice reads like two problems. */}
-      {[...new Set(notes)].map(n => <p key={n} className="hint" style={{ marginBottom: 0 }}>{n}</p>)}
+      {[...new Set(notes)].map(n => (
+        <p key={n} data-testid="about-note"
+          style={{ fontSize: 12, color: "var(--text-3)", fontFamily: "var(--font-mono)", marginBottom: 0, overflowWrap: "anywhere" }}>{n}</p>
+      ))}
     </div>
   );
 }

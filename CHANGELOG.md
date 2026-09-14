@@ -8,6 +8,20 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- **Which build is serving, in the app (#55):** a new admin-only
+  `GET /api/build_info` returns the version and git commit compiled into the
+  binary. No env var on the Deployment can change them, and a local build
+  without a commit reports "commit unknown". It also returns the image digest
+  the kubelet reports for the app's own Pod, the operator image, and the
+  integration catalog source. Settings has an "About this installation"
+  block, with a short digest and a copy button, and the top bar shows a
+  `v<version> · <commit>` chip. Release images get the commit through
+  `VELOX_BUILD_COMMIT`. `install.yaml` now passes `POD_NAME` through the
+  downward API, used only to locate the Pod. `min_core_version` refusals
+  quote the same version string, and the smoke lane asserts that
+  `build_info.version` matches `Cargo.toml`.
+
 ### Changed
 - **K3S monitoring is a choice, not a baseline (#52):** every non-search
   deployment used to ship the `kubernetes` monitor unconditionally — the
