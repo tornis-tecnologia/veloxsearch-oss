@@ -5,7 +5,8 @@ Drive the full UI flow against a live cluster and assert the redesigned
 deployment panel:
 
   login -> Create (4-step wizard: name+purpose / size / data / review)
-        -> deployment appears -> open detail
+        -> DOUBLE-click create -> exactly one deployment appears (#56)
+        -> open detail
         -> Overview / Edit / Integrations / Security tabs
         -> Edit shows the automatic JVM field + no purpose cards
         -> Security shows the password-reset form (2 password fields)
@@ -66,7 +67,17 @@ with sync_playwright() as p:
     page.wait_for_timeout(300)
     page.locator('[data-testid="wizard-next"]').click()  # -> review
     page.wait_for_selector(".kvrow", timeout=10000)        # review summary rendered
-    page.locator('[data-testid="create-submit"]').click()  # -> create_cluster
+    def journey_deployments():
+        items = page.evaluate(
+            "() => fetch('/api/list_deployments', {credentials: 'same-origin'})"
+            ".then(r => r.json())")
+        return {d["name"] for d in items if d["name"].startswith("journeytest-")}
+
+    # Leftovers of an earlier, aborted run are not this run's duplicates.
+    before = journey_deployments()
+    # #56: DOUBLE-click. The second click must be a no-op (button disabled from
+    # the first); asserted below as exactly one journeytest-* deployment.
+    page.locator('[data-testid="create-submit"]').dblclick()  # -> create_cluster
 
     # 3. success: the SPA navigates to the new deployment's detail. The topbar
     #    crumb (.crumb .cur) only renders once the deployment shows up in the
@@ -79,6 +90,21 @@ with sync_playwright() as p:
     if not dep_name.startswith("journeytest-"):
         fail(f"unexpected generated name: {dep_name!r}")
     print(f"  created {dep_name}")
+
+    # 3a. #56: the double click made ONE deployment. Each create request gets a
+    # fresh suffix and spawns its own deferred provisioning task, so one
+    # deployment is one task. Give a racing second create time to land.
+    page.wait_for_timeout(10000)
+    created = sorted(journey_deployments() - before)
+    if created != [dep_name]:
+        for extra in created:
+            if extra != dep_name:  # never leave a duplicate running on a failed run
+                page.evaluate(
+                    "n => fetch('/api/delete_cluster', {method: 'POST', credentials: 'same-origin',"
+                    " headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: n})})",
+                    extra)
+        fail(f"double-clicking create made {created}, expected only [{dep_name!r}]")
+    print("  double click -> exactly one deployment")
 
     # 3b. provisioning settle: a fresh deployment is BUSY (nodes booting, PVCs
     # binding) and LOCKS its editing controls (activity.locks_edits). The tab

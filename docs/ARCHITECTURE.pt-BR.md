@@ -119,7 +119,8 @@ Não "conserte" isso apontando para um namespace que existe.
 - Sucesso devolve o DTO como JSON (200), ou um 200 vazio para resultados
   unitários.
 - Erros devolvem `{"error": "<mensagem>"}` com 400 (validação), 401
-  (credenciais) ou 500 (camada Kubernetes / OpenSearch).
+  (credenciais), 409 (uma criação com o mesmo nome ainda em andamento, #56) ou
+  500 (camada Kubernetes / OpenSearch).
 - `login`, `logout` e `setup_admin` definem o cookie de sessão na resposta.
 - A lista de deployments é transmitida por SSE em `GET /api/events`, a cada 3
   segundos.

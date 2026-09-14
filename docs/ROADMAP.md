@@ -9,19 +9,17 @@ schedule is not.
 
 ## Now
 
-**arm64 and multi-arch images.** The release pipeline publishes amd64 only,
-because R5 is what the conformance fleet actually tests. Multi-arch builds are
-cheap to add; the fixture to justify claiming arm64 support is not.
+**arm64 and multi-arch images.** R5 restricts the supported envelope to amd64
+because that is what the release pipeline builds and the conformance fleet
+tests. Multi-arch builds are cheap to add; the arm64 fixture to justify claiming
+support is not. Wanted for Raspberry-Pi-class and Graviton clusters.
 
-**An end-to-end CI lane.** `tests/smoke_check.py` was written for a minikube CI
-lane that does not exist yet. Everything but `smoke_check.py` needs a cluster
-that meets the full platform contract, which a CI minikube deliberately does not
-— so the lane is "smoke on minikube", with the rest staying manual against the
+**CI beyond smoke.** The minikube lane exists: `Smoke (minikube)` in
+`.github/workflows/ci.yml` applies the latest release on every push to `main`
+and runs `tests/smoke_check.py`. Everything past smoke needs a cluster that
+meets the full platform contract, which a CI minikube deliberately does not —
+so the first-run, day-2 and journey checks stay manual against the
 conformance fleet.
-
-**arm64.** R5 restricts the supported envelope to amd64 because that is what is
-built and tested. Multi-arch images plus an arm64 fixture would lift it. Wanted
-for Raspberry-Pi-class and Graviton clusters.
 
 ## Next
 
