@@ -86,9 +86,10 @@ pub const BOOTSTRAP_IDS: &[&str] = &["kubernetes"];
 pub const BOOTSTRAP_VERSION: &str = "1.0.0";
 
 /// The core version registry packages declare their floor against
-/// (`min_core_version`). Read from the crate version so a release bump moves it.
+/// (`min_core_version`). The same compiled-in string `GET /api/build_info`
+/// reports (#55), so a refusal and the About panel can never disagree.
 fn core_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    crate::build_info::VERSION
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +255,11 @@ impl Registry {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         Registry::new(base, token)
+    }
+
+    /// The base URL packages are fetched from. Never the token.
+    pub fn base(&self) -> &str {
+        &self.base
     }
 
     /// Fetch one file, relative to the base. `rel` is always built from
