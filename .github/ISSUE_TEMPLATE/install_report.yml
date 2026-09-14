@@ -1,0 +1,178 @@
+name: Install report
+description: How a first install went, from someone who had not used VeloxSearch before
+title: "Install report: "
+labels: ["area/deploy", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. This form is the report for an external install run;
+        the brief that describes the run is
+        [docs/EXTERNAL-VALIDATION.md](https://github.com/tornis-tecnologia/veloxsearch-oss/blob/main/docs/EXTERNAL-VALIDATION.md).
+        One report per run. A run that stopped early is still a result — say
+        where it stopped.
+
+        You do not need to open a separate issue for each problem: maintainers
+        split every blocker and confusion point below into its own issue.
+
+        **Never report a security vulnerability here.** Follow
+        [SECURITY.md](https://github.com/tornis-tecnologia/veloxsearch-oss/blob/main/SECURITY.md)
+        and use a
+        [private advisory](https://github.com/tornis-tecnologia/veloxsearch-oss/security/advisories/new).
+
+  - type: input
+    id: version
+    attributes:
+      label: VeloxSearch version
+      description: The release you installed. If you used `releases/latest`, write down the tag it resolved to.
+      placeholder: "v0.9.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: distro
+    attributes:
+      label: Kubernetes distribution
+      description: The platforms named in docs/REQUIREMENTS.md, or something else.
+      options:
+        - k3s
+        - k0s
+        - minikube
+        - kubeadm (vanilla)
+        - EKS / GKE / AKS
+        - Other (say which below)
+    validations:
+      required: true
+
+  - type: input
+    id: k8s-version
+    attributes:
+      label: Kubernetes version
+      description: Output of `kubectl version` (the server line is enough).
+      placeholder: "v1.36.3+k3s1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: host
+    attributes:
+      label: Host resources
+      description: Node count, and for each node the CPU, RAM and disk, OS and kernel version. Say whether it is a VM, bare metal or a cloud instance.
+      placeholder: |
+        1 node, VM: 4 vCPU, 12 GiB RAM, 60 GB disk, Debian 13, kernel 6.12
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How you installed
+      options:
+        - kubectl apply of the release manifest (README)
+        - velox CLI (velox init)
+        - Side-load / air-gapped (docs/INSTALL.md)
+        - Other (say which below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands you ran
+      description: The install commands, in order, including anything you ran on the nodes. Redact tokens.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scenarios
+    attributes:
+      label: Scenarios you completed
+      description: Tick only the ones you finished. See the brief for what each one means.
+      options:
+        - label: "1. Fresh install — logged in, conformity passed, main tabs visible"
+        - label: "2. Observability deployment reached green"
+        - label: "3. An integration installed and its data visible in Dashboards"
+        - label: "4. Uninstall — integration, deployment and VeloxSearch removed"
+        - label: "5. Upgrade to the next release"
+
+  - type: input
+    id: time-to-green
+    attributes:
+      label: Time to first green deployment
+      description: From the first install command to the deployment showing green. If you never got there, say where you stopped.
+      placeholder: "52 min — or: never; stopped at the conformity screen"
+    validations:
+      required: true
+
+  - type: textarea
+    id: friction
+    attributes:
+      label: Where you got stuck, had to guess, or opened the source
+      description: |
+        One entry per point, in the order it happened. For each: the document and
+        section you were on, what you expected, what happened, and how you got
+        past it (or didn't). Include searches outside the docs.
+      placeholder: |
+        - 00:14 · README "Try it" · expected the UI on :3000, port-forward exited with … · guessed the pod was still pulling, waited 3 min
+        - 00:31 · conformity screen · did not know what "…" meant · opened src/bootstrap.rs
+    validations:
+      required: true
+
+  - type: textarea
+    id: blockers
+    attributes:
+      label: Blockers
+      description: Anything that stopped you completely, with the error text or a screenshot. Write "none" if nothing did.
+    validations:
+      required: true
+
+  - type: textarea
+    id: docs-read
+    attributes:
+      label: Documents you opened
+      description: Which docs you read beyond the README, and why you went looking.
+
+  - type: textarea
+    id: assessment
+    attributes:
+      label: Critical assessment
+      description: |
+        Free-form and honest. What was worse than it should be, what you would
+        not trust in production, what surprised you. Precise friction is more
+        useful to us than praise.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: would-use
+    attributes:
+      label: Would you use it?
+      description: For a real cluster of your own, based on this run. The reason belongs in the assessment above.
+      options:
+        - "Yes"
+        - Yes, once the blockers above are fixed
+        - "No"
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and cluster state
+      description: |
+        Optional, and most useful when something failed:
+        `kubectl -n veloxsearch-system logs deploy/veloxsearch --tail=200`,
+        `kubectl get storageclass`, `kubectl get nodes -o wide`
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I redacted any credentials, tokens or internal hostnames from the report
+          required: true
+        - label: This report contains no security vulnerability — those go through SECURITY.md
+          required: true
