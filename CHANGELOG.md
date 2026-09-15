@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-15
+
 ### Added
 - **Which build is serving, in the app (#55):** a new admin-only
   `GET /api/build_info` returns the version and git commit compiled into the
@@ -20,7 +22,18 @@ are called out explicitly.
   `VELOX_BUILD_COMMIT`. `install.yaml` now passes `POD_NAME` through the
   downward API, used only to locate the Pod. `min_core_version` refusals
   quote the same version string, and the smoke lane asserts that
-  `build_info.version` matches `Cargo.toml`.
+  `build_info.version` matches the release it installed (#76).
+- **An install report form and an external validation brief (#60):** a new
+  "Install report" issue form captures distribution, Kubernetes version,
+  resources, the commands run, time to a first green deployment and every
+  point of friction. `docs/EXTERNAL-VALIDATION.md` (and `.pt-BR.md`) is the
+  brief for first-time installers working from the README alone, with a
+  separate section for security review of the published surfaces.
+- **Three proposed ADRs, documentation only (#57, #58, #59):** ADR-058
+  (multiple integration catalog sources with per-source pinned keys), ADR-059
+  (collector configuration for sources outside the cluster) and ADR-060
+  (a bounded, pseudonymised cluster profile export). Nothing in this release
+  implements them.
 
 ### Changed
 - **K3S monitoring is a choice, not a baseline (#52):** every non-search
@@ -37,6 +50,11 @@ are called out explicitly.
   path (new `docs/INSTALL.md` §0), four static screenshots in place of the
   demo GIF (now referenced from INSTALL.md), benefits, the roadmap and the
   demo-request link — in all three languages.
+- **`develop` is the integration branch (#72):** feature PRs now target
+  `develop`, and every push there runs the full CI set including the Smoke
+  (minikube) job; `main` is release-only and a promotion that changes
+  `version` in `Cargo.toml` publishes. Contributor-facing only — see
+  `CONTRIBUTING.md`.
 
 ### Fixed
 - **A double-clicked "Create cluster" could create two deployments (#56):**
@@ -59,6 +77,22 @@ are called out explicitly.
   image reference, the create wizard is described as its four steps with the
   optional K3S monitoring toggle, and `docs/INSTALLER.md` covers the released
   `velox-linux-amd64` binary and what `--dry-run` really prints.
+- **`deploy/install.yaml` in the source tree still pinned 0.8.1:** the
+  published release asset was always digest-pinned to the right image, but
+  applying the manifest from a checkout installed 0.8.1. The tag now matches
+  the crate version (part of #54).
+
+### Security
+- **rustls 0.23.45 for RUSTSEC-2026-0285 (#71):** rustls before 0.23.45
+  accepted TLS 1.3 handshake messages across encryption-level boundaries.
+  Lock-only bump (with `rustls-webpki` 0.103.15); no code change.
+- **Registry credentials no longer follow cross-origin redirects (#75):** the
+  catalog client sends the registry token in a custom `PRIVATE-TOKEN` header,
+  which reqwest does not strip when a redirect changes host. Credential-bearing
+  catalog fetches now follow redirects only within the same origin (host and
+  effective port, no scheme downgrade) and refuse anything else with an
+  explicit error. The default public registry does not redirect, so nothing
+  changes there.
 
 ## [0.9.0] - 2026-09-10
 
