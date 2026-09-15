@@ -273,6 +273,43 @@ impl Registry {
         let url = format!("{}/{rel}", self.base);
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
+            // This client carries credentials (PRIVATE-TOKEN / Bearer). On a
+            // redirect that changes host, reqwest strips its built-in
+            // sensitive headers (Authorization, Cookie, …) — but NOT custom
+            // ones, so PRIVATE-TOKEN would ride the hop to whatever host the
+            // registry points at (CDN, object storage, a redirected or
+            // hostile source). Redirects that leave the registry host, and
+            // scheme downgrades, are refused outright instead: a registry
+            // that bounces credential-bearing requests elsewhere is a trust
+            // or configuration problem to surface, never to follow.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                // Same *authority* (host + effective port), not just host: a
+                // hop that changes ports reaches a different service even on
+                // the same machine, and credentials must not cross services.
+                let same_authority = |a: &reqwest::Url, b: &reqwest::Url| {
+                    a.host_str() == b.host_str()
+                        && a.port_or_known_default() == b.port_or_known_default()
+                };
+                let stays = attempt
+                    .previous()
+                    .last()
+                    .map(|prev| same_authority(prev, attempt.url()))
+                    .unwrap_or(false);
+                let no_downgrade = attempt
+                    .previous()
+                    .last()
+                    .map(|prev| prev.scheme() == "https" && attempt.url().scheme() != "https")
+                    .map(|downgrades| !downgrades)
+                    .unwrap_or(true);
+                if stays && no_downgrade {
+                    attempt.follow()
+                } else {
+                    attempt.error(
+                        "refused a registry redirect that leaves the registry origin \
+                         or downgrades the scheme",
+                    )
+                }
+            }))
             .build()
             .context("building the registry http client")?;
         let mut req = client.get(&url);
@@ -1630,5 +1667,102 @@ mod tests {
         assert!(version_ge("0.10.0", "0.9.0"), "10 > 9, not string order");
         assert!(!version_ge("0.6.2", "0.7.0"));
         assert!(version_ge("2", "1.9.9"), "missing components are 0");
+    }
+
+    // ── redirect policy ─────────────────────────────────────────────────
+    //
+    // The registry client sends the token as a custom PRIVATE-TOKEN header;
+    // reqwest does not strip custom headers on a host change, so any
+    // cross-host redirect would hand the token to the redirect target. These
+    // tests pin the two halves of the policy: same-host hops keep working,
+    // and a hop that leaves the host never even opens a socket to the target.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_same_host_redirect_is_followed_and_keeps_the_token() {
+        // The binary installs the rustls crypto provider in main() before any
+        // client exists (reqwest is built `-no-provider`); the test process
+        // must do the same. Second-and-later installs return Err and are
+        // ignored, so every test can call this unconditionally.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        use std::sync::{Arc, Mutex};
+
+        let hits: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let h = hits.clone();
+        let app = axum::Router::new()
+            .route(
+                "/catalog.json",
+                axum::routing::get(move || {
+                    let h = h.clone();
+                    async move {
+                        *h.lock().unwrap() += 1;
+                        "\"ok\""
+                    }
+                }),
+            )
+            .route(
+                "/moved",
+                axum::routing::get(|| async {
+                    axum::response::Redirect::temporary("/catalog.json")
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let reg = Registry::new(format!("http://{addr}"), Some("secret-token".into()));
+        let bytes = reg
+            .get("moved")
+            .await
+            .expect("same-host redirect must be followed");
+        assert_eq!(bytes, b"\"ok\"");
+        assert_eq!(*hits.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cross_host_redirect_is_refused_and_the_target_is_never_contacted() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        // The "stealer" is a raw TCP listener that counts connections: if the
+        // client ever followed the redirect, this count would be ≥ 1 — that
+        // is the security property, so it is asserted directly.
+        let stealer = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let steal_addr = stealer.local_addr().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let n = attempts.clone();
+        tokio::spawn(async move {
+            loop {
+                if stealer.accept().await.is_ok() {
+                    n.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+
+        let app = axum::Router::new().route(
+            "/catalog.json",
+            axum::routing::get(move || async move {
+                axum::response::Redirect::temporary(format!("http://{steal_addr}/stolen").as_str())
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let reg = Registry::new(format!("http://{addr}"), Some("secret-token".into()));
+        let err = reg
+            .get("catalog.json")
+            .await
+            .expect_err("cross-host redirect must be refused");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("refused a registry redirect"),
+            "unexpected error: {chain}"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "the redirect target must never be contacted — no socket, no token"
+        );
     }
 }
