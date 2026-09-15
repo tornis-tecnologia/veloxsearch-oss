@@ -8,6 +8,14 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **Release tags are created on the released commit:** the release job did
+  not name a target commit, so GitHub created the tag on the default branch
+  (`develop` since #72) and `v0.10.0` points at `541844f` instead of the
+  `main` commit `c7495d0` it was built from. The two trees are identical, so
+  the released content is unaffected; the tag cannot be moved because release
+  tags are protected. The job now tags `github.sha`.
+
 ## [0.10.0] - 2026-09-15
 
 ### Added
