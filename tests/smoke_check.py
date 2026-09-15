@@ -18,13 +18,17 @@ Checks, against a port-forward to the Service:
   2. GET /api/auth_state   -> 200 + JSON {"first_run": true, ...}
                                             (fresh install detected correctly)
   3. POST /api/setup_admin, then GET /api/build_info (admin-only)
-                           -> version == Cargo.toml `version`       (#55)
+                           -> version == the expected version       (#55)
+     The expected version is --expect-version when given (CI passes the tag
+     of the release it applied), else Cargo.toml's `version` (a local run
+     against an image built from this tree).
      Creating the admin only writes the credentials Secret; it does not start
      the operator bootstrap, so the subset stays light.
 
 Usage:
   smoke_check.py <base>            # e.g. http://127.0.0.1:3000
   smoke_check.py <base> --retries 30 --delay 5
+  smoke_check.py <base> --expect-version 0.9.0
 """
 import json
 import pathlib
@@ -38,11 +42,14 @@ import urllib.request
 base = sys.argv[1].rstrip("/")
 retries = 30
 delay = 5.0
+expect_version = None
 for i, a in enumerate(sys.argv):
     if a == "--retries" and i + 1 < len(sys.argv):
         retries = int(sys.argv[i + 1])
     if a == "--delay" and i + 1 < len(sys.argv):
         delay = float(sys.argv[i + 1])
+    if a == "--expect-version" and i + 1 < len(sys.argv):
+        expect_version = sys.argv[i + 1]
 
 
 def _get(path, cookie=None):
@@ -127,10 +134,11 @@ if state.get("authenticated") is not False:
 
 print(f"auth_state OK: {state}")
 
-# build_info (#55): the running build must report the version this tree
-# declares. It is admin-only, so create the first admin (a throwaway password:
+# build_info (#55): the running build must report the version it was built as
+# (the applied release's tag in CI, this tree's Cargo.toml otherwise). It is
+# admin-only, so create the first admin (a throwaway password:
 # the minikube cluster dies with the job) and use the session it hands back.
-expected = _cargo_version()
+expected = expect_version or _cargo_version()
 password = secrets.token_urlsafe(18)
 status, body, set_cookie = _post_json(
     "/api/setup_admin", {"username": "smoke", "password": password, "confirm": password}
@@ -143,8 +151,9 @@ cookie = set_cookie.split(";", 1)[0]
 status, body = _get("/api/build_info", cookie=cookie)
 # The ONE tolerated miss, named precisely: the 0.9.0 release image was built
 # before this endpoint existed. There an unknown /api path is answered by the
-# SPA fallback (200 + index.html), or a 404. Every later version ships the
-# route, so from the next version bump either shape fails like any other.
+# SPA fallback (200 + index.html), or a 404. Every later release ships the
+# route, so once 0.10.0 is the release being smoked either shape fails like
+# any other.
 endpoint_absent = status == 404 or (status == 200 and body.lstrip().lower().startswith("<!doctype html"))
 if endpoint_absent and expected == "0.9.0":
     print("SKIP build_info — the released 0.9.0 image predates /api/build_info (#55); "
@@ -160,9 +169,9 @@ except json.JSONDecodeError:
     print(f"FAIL — /api/build_info is not JSON: {body[:200]}")
     sys.exit(1)
 if info.get("version") != expected:
-    print(f"FAIL — build_info.version {info.get('version')!r} != Cargo.toml version {expected!r}")
+    print(f"FAIL — build_info.version {info.get('version')!r} != expected version {expected!r}")
     sys.exit(1)
 print(f"build_info OK: version={info['version']} commit={info.get('commit')} "
       f"image_digest={info.get('image_digest')}")
 print("PASS (smoke) — install.yaml applied, app boots, reports first-run, "
-      "build_info matches Cargo.toml")
+      f"build_info reports {expected}")
