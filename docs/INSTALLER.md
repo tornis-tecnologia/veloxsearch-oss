@@ -67,7 +67,7 @@ public — so attach the Secret, then point the Deployment at your mirror:
 kubectl -n veloxsearch-system patch serviceaccount veloxsearch \
   -p '{"imagePullSecrets":[{"name":"velox-pull"}]}'
 kubectl -n veloxsearch-system set image deploy/veloxsearch \
-  veloxsearch=registry.example.com/veloxsearch-oss:0.10.0
+  veloxsearch=registry.example.com/veloxsearch-oss:0.10.1
 ```
 
 Patch the ServiceAccount first: a pod takes its ServiceAccount's pull secrets
