@@ -134,7 +134,7 @@ kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/l
 kubectl -n veloxsearch-system patch serviceaccount veloxsearch \
   -p '{"imagePullSecrets":[{"name":"velox-pull"}]}'
 kubectl -n veloxsearch-system set image deploy/veloxsearch \
-  veloxsearch=registry.example.com/veloxsearch-oss:0.10.1
+  veloxsearch=registry.example.com/veloxsearch-oss:0.10.2
 ```
 
 The ServiceAccount patch must come before `set image`: a pod picks up its
@@ -153,7 +153,7 @@ by default, `<version>` being the one in `Cargo.toml`:
 
 ```bash
 deploy/build-image.sh                                              # see DEPLOY.md
-docker save docker.io/tornistecnologia/veloxsearch-oss:0.10.1 -o veloxsearch.tar
+docker save docker.io/tornistecnologia/veloxsearch-oss:0.10.2 -o veloxsearch.tar
 grep -n 'image: docker.io/tornistecnologia' deploy/install.yaml     # must name the same tag
 ```
 
@@ -385,7 +385,7 @@ Three places serve an install manifest. They are not equivalent:
 | Source | What it is |
 | --- | --- |
 | `releases/latest/download/install.yaml` | **Use this.** A release artifact with the image pinned to a **digest**. Immutable: the same URL applied twice gives the same bytes and the same image |
-| `releases/download/v0.10.1/install.yaml` | The same, pinned to one version instead of following the newest |
+| `releases/download/v0.10.2/install.yaml` | The same, pinned to one version instead of following the newest |
 | `deploy/install.yaml` on `main` | The source the release is built from. The image is a version **tag**, not a digest, and `main` moves. Right for development, wrong for a cluster you care about |
 | `https://get.veloxsearch.ai/install.yml` | A convenience redirect to `releases/latest/download/install.yaml`. The daily `Mirror watch` workflow fails if it stops redirecting there or its bytes differ from the release asset (#37) |
 
@@ -397,7 +397,7 @@ to the workflow that built it, recorded in the public Rekor transparency log.
 Verifying is checking *which workflow, in which repository* produced the image:
 
 ```bash
-cosign verify docker.io/tornistecnologia/veloxsearch-oss:0.10.1 \
+cosign verify docker.io/tornistecnologia/veloxsearch-oss:0.10.2 \
   --certificate-identity-regexp '^https://github\.com/tornis-tecnologia/veloxsearch-oss/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
