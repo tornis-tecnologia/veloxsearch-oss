@@ -446,17 +446,7 @@ pub async fn series(
     let body: serde_json::Value = c
         .post(format!("{base}/{alias}/_search"))
         .basic_auth(&u, Some(&p))
-        .json(&json!({
-            // Bounded: at a 60s cadence a 7-day window is ~10k points; the cap
-            // keeps a misconfiguration from pulling an unbounded result set.
-            "size": 10_000,
-            "sort": [{ "@timestamp": "asc" }],
-            "_source": ["@timestamp", "cpu_percent", "heap_percent",
-                        "disk_used_bytes", "docs", "index_total"],
-            "query": { "range": { "@timestamp": {
-                "gte": format!("now-{window_minutes}m"), "format": "epoch_millis"
-            }}},
-        }))
+        .json(&series_query(window_minutes))
         .send()
         .await
         .context("querying metrics series")?
@@ -487,8 +477,8 @@ pub async fn series(
         }
     }
 
-    // Span the requested window into `buckets` equal slots. OpenSearch already
-    // sorted ascending, but `downsample` re-sorts defensively.
+    // Span the requested window into `buckets` equal slots. The hits arrive
+    // newest-first (`series_query`); `downsample` sorts them ascending.
     let bucket_ms = ((window_minutes * 60_000) / buckets as i64).max(1);
     Ok(MetricSeries {
         deployment: deployment.to_string(),
@@ -498,6 +488,28 @@ pub async fn series(
         monitor_docs: None,
     })
 }
+
+/// The raw-sample search behind `series`. Pure so the paging contract is
+/// unit-tested: when the window holds more samples than the cap, the page must
+/// be the NEWEST ones (#65). Sorting ascending returned the oldest 10,000, so a
+/// full 7-day window at the default 60s cadence (10,080 samples) silently lost
+/// its last ~80 minutes — the points a health chart needs most.
+fn series_query(window_minutes: i64) -> serde_json::Value {
+    json!({
+        // Bounded: at a 60s cadence a 7-day window is ~10k points; the cap
+        // keeps a misconfiguration from pulling an unbounded result set.
+        "size": SERIES_MAX_SAMPLES,
+        "sort": [{ "@timestamp": "desc" }],
+        "_source": ["@timestamp", "cpu_percent", "heap_percent",
+                    "disk_used_bytes", "docs", "index_total"],
+        "query": { "range": { "@timestamp": {
+            "gte": format!("now-{window_minutes}m"), "format": "epoch_millis"
+        }}},
+    })
+}
+
+/// Upper bound on raw samples one `series` call reads.
+const SERIES_MAX_SAMPLES: usize = 10_000;
 
 /// Downsample raw samples into time-buckets. Pure (no I/O) so it is unit-tested
 /// directly. Buckets are aligned to absolute epoch (`ts / bucket_ms`); CPU and
@@ -581,6 +593,30 @@ pub fn downsample(samples: &[Sample], bucket_ms: i64) -> Vec<MetricPoint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn series_query_pages_the_newest_samples_first() {
+        // #65: past the cap, the kept page must be the newest samples.
+        let q = series_query(7 * 24 * 60);
+        assert_eq!(q["sort"][0]["@timestamp"], "desc");
+        assert_eq!(q["size"], SERIES_MAX_SAMPLES);
+        assert_eq!(q["query"]["range"]["@timestamp"]["gte"], "now-10080m");
+    }
+
+    #[test]
+    fn downsample_orders_newest_first_hits_ascending() {
+        let hits = [
+            s(180_000, 3.0, 0.0, 0, 0, 0),
+            s(120_000, 2.0, 0.0, 0, 0, 0),
+            s(60_000, 1.0, 0.0, 0, 0, 0),
+        ];
+        let pts = downsample(&hits, 60_000);
+        let ts: Vec<i64> = pts.iter().map(|p| p.ts).collect();
+        let mut sorted = ts.clone();
+        sorted.sort();
+        assert_eq!(ts, sorted);
+        assert_eq!(pts.len(), 3);
+    }
 
     fn s(ts: i64, cpu: f64, heap: f64, disk: u64, docs: u64, idx: u64) -> Sample {
         Sample {

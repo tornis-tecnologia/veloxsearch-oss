@@ -9,6 +9,11 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **Cluster-health series keep the newest samples (#65):** the raw-sample
+  query sorted ascending under a 10,000-hit cap, so a window holding more
+  samples than that returned the oldest page and dropped the newest — a full
+  7-day window at the default 60s cadence lost its last ~80 minutes. The query
+  now pages newest-first; the charted series is unchanged below the cap.
 - **Release tags are created on the released commit:** the release job did
   not name a target commit, so GitHub created the tag on the default branch
   (`develop` since #72) and `v0.10.0` points at `541844f` instead of the
