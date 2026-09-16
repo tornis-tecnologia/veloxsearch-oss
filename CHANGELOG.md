@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-16
+
 ### Fixed
 - **Cluster-health series keep the newest samples (#65):** the raw-sample
   query sorted ascending under a 10,000-hit cap, so a window holding more
