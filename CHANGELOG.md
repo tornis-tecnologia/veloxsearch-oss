@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-09-16
+
 ### Fixed
 - **Deployment routes follow the stored access config on startup:** existing
   deployments only got their Ingresses when Settings → Access was saved, so a
