@@ -167,6 +167,57 @@ pub async fn set(cfg: &AccessConfig) -> Result<()> {
     Ok(())
 }
 
+/// Bring every deployment in `scope` in line with `cfg`'s routes: create or
+/// re-apply each one's OpenSearch API and Dashboards Ingress. A no-op outside
+/// ingress mode — it returns before touching the cluster. Per-deployment
+/// failures are logged and skipped so one broken deployment cannot hide the
+/// rest; only failing to build a client at all is an error.
+pub async fn backfill_ingresses(cfg: &AccessConfig, scope: &crate::scope::Scope) -> Result<()> {
+    if !cfg.ingress_enabled() {
+        return Ok(());
+    }
+    let client = crate::k8s::client().await?;
+    for dep in crate::k8s::scoped_deployments(scope)
+        .await
+        .unwrap_or_default()
+    {
+        if let Err(e) = crate::k8s::ensure_opensearch_ingress(&client, cfg, &dep).await {
+            tracing::warn!("opensearch ingress for {dep}: {e:#}");
+        }
+        if let Err(e) = crate::k8s::ensure_dashboards_ingress(&client, cfg, &dep).await {
+            tracing::warn!("backfilling dashboards ingress for {dep}: {e:#}");
+        }
+    }
+    Ok(())
+}
+
+/// Startup reconcile of deployment routes against the stored access config.
+///
+/// Until this ran at startup, only saving Settings → Access backfilled the
+/// Ingresses. An access ConfigMap that arrived any other way — restored after a
+/// cluster rebuild, applied by GitOps, edited with kubectl — left every existing
+/// deployment on port-forward until someone pressed Save on an unchanged form.
+/// Runs as the installation admin (the one scope that covers every tenant), and
+/// is best-effort: off-cluster or during an API outage it logs and gives up,
+/// never blocking the server.
+pub async fn backfill_on_startup() {
+    let cfg = match get().await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::debug!("startup ingress backfill skipped: {e:#}");
+            return;
+        }
+    };
+    if let Err(e) = backfill_ingresses(&cfg, &crate::scope::Scope::Admin).await {
+        tracing::warn!("startup ingress backfill failed: {e:#}");
+    } else if cfg.ingress_enabled() {
+        tracing::info!(
+            "startup ingress backfill done (base domain {})",
+            cfg.base_domain
+        );
+    }
+}
+
 /// IngressClasses present on the cluster (REQUIREMENTS.md R8) — drives both
 /// the conformity report and which access modes the Settings UI offers.
 pub async fn ingress_classes() -> Result<Vec<String>> {
@@ -186,6 +237,26 @@ pub async fn ingress_classes() -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn backfill_is_a_no_op_outside_ingress_mode() {
+        // Port-forward mode (and ingress mode without a domain) must return
+        // before building a client: this test has no cluster, so reaching the
+        // API would fail.
+        let portforward = AccessConfig::default();
+        assert!(
+            backfill_ingresses(&portforward, &crate::scope::Scope::Admin)
+                .await
+                .is_ok()
+        );
+        let no_domain = AccessConfig {
+            mode: "ingress".into(),
+            ..AccessConfig::default()
+        };
+        assert!(backfill_ingresses(&no_domain, &crate::scope::Scope::Admin)
+            .await
+            .is_ok());
+    }
 
     #[test]
     fn the_fallback_domain_is_built_from_the_ingress_ip() {

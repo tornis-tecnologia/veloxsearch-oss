@@ -2261,20 +2261,9 @@ mod server {
         crate::access::set(&cfg).await.map_err(ApiError::internal)?;
         // Switching to ingress mode must cover deployments that already exist —
         // their status URLs flip immediately, so the Ingress objects must too.
-        if cfg.ingress_enabled() {
-            let client = crate::k8s::client().await.map_err(ApiError::internal)?;
-            for dep in crate::k8s::scoped_deployments(&scope)
-                .await
-                .unwrap_or_default()
-            {
-                if let Err(e) = crate::k8s::ensure_opensearch_ingress(&client, &cfg, &dep).await {
-                    tracing::warn!("opensearch ingress for {dep}: {e:#}");
-                }
-                if let Err(e) = crate::k8s::ensure_dashboards_ingress(&client, &cfg, &dep).await {
-                    tracing::warn!("backfilling dashboards ingress for {dep}: {e:#}");
-                }
-            }
-        }
+        crate::access::backfill_ingresses(&cfg, &scope)
+            .await
+            .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
     }
 
