@@ -8,6 +8,17 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-09-16
+
+### Fixed
+- **Deployment routes follow the stored access config on startup:** existing
+  deployments only got their Ingresses when Settings → Access was saved, so a
+  `veloxsearch-config` ConfigMap restored after a cluster rebuild, applied by
+  GitOps or edited with kubectl left every deployment on port-forward until
+  someone pressed Save on an unchanged form. The app now runs the same
+  backfill once at startup (best-effort, never blocks serving), and the
+  Settings save path shares that code.
+
 ## [0.10.1] - 2026-09-16
 
 ### Fixed
