@@ -8,6 +8,21 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-16
+
+### Fixed
+- **Cluster-health series keep the newest samples (#65):** the raw-sample
+  query sorted ascending under a 10,000-hit cap, so a window holding more
+  samples than that returned the oldest page and dropped the newest — a full
+  7-day window at the default 60s cadence lost its last ~80 minutes. The query
+  now pages newest-first; the charted series is unchanged below the cap.
+- **Release tags are created on the released commit:** the release job did
+  not name a target commit, so GitHub created the tag on the default branch
+  (`develop` since #72) and `v0.10.0` points at `541844f` instead of the
+  `main` commit `c7495d0` it was built from. The two trees are identical, so
+  the released content is unaffected; the tag cannot be moved because release
+  tags are protected. The job now tags `github.sha`.
+
 ## [0.10.0] - 2026-09-15
 
 ### Added
