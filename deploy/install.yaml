@@ -411,8 +411,9 @@ spec:
 # `veloxsearch-postgres-credentials` Secret, which the APP generates on its
 # first boot (ADR-023 pattern, src/db.rs) — so on a fresh install this pod
 # waits in CreateContainerConfigError for a few seconds until the app is up,
-# then starts. Its PVC pins the `longhorn` StorageClass (ADR-043): before the
-# first-run bootstrap installs Longhorn, the pod is Pending by design.
+# then starts. Its PVC rides the cluster's default StorageClass — Longhorn
+# where present, local-path/hostPath elsewhere — so postgres schedules on day
+# 0 with no manual steps (issue #86; flexible storage per issue #88).
 #
 # initdb hook: runs ONCE on an empty data dir. Creates the scoped
 # NON-superuser application role (`velox`) owning its own database — the app
@@ -509,9 +510,10 @@ spec:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        # ADR-043: Longhorn is the only storage — pinned, never the cluster
-        # default, so a foreign default class can't silently take the volume.
-        storageClassName: longhorn
+        # No storageClassName: the claim rides the cluster's default
+        # StorageClass — Longhorn where present, local-path/hostPath
+        # elsewhere — so postgres schedules on day 0 (issue #86; flexible
+        # storage per issue #88).
         resources:
           requests:
             storage: 2Gi

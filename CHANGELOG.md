@@ -13,6 +13,11 @@ are called out explicitly.
   at `http://<node-ip>:30080` on any cluster, with or without an Ingress
   controller (#87).
 
+### Fixed
+- Bundled postgres PVC uses the cluster default StorageClass instead of
+  pinning `longhorn` — postgres-0 no longer sits Pending on fresh clusters
+  before bootstrap (#86).
+
 ## [0.10.2] - 2026-09-16
 
 ### Fixed
