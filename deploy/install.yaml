@@ -387,16 +387,22 @@ spec:
             requests: { memory: "128Mi", cpu: "100m" }
             limits: { memory: "512Mi", cpu: "500m" }
 ---
+# NodePort by default so the UI is reachable at http://<any-node-ip>:30080/ on
+# ANY cluster — with or without an Ingress controller (issue #87, ratified
+# 2026-09-20). The Ingress below still handles hostname routing where a
+# controller exists.
 apiVersion: v1
 kind: Service
 metadata:
   name: veloxsearch
   namespace: veloxsearch-system
 spec:
+  type: NodePort
   selector: { app: veloxsearch }
   ports:
     - port: 80
       targetPort: 3000
+      nodePort: 30080
 ---
 # ── Control-plane Postgres (ADR-041, #92) ────────────────────────────────────
 # Small single-instance Postgres for multi-user control-plane state (users/
@@ -518,7 +524,9 @@ spec:
 #    klipper-lb uses iptables DNAT, so :80/:443 never appear in `ss -lntp`).
 #  - no `ingressClassName`: rides the cluster's DEFAULT IngressClass (k3s marks
 #    its bundled traefik as default). Clusters with no ingress controller simply
-#    leave this object inert — port-forward (header above) still works.
+#    leave this object inert — the NodePort on the Service above is the
+#    guaranteed path (http://<any-node-ip>:30080/, issue #87); port-forward
+#    (header above) also still works.
 #  - shared clusters where a catch-all route is unwanted:
 #      kubectl -n veloxsearch-system delete ingress veloxsearch
 #    then configure ingress mode in-app with a proper host + class.
