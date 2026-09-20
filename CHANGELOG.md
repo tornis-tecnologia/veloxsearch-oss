@@ -8,6 +8,11 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+- install.yaml ships `service/veloxsearch` as NodePort 30080 — the UI answers
+  at `http://<node-ip>:30080` on any cluster, with or without an Ingress
+  controller (#87).
+
 ## [0.10.2] - 2026-09-16
 
 ### Fixed

@@ -6,6 +6,8 @@ pulls it anonymously and there is no client binary to install:
 
 ```bash
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
+# open http://<node-ip>:30080 — the UI answers there on ANY cluster, ingress or
+# not; port-forward and Ingress remain as alternatives
 kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # open http://localhost:3000 — first run: create the admin account
 ```
@@ -20,11 +22,13 @@ that can't reach the public image, an offline **side-load** alternative.
 
 VeloxSearch ships as **one manifest** (`deploy/install.yaml`, ADR-027): the
 `veloxsearch-system` and `velox-agents` namespaces, the service account +
-two-phase RBAC, the wizard Deployment and its Service, a small bundled Postgres
-StatefulSet, and a catch-all Ingress with no host and no `ingressClassName`. On a
-cluster with a default IngressClass (a fresh k3s, say) that Ingress answers on
-`http://<node-ip>/`; on a cluster without one it stays inert and port-forward is
-the way in. On first run the app checks your cluster against
+two-phase RBAC, the wizard Deployment and its Service (a NodePort on 30080 —
+the UI answers at `http://<node-ip>:30080/` on any cluster, #87), a small
+bundled Postgres StatefulSet, and a catch-all Ingress with no host and no
+`ingressClassName`. On a cluster with a default IngressClass (a fresh k3s, say)
+that Ingress answers on `http://<node-ip>/`; on a cluster without one it stays
+inert and the NodePort is the way in. On first run the app checks your cluster
+against
 [`REQUIREMENTS.md`](REQUIREMENTS.md) (R1–R8) and self-installs cert-manager + the
 OpenSearch operator. Longhorn — the only supported deployment storage (R3,
 ADR-043) — is installed when you create your first deployment, unless it is
