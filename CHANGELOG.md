@@ -8,6 +8,12 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+- **Deployment storage is now flexible: Longhorn when present, otherwise the
+  cluster's default StorageClass** — node-local defaults create with a
+  durability warning instead of refusing; only a fully StorageClass-less
+  cluster triggers the Longhorn bootstrap (ADR-043 amended, #88).
+
 ## [0.10.2] - 2026-09-16
 
 ### Fixed
