@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-09-20
+
 ### Changed
 - **Deployment storage is now flexible: Longhorn when present, otherwise the
   cluster's default StorageClass** — node-local defaults create with a
