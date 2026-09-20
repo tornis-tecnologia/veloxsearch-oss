@@ -97,9 +97,10 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   const [customMem, setCustomMem] = useState("");
   const [customDisk, setCustomDisk] = useState("");
   const [customHeap, setCustomHeap] = useState("");
-  // Storage classification (ADR-031): a node-local/absent default means creating
-  // a cluster auto-installs Longhorn. We don't ASK — we inform: a heads-up on the
-  // review step before, and a live progress notice while it installs.
+  // Storage classification (ADR-031, flexible per ADR-061): only a cluster
+  // with NO default StorageClass at all means creating auto-installs Longhorn
+  // (needs_longhorn). We don't ASK — we inform: a heads-up on the review step
+  // before, and a live progress notice while it installs.
   const [storage, setStorage] = useState(null);
   // True while the create that auto-installs Longhorn is in flight — drives
   // the live install notice. Distinct from `submitting`, which is every create.
@@ -192,9 +193,10 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   const valid = name.trim().length > 0 && !nameErr
     && (version !== OTHER_VERSION || !!chosenVersion);
 
-  // Longhorn not in place yet → creating this cluster auto-installs it
-  // (ADR-031/043). We inform, never ask: show a live install notice while
-  // the (blocking) create runs.
+  // Only when the cluster has NO default StorageClass at all does creating
+  // auto-install Longhorn (ADR-061; needs_longhorn is false for a usable
+  // default, durable or warned-node-local). We inform, never ask: show a live
+  // install notice while the (blocking) create runs.
   const willInstallStorage = !!(storage && storage.needs_longhorn && !storage.durable);
   // Nodes missing Longhorn prerequisites (`#15`, ADR-043): the backend maps
   // each `MissingDependency` to a package + per-distro install commands.

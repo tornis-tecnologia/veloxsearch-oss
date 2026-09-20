@@ -722,19 +722,23 @@ async fn ensure_namespace_exists(client: &Client, namespace: &str) -> Result<()>
 }
 
 /// The nodePool `persistence` block for the OpenSearchCluster CR (ADR-031,
-/// pinned by ADR-043).
+/// pinned by ADR-043, flexible per ADR-061).
 ///
-/// A `pvc` claim (the operator sizes it from the pool's `diskSize`), pinned to
-/// the `longhorn` StorageClass — Longhorn is the only supported deployment
-/// storage (ADR-043), so the CR names it explicitly instead of falling through
-/// to whatever the cluster's default happens to be. Choosing another class in
-/// the UI is a non-goal (REQUIREMENTS.md R3); ensuring Longhorn exists via the
-/// self-bootstrap + storage-ready gate is owned by bootstrap.rs (#13/#14).
-fn node_persistence() -> serde_json::Value {
-    serde_json::json!({ "pvc": {
-        "storageClass": crate::bootstrap::LONGHORN_SC,
-        "accessModes": ["ReadWriteOnce"]
-    } })
+/// A `pvc` claim (the operator sizes it from the pool's `diskSize`). When the
+/// `longhorn` StorageClass exists the claim is pinned to it — one predictable,
+/// tested storage path (ADR-043). When it does not (flexible default storage,
+/// ADR-061: the cluster rides its own default SC), the `storageClass` field is
+/// OMITTED entirely so the claim binds through whatever class the cluster
+/// already defaulted — naming a class that doesn't exist would hang the PVC in
+/// Pending forever. Choosing another class in the UI is a non-goal
+/// (REQUIREMENTS.md R3); ensuring a usable class exists is owned by the
+/// storage gate in bootstrap.rs (`ensure_storage_ready`, #13/#14).
+fn node_persistence(longhorn_sc: bool) -> serde_json::Value {
+    let mut pvc = serde_json::json!({ "accessModes": ["ReadWriteOnce"] });
+    if longhorn_sc {
+        pvc["storageClass"] = serde_json::Value::String(crate::bootstrap::LONGHORN_SC.into());
+    }
+    serde_json::json!({ "pvc": pvc })
 }
 
 /// Parse a Kubernetes memory quantity ("4Gi" / "512Mi" / "2G" / "1000M" /
@@ -834,6 +838,7 @@ fn node_pool(
     mem: &str,
     cpu_req: &str,
     cpu_lim: &str,
+    longhorn_sc: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "component": "nodes",
@@ -846,10 +851,11 @@ fn node_pool(
         },
         // PVC-backed persistence (ADR-031): data survives pod reschedule.
         // The volume is sized by `diskSize` above and pinned to the
-        // `longhorn` StorageClass (ADR-043) — the Longhorn self-bootstrap
-        // and the storage-ready gate that guarantee that class exists live
-        // in bootstrap.rs (#13/#14).
-        "persistence": node_persistence()
+        // `longhorn` StorageClass only when that class exists (ADR-043/061);
+        // otherwise `storageClass` is omitted so the PVC rides the cluster's
+        // default. The storage gate that guarantees a usable class lives in
+        // bootstrap.rs (#13/#14).
+        "persistence": node_persistence(longhorn_sc)
     })
 }
 
@@ -961,10 +967,12 @@ pub async fn create_cluster(
     // Namespace-first (#52): all resources below land in the deployment's
     // namespace, which for a tenant is the one ADR-044 provisioned for it.
     ensure_namespace_exists(&client, dep.namespace()).await?;
-    // Storage-ready gate (#14, ADR-031): the node pool below claims a PVC, so
-    // never provision against a node-local/absent default StorageClass — that
-    // leaves PVCs Pending forever. This passes immediately on a real default and
-    // otherwise remediates (install Longhorn) or refuses with a clear message.
+    // Storage-ready gate (#14, ADR-031/043, flexible per ADR-061): the node
+    // pool below claims a PVC, so never provision without usable storage. On
+    // a cluster whose default SC is usable (Longhorn, foreign CSI, or
+    // node-local — the last with a durability warning) this passes untouched;
+    // only a cluster with no default SC at all remediates (install Longhorn)
+    // or refuses with a clear message.
     crate::bootstrap::ensure_storage_ready(&client)
         .await
         .context("storage not ready for PVC-backed cluster")?;
@@ -977,6 +985,15 @@ pub async fn create_cluster(
     // Resize guard (#16): on an existing deployment, refuse a disk shrink or a
     // grow the default StorageClass can't honor. No-op for a new cluster.
     validate_disk_resize(&client, dep, &disk).await?;
+    // Classify ONCE, after the storage gate: pin node-pool PVCs to `longhorn`
+    // only when that SC actually exists (ADR-061); on a flexible-default
+    // cluster the field is omitted so the PVCs ride the cluster's own default
+    // class. A classification failure here degrades to riding the default —
+    // permissive, since the gate above already proved usable storage.
+    let longhorn_sc = crate::bootstrap::classify_storage(&client)
+        .await
+        .map(|d| d.longhorn_ready())
+        .unwrap_or(false);
     // Memory is THE user-facing tuning knob (ADR-035): one number, applied as
     // request = limit. The operator derives the JVM heap from it. An override
     // was already bounds-checked by the day-2 guards above; preset values are
@@ -1060,7 +1077,7 @@ pub async fn create_cluster(
                     "limits": { "memory": "1Gi", "cpu": "500m" }
                 }
             },
-            "nodePools": [node_pool(replicas, &disk, &mem, s.cpu_req, s.cpu_lim)]
+            "nodePools": [node_pool(replicas, &disk, &mem, s.cpu_req, s.cpu_lim, longhorn_sc)]
         }
     });
     os_api(&client, dep)
@@ -6634,7 +6651,7 @@ mod tests {
     fn node_pool_delegates_heap_to_the_operator() {
         // ADR-035: the CR must NOT carry a `jvm` field — its absence is what
         // makes the operator compute -Xms/-Xmx = half the memory request.
-        let p = node_pool(3, "10Gi", "3Gi", "1", "2");
+        let p = node_pool(3, "10Gi", "3Gi", "1", "2", true);
         assert!(
             p.get("jvm").is_none(),
             "jvm must be omitted (operator-managed)"
@@ -6663,9 +6680,10 @@ mod tests {
     #[test]
     fn node_persistence_is_a_pvc_pinned_to_longhorn() {
         // ADR-031: node pools claim a PVC (RWO) instead of the old ephemeral
-        // emptyDir. ADR-043: the claim is pinned to the `longhorn` class —
-        // never left to whatever the cluster's default happens to be.
-        let p = node_persistence();
+        // emptyDir. ADR-043: when the `longhorn` class exists, the claim is
+        // pinned to it — never left to whatever the cluster's default happens
+        // to be.
+        let p = node_persistence(true);
         assert!(p.get("emptyDir").is_none(), "emptyDir must be gone");
         let pvc = p.get("pvc").expect("persistence.pvc block present");
         assert_eq!(
@@ -6676,6 +6694,25 @@ mod tests {
             pvc.get("storageClass"),
             Some(&serde_json::json!("longhorn")),
             "storageClass must be pinned to longhorn (ADR-043)"
+        );
+    }
+
+    /// Flexible default storage (ADR-061, #88): when the `longhorn` class does
+    /// NOT exist, the claim must ride the cluster's own default — naming a
+    /// class that isn't there would hang the PVC in Pending forever.
+    #[test]
+    fn node_persistence_omits_the_pin_without_longhorn() {
+        let p = node_persistence(false);
+        let pvc = p.get("pvc").expect("persistence.pvc block present");
+        assert_eq!(
+            pvc.get("accessModes").and_then(|m| m.as_array()),
+            Some(&vec![serde_json::json!("ReadWriteOnce")]),
+            "the PVC claim itself stays"
+        );
+        assert!(
+            pvc.get("storageClass").is_none(),
+            "storageClass must be OMITTED so the PVC binds through the cluster's \
+             default StorageClass (ADR-061), not pinned to a class that doesn't exist"
         );
     }
 

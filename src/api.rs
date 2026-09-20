@@ -623,21 +623,27 @@ pub struct BootstrapStatus {
     pub unsupported: bool,
 }
 
-/// Read-only storage classification for the "auto-install + notify" Longhorn
-/// flow (ADR-031/043). The create flow polls this to learn whether creating a
-/// cluster will auto-install Longhorn (`needs_longhorn`) and, while one runs, to
-/// show progress (`installing`) / a completion notice. Reading it installs nothing.
+/// Read-only storage classification for the create flow (ADR-031/043, flexible
+/// per ADR-061). The create flow polls this to learn whether creating a cluster
+/// will auto-install Longhorn (`needs_longhorn` — only when the cluster has no
+/// default StorageClass at all) and, while one runs, to show progress
+/// (`installing`) / a completion notice. Reading it installs nothing.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StorageStatus {
+    /// Storage data survives a reschedule: Longhorn present, or a foreign CSI
+    /// default (ADR-061). False for a node-local default (usable, warned).
     pub durable: bool,
+    /// Only when there is no default StorageClass at all — creation
+    /// auto-installs Longhorn.
     pub needs_longhorn: bool,
     pub default_class: Option<String>,
     pub detail: String,
     pub installing: Option<String>,
     pub error: Option<String>,
-    /// Node packages Longhorn reports missing (`#15`, ADR-043) — the create
-    /// flow renders one panel per entry (package + per-distro commands) and
-    /// blocks creation while any remain.
+    /// Node packages Longhorn reports missing (`#15`) — only probed where the
+    /// install is actually owed (no default SC to ride). The create flow
+    /// renders one panel per entry (package + per-distro commands) and blocks
+    /// creation while any remain.
     pub missing_packages: Vec<MissingPackage>,
 }
 
