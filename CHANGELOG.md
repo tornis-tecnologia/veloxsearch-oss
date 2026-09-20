@@ -13,6 +13,14 @@ are called out explicitly.
   cluster's default StorageClass** — node-local defaults create with a
   durability warning instead of refusing; only a fully StorageClass-less
   cluster triggers the Longhorn bootstrap (ADR-043 amended, #88).
+- install.yaml ships `service/veloxsearch` as NodePort 30080 — the UI answers
+  at `http://<node-ip>:30080` on any cluster, with or without an Ingress
+  controller (#87).
+
+### Fixed
+- Bundled postgres PVC uses the cluster default StorageClass instead of
+  pinning `longhorn` — postgres-0 no longer sits Pending on fresh clusters
+  before bootstrap (#86).
 
 ## [0.10.2] - 2026-09-16
 

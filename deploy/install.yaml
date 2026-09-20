@@ -387,16 +387,22 @@ spec:
             requests: { memory: "128Mi", cpu: "100m" }
             limits: { memory: "512Mi", cpu: "500m" }
 ---
+# NodePort by default so the UI is reachable at http://<any-node-ip>:30080/ on
+# ANY cluster — with or without an Ingress controller (issue #87, ratified
+# 2026-09-20). The Ingress below still handles hostname routing where a
+# controller exists.
 apiVersion: v1
 kind: Service
 metadata:
   name: veloxsearch
   namespace: veloxsearch-system
 spec:
+  type: NodePort
   selector: { app: veloxsearch }
   ports:
     - port: 80
       targetPort: 3000
+      nodePort: 30080
 ---
 # ── Control-plane Postgres (ADR-041, #92) ────────────────────────────────────
 # Small single-instance Postgres for multi-user control-plane state (users/
@@ -405,8 +411,9 @@ spec:
 # `veloxsearch-postgres-credentials` Secret, which the APP generates on its
 # first boot (ADR-023 pattern, src/db.rs) — so on a fresh install this pod
 # waits in CreateContainerConfigError for a few seconds until the app is up,
-# then starts. Its PVC pins the `longhorn` StorageClass (ADR-043): before the
-# first-run bootstrap installs Longhorn, the pod is Pending by design.
+# then starts. Its PVC rides the cluster's default StorageClass — Longhorn
+# where present, local-path/hostPath elsewhere — so postgres schedules on day
+# 0 with no manual steps (issue #86; flexible storage per issue #88).
 #
 # initdb hook: runs ONCE on an empty data dir. Creates the scoped
 # NON-superuser application role (`velox`) owning its own database — the app
@@ -503,9 +510,10 @@ spec:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        # ADR-043: Longhorn is the only storage — pinned, never the cluster
-        # default, so a foreign default class can't silently take the volume.
-        storageClassName: longhorn
+        # No storageClassName: the claim rides the cluster's default
+        # StorageClass — Longhorn where present, local-path/hostPath
+        # elsewhere — so postgres schedules on day 0 (issue #86; flexible
+        # storage per issue #88).
         resources:
           requests:
             storage: 2Gi
@@ -516,7 +524,9 @@ spec:
 #    klipper-lb uses iptables DNAT, so :80/:443 never appear in `ss -lntp`).
 #  - no `ingressClassName`: rides the cluster's DEFAULT IngressClass (k3s marks
 #    its bundled traefik as default). Clusters with no ingress controller simply
-#    leave this object inert — port-forward (header above) still works.
+#    leave this object inert — the NodePort on the Service above is the
+#    guaranteed path (http://<any-node-ip>:30080/, issue #87); port-forward
+#    (header above) also still works.
 #  - shared clusters where a catch-all route is unwanted:
 #      kubectl -n veloxsearch-system delete ingress veloxsearch
 #    then configure ingress mode in-app with a proper host + class.
