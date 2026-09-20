@@ -103,35 +103,42 @@ fn sc_is_default(sc: &k8s_openapi::api::storage::v1::StorageClass) -> bool {
 }
 
 /// Storage classification for the self-bootstrap (ADR-031, amended by
-/// ADR-043): **Longhorn is the only supported deployment storage**. The gate
-/// no longer asks "is there a real default StorageClass?" but "is the Longhorn
-/// StorageClass present and usable?" — a foreign real CSI default (EBS, Ceph…)
-/// no longer satisfies it; Longhorn still gets installed and the CR pins its
-/// PVCs to [`LONGHORN_SC`].
+/// ADR-043, re-amended by ADR-061 — flexible default storage, ratified
+/// 2026-09-20): Longhorn when present, otherwise the cluster's own default
+/// StorageClass. Only a cluster with **no default at all** triggers the
+/// Longhorn auto-bootstrap; a foreign CSI default (EBS, Ceph…) is used as-is
+/// and counts as durable, and a node-local default (local-path, hostPath) is
+/// used with a durability warning — data is lost on pod reschedule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeploymentStorage {
     /// The `longhorn` SC (provisioner `driver.longhorn.io`) exists — ready.
     /// `default` records whether it also carries the default annotation
     /// (informational: PVCs are pinned, so being default is not required).
     Longhorn { default: bool },
-    /// A real (non-node-local) CSI default exists, but it is not Longhorn —
-    /// still install Longhorn (ADR-043); the foreign class is left untouched.
+    /// A real (non-node-local) CSI default exists and is not Longhorn — use it
+    /// untouched (ADR-061): durable, no install. PVCs omit `storageClassName`
+    /// so they ride this class.
     ForeignDefault(String),
-    /// The default is node-local (won't survive reschedule) — install Longhorn.
+    /// The default is node-local (won't survive reschedule) — use it with a
+    /// durability warning (ADR-061); no install. Install Longhorn for HA
+    /// storage is the operator's call, surfaced on the R3 row.
     NodeLocal(String),
-    /// No default StorageClass at all — install Longhorn.
+    /// No default StorageClass at all — nothing to ride, so the Longhorn
+    /// auto-bootstrap is the remediation.
     Absent,
 }
 
 impl DeploymentStorage {
-    /// The storage-ready signal cluster creation gates on: the Longhorn SC is
-    /// in place (ADR-043).
+    /// The storage-ready signal cluster creation gates on: some usable
+    /// deployment storage exists (ADR-061). Longhorn is one way to get there,
+    /// no longer the only one.
     pub fn longhorn_ready(&self) -> bool {
         matches!(self, DeploymentStorage::Longhorn { .. })
     }
-    /// Whether the Longhorn self-install needs to run.
+    /// Whether the Longhorn self-install needs to run — only when there is no
+    /// default StorageClass to ride (ADR-061).
     pub fn needs_longhorn(&self) -> bool {
-        !self.longhorn_ready()
+        matches!(self, DeploymentStorage::Absent)
     }
 }
 
@@ -161,9 +168,9 @@ fn classify_storage_classes(
     }
 }
 
-/// Inspect the cluster's StorageClasses and classify them (ADR-031/043). This
-/// is the detection trigger for the storage self-install and the source of the
-/// storage-ready signal (`.longhorn_ready()`).
+/// Inspect the cluster's StorageClasses and classify them (ADR-031/043/061).
+/// This is the detection trigger for the storage self-install (Absent only)
+/// and the source of the storage-ready signal (`.longhorn_ready()`).
 pub async fn classify_storage(client: &Client) -> Result<DeploymentStorage> {
     use k8s_openapi::api::storage::v1::StorageClass;
     let api: Api<StorageClass> = Api::all(client.clone());
@@ -177,11 +184,11 @@ pub async fn classify_storage(client: &Client) -> Result<DeploymentStorage> {
 /// Whether the StorageClass backing deployment PVCs permits online volume
 /// expansion (`allowVolumeExpansion: true`). Used by the disk-resize guard:
 /// growing a deployment's PVC only takes effect if the backing class allows it;
-/// otherwise the CR change applies but the volume never grows. PVCs are pinned
-/// to the `longhorn` SC (ADR-043), so that class is consulted first; the
-/// default class stands in for pre-pin deployments. Returns `None` when
+/// otherwise the CR change applies but the volume never grows. The `longhorn`
+/// SC is consulted first (node pools pin to it when it exists, ADR-043/061);
+/// the default class covers flexible-default deployments. Returns `None` when
 /// neither exists (caller stays permissive — `ensure_storage_ready` already
-/// gates creation on Longhorn being ready).
+/// gates creation on usable storage).
 pub async fn deployment_sc_allows_expansion(client: &Client) -> Result<Option<bool>> {
     use k8s_openapi::api::storage::v1::StorageClass;
     let api: Api<StorageClass> = Api::all(client.clone());
@@ -197,12 +204,20 @@ pub async fn deployment_sc_allows_expansion(client: &Client) -> Result<Option<bo
         .map(|sc| sc.allow_volume_expansion.unwrap_or(false)))
 }
 
-/// Storage-ready gate for cluster creation (`#14`, ADR-031/043). OpenSearch
-/// node pools claim a PVC (`#11`) pinned to the `longhorn` StorageClass
-/// (ADR-043), so creation must never proceed until Longhorn is usable — a
-/// foreign CSI default does not satisfy the gate. Longhorn already present
-/// passes immediately; otherwise VeloxSearch auto-installs it and only returns
-/// `Ok` once the `longhorn` SC is in place.
+/// Storage-ready gate for cluster creation (`#14`, ADR-031/043, flexible per
+/// ADR-061 ratified 2026-09-20). OpenSearch node pools claim a PVC (`#11`), so
+/// creation must never proceed without usable storage. The contract:
+///
+/// * `longhorn` SC present → use it: reconcile replica sizing (`#26`),
+///   durable. Unchanged behaviour.
+/// * A default StorageClass exists but is not Longhorn (node-local local-path/
+///   hostPath, or a foreign CSI default like EBS/Ceph) → **use the cluster
+///   default**: no install, no refusal. Node-local costs durability (data
+///   lost on reschedule) and is warned about, not refused; a foreign CSI
+///   default is durable. PVCs omit `storageClassName` so they ride the class
+///   the cluster already defaulted.
+/// * No default StorageClass at all → today's Longhorn auto-bootstrap is the
+///   remediation (nothing else to use).
 ///
 /// Longhorn is auto-installed, not prompted (operator decision, 2026-06-30:
 /// "install it and inform" — the user is told, not asked). Progress is surfaced
@@ -210,44 +225,62 @@ pub async fn deployment_sc_allows_expansion(client: &Client) -> Result<Option<bo
 /// `storage_status().installing`), so the create flow shows an "installing
 /// Longhorn storage…" step and a completion notice instead of an opaque spinner.
 /// The bootstrap cluster-admin binding is still present here because the
-/// self-revoke is deferred until storage is durable (ADR-027/031) — installing
-/// Longhorn applies CRDs + broad ClusterRoles and needs that binding; once the
-/// install makes storage durable we drop it. If a node can't run Longhorn
-/// (`#15`), the install's own error is surfaced so the caller refuses with a
-/// clear message rather than provisioning into Pending storage.
+/// self-revoke is deferred until storage is sorted (ADR-027/031) — installing
+/// Longhorn applies CRDs + broad ClusterRoles and needs that binding; once
+/// storage is usable — via install or via the cluster's own default — we drop
+/// it. If a node can't run Longhorn (`#15`), the install's own error is
+/// surfaced so the caller refuses with a clear message rather than
+/// provisioning into Pending storage.
 pub async fn ensure_storage_ready(client: &Client) -> Result<()> {
-    if classify_storage(client).await?.longhorn_ready() {
-        // Pre-existing Longhorn still gets its replica sizing reconciled: a
-        // single-node cluster carrying the bundle default of three faults
-        // every volume (#26), however Longhorn got there.
-        reconcile_longhorn_sizing(client).await?;
-        return Ok(());
-    }
-    match install_longhorn(client)
-        .await
-        .context("cluster creation refused: Longhorn is unavailable and could not be installed — Longhorn is the only supported deployment storage (ADR-043)")
-    {
-        Ok(()) => {
-            // Surface "done" on the shared progress channel, then drop the
-            // bootstrap binding we kept for exactly this install.
-            job_set(Job::Idle);
+    match classify_storage(client).await? {
+        DeploymentStorage::Longhorn { .. } => {
+            // Pre-existing Longhorn still gets its replica sizing reconciled: a
+            // single-node cluster carrying the bundle default of three faults
+            // every volume (#26), however Longhorn got there.
+            reconcile_longhorn_sizing(client).await?;
             revoke_bootstrap(client).await;
+            Ok(())
         }
-        Err(e) => {
-            // Make the failure visible to a concurrent status poll, then bubble.
-            job_set(Job::Failed(format!("{e:#}")));
-            return Err(e);
+        // Flexible default (ADR-061): the cluster came with usable storage —
+        // use it, inform, install nothing. A node-local default means data
+        // does not survive a reschedule; that trade-off is announced (R3 row,
+        // storage_status detail) rather than refused — day-0 evaluation on a
+        // stock k3s must not require a storage stack.
+        ds @ (DeploymentStorage::ForeignDefault(_) | DeploymentStorage::NodeLocal(_)) => {
+            tracing::info!(
+                "using the cluster's default StorageClass for deployments (ADR-061): {ds:?}"
+            );
+            revoke_bootstrap(client).await;
+            Ok(())
         }
-    }
-    // `install_longhorn` already asserts the `longhorn` SC before returning;
-    // this re-check keeps the gate's contract explicit and independent.
-    if classify_storage(client).await?.longhorn_ready() {
-        Ok(())
-    } else {
-        bail!(
-            "cluster creation refused: the `longhorn` StorageClass is still missing after the \
-             Longhorn install — Longhorn is the only supported deployment storage (ADR-043)"
-        )
+        DeploymentStorage::Absent => {
+            match install_longhorn(client).await.context(
+                "cluster creation refused: no default StorageClass and the Longhorn \
+                 install failed — there is no storage to provision into",
+            ) {
+                Ok(()) => {
+                    // Surface "done" on the shared progress channel, then drop the
+                    // bootstrap binding we kept for exactly this install.
+                    job_set(Job::Idle);
+                    revoke_bootstrap(client).await;
+                }
+                Err(e) => {
+                    // Make the failure visible to a concurrent status poll, then bubble.
+                    job_set(Job::Failed(format!("{e:#}")));
+                    return Err(e);
+                }
+            }
+            // `install_longhorn` already asserts the `longhorn` SC before returning;
+            // this re-check keeps the gate's contract explicit and independent.
+            if classify_storage(client).await?.longhorn_ready() {
+                Ok(())
+            } else {
+                bail!(
+                    "cluster creation refused: the `longhorn` StorageClass is still missing after the \
+                     Longhorn install — no default StorageClass to fall back on (ADR-061)"
+                )
+            }
+        }
     }
 }
 
@@ -259,12 +292,15 @@ pub async fn ensure_storage_ready(client: &Client) -> Result<()> {
 /// anything.
 #[derive(Clone, Debug, Default)]
 pub struct StorageState {
-    /// Longhorn is in place (ADR-043) — clusters can be created.
+    /// Storage deployments can use and data survives a reschedule: Longhorn
+    /// in place, or a foreign CSI default (ADR-061). False for a node-local
+    /// default (usable, warned) and for Absent.
     pub durable: bool,
-    /// The `longhorn` SC is missing — creation auto-installs Longhorn.
+    /// Only when the cluster has NO default StorageClass at all — creation
+    /// auto-installs Longhorn (ADR-061).
     pub needs_longhorn: bool,
-    /// Name of the StorageClass deployments will use (Longhorn once ready),
-    /// or the current default while Longhorn is still missing.
+    /// Name of the StorageClass deployments will use (the cluster default, or
+    /// `longhorn` once installed).
     pub default_class: Option<String>,
     /// Human description of the current state ("node-local default 'local-path'").
     pub detail: String,
@@ -294,18 +330,29 @@ fn describe_storage(ds: &DeploymentStorage) -> (bool, bool, Option<String>, Stri
             },
         ),
         DeploymentStorage::ForeignDefault(n) => (
-            false,
             true,
+            false,
             Some(n.clone()),
-            format!("foreign CSI default '{n}' — Longhorn required (ADR-043)"),
+            format!(
+                "foreign CSI default '{n}' — durable, used as the deployment \
+                 storage (ADR-043 amended)"
+            ),
         ),
         DeploymentStorage::NodeLocal(n) => (
             false,
-            true,
+            false,
             Some(n.clone()),
-            format!("node-local default '{n}'"),
+            format!(
+                "node-local default '{n}' — used as-is, but data is lost on pod \
+                 reschedule; install Longhorn for durable storage"
+            ),
         ),
-        DeploymentStorage::Absent => (false, true, None, "no default StorageClass".to_string()),
+        DeploymentStorage::Absent => (
+            false,
+            true,
+            None,
+            "no default StorageClass — Longhorn will be installed".to_string(),
+        ),
     }
 }
 
@@ -320,10 +367,13 @@ pub async fn storage_status() -> Result<StorageState> {
     let ds = classify_storage(&client).await?;
     let (installing, error) = job_snapshot();
     let (durable, needs_longhorn, default_class, detail) = describe_storage(&ds);
-    let missing_packages = if durable {
-        Vec::new()
-    } else {
+    // Missing node packages (`#15`) only matter where the Longhorn install is
+    // actually owed (no default SC to ride, ADR-061) — a node-local cluster
+    // never installs, so probing would only confuse the create flow.
+    let missing_packages = if needs_longhorn {
         longhorn_missing_packages(&client).await
+    } else {
+        Vec::new()
     };
     Ok(StorageState {
         durable,
@@ -485,22 +535,29 @@ async fn check_requirements(
         }
     }
 
-    // R3 — Longhorn storage (ADR-031/043). A missing `longhorn` SC is NOT a
-    // hard fail: it is a remediation step — VeloxSearch will install Longhorn
-    // and gate cluster creation on it being ready (`#14`). A foreign CSI
-    // default no longer passes (ADR-043). Reuse the shared classifier so this
-    // row and the gate agree on what "ready" means.
+    // R3 — Deployment storage (ADR-031/043, flexible per ADR-061, ratified
+    // 2026-09-20). Longhorn when present; otherwise the cluster's own default
+    // StorageClass is used — a foreign CSI default counts as durable, a
+    // node-local default carries a durability warning. Only a cluster with no
+    // default at all owes the Longhorn install, and that is a remediation, not
+    // a failure (`#14`). Reuse the shared classifier so this row and the gate
+    // agree on what "ready" means.
     match classify_storage(client).await {
         Ok(DeploymentStorage::Longhorn { .. }) => out.push(req("r3", "pass", LONGHORN_SC)),
-        Ok(other) => {
-            let what = match &other {
-                DeploymentStorage::ForeignDefault(name) => {
-                    format!("foreign CSI default '{name}' (only Longhorn is supported, ADR-043)")
-                }
-                DeploymentStorage::NodeLocal(name) => format!("node-local default '{name}'"),
-                DeploymentStorage::Absent => "no default StorageClass".to_string(),
-                DeploymentStorage::Longhorn { .. } => unreachable!("Longhorn handled above"),
-            };
+        Ok(DeploymentStorage::ForeignDefault(name)) => out.push(req(
+            "r3",
+            "pass",
+            format!("foreign CSI default '{name}' (accepted — ADR-043 amended)"),
+        )),
+        Ok(DeploymentStorage::NodeLocal(name)) => out.push(req(
+            "r3",
+            "warn",
+            format!(
+                "node-local default '{name}' — durable per-node, data lost on \
+                     reschedule; install Longhorn for HA storage"
+            ),
+        )),
+        Ok(DeploymentStorage::Absent) => {
             let verb = if installing {
                 "installing"
             } else {
@@ -509,7 +566,9 @@ async fn check_requirements(
             out.push(req(
                 "r3",
                 "warn",
-                format!("{what} — {verb} Longhorn (needs open-iscsi on every node)"),
+                format!(
+                    "no default StorageClass — {verb} Longhorn (needs open-iscsi on every node)"
+                ),
             ));
         }
         Err(e) => out.push(req("r3", "warn", format!("storage probe failed: {e}"))),
@@ -892,12 +951,14 @@ pub async fn ensure() -> Result<State> {
             // Covers "bootstrapped earlier but the revoke never ran" (e.g. the
             // app restarted between install and revoke, or pre-ADR-027 installs).
             // Keep the deferred-revoke contract (ADR-031): only drop the binding
-            // once Longhorn is in place, since any cluster without it still
-            // needs cluster-admin for the create-flow Longhorn auto-install.
+            // once no deferred Longhorn install is still owed — under the
+            // flexible contract (ADR-061) that is any cluster WITH usable
+            // storage (Longhorn or a default SC); only a fully StorageClass-less
+            // cluster still needs cluster-admin for the create-flow install.
             if let Ok(client) = crate::k8s::client().await {
                 if classify_storage(&client)
                     .await
-                    .map(|d| d.longhorn_ready())
+                    .map(|d| !d.needs_longhorn())
                     .unwrap_or(false)
                 {
                     revoke_bootstrap(&client).await;
@@ -977,21 +1038,28 @@ async fn run_install() -> Result<()> {
         wait_deploy(&client, ns(), OPERATOR_DEPLOY, 300).await?;
     }
 
-    // 4. Storage (ADR-031/043): Longhorn install is DEFERRED to first cluster
-    //    creation (operator decision, 2026-06-30: "install + notify"). Installing
-    //    it here would block bootstrap on a multi-minute storage install the user
-    //    can't see; instead the create flow's storage-ready gate auto-installs it
-    //    and surfaces progress + a completion notice. A cluster that already has
-    //    Longhorn (prod) needs nothing. So this step installs nothing.
+    // 4. Storage (ADR-031/043, flexible per ADR-061): the Longhorn install is
+    //    DEFERRED to first cluster creation and only owed when the cluster has
+    //    no default StorageClass at all (operator decision, 2026-06-30:
+    //    "install + notify"). Installing it here would block bootstrap on a
+    //    multi-minute storage install the user can't see; instead the create
+    //    flow's storage-ready gate auto-installs it and surfaces progress + a
+    //    completion notice. A cluster that already has usable storage —
+    //    Longhorn, or any default SC the flexible gate rides — needs nothing.
+    //    So this step installs nothing.
 
-    // 5. Bootstrap powers are one-shot (ADR-027) — BUT the deferred Longhorn
-    //    install still needs cluster-admin (it applies CRDs + broad ClusterRoles).
-    //    Revoking now, before that install can run, would make it fail. So only
-    //    revoke once Longhorn is already in place; any other cluster keeps the
-    //    binding until the create-flow auto-install makes storage durable and
+    // 5. Bootstrap powers are one-shot (ADR-027) — BUT a deferred Longhorn
+    //    install (only owed on a cluster with NO default StorageClass, ADR-061)
+    //    still needs cluster-admin (it applies CRDs + broad ClusterRoles).
+    //    Revoking now, before that install can run, would make it fail. So
+    //    revoke whenever storage is already sorted (Longhorn present, or a
+    //    default SC the flexible gate will ride); an Absent cluster keeps the
+    //    binding until the create-flow auto-install makes storage usable and
     //    revokes it then (`ensure_storage_ready`).
-    if classify_storage(&client).await?.longhorn_ready() {
-        revoke_bootstrap(&client).await;
+    if let Ok(ds) = classify_storage(&client).await {
+        if !ds.needs_longhorn() {
+            revoke_bootstrap(&client).await;
+        }
     }
     Ok(())
 }
@@ -1274,10 +1342,11 @@ async fn wait_longhorn_storage_ready(client: &Client, sc: &str, secs: u64) -> Re
         if let Some(issue) = longhorn_node_issue(client).await {
             if issue.fatal {
                 bail!(
-                    "cluster creation refused — Longhorn (the only supported deployment \
-                     storage, ADR-043) cannot run on this cluster: {}. Install the missing \
-                     node packages (shown in the create screen with per-distro commands) \
-                     plus a usable disk on every node, then retry.",
+                    "cluster creation refused — Longhorn (the storage being installed because \
+                     this cluster has no default StorageClass, ADR-061) cannot run on this \
+                     cluster: {}. Install the missing node packages (shown in the create \
+                     screen with per-distro commands) plus a usable disk on every node, \
+                     then retry.",
                     issue.msg
                 );
             }
@@ -1290,10 +1359,10 @@ async fn wait_longhorn_storage_ready(client: &Client, sc: &str, secs: u64) -> Re
     // Timed out — explain why, if a node tells us, rather than a bare timeout.
     if let Some(issue) = longhorn_node_issue(client).await {
         bail!(
-            "cluster creation refused — Longhorn (the only supported deployment storage, \
-             ADR-043) did not become ready within {secs}s: {}. The cluster's nodes can't \
-             host Longhorn volumes (missing packages / a schedulable disk) — fix that, \
-             then retry.",
+            "cluster creation refused — Longhorn (the storage being installed because this \
+             cluster has no default StorageClass, ADR-061) did not become ready within \
+             {secs}s: {}. The cluster's nodes can't host Longhorn volumes (missing \
+             packages / a schedulable disk) — fix that, then retry.",
             issue.msg
         );
     }
@@ -1976,35 +2045,43 @@ parameters:
     }
 
     #[test]
-    fn only_longhorn_satisfies_the_storage_gate() {
+    fn flexible_storage_contract() {
         // ADR-043: Longhorn present → ready, whether default or merely pinned.
         for default in [true, false] {
             let ds = classify_storage_classes(&[sc("longhorn", "driver.longhorn.io", default)]);
             assert_eq!(ds, DeploymentStorage::Longhorn { default });
             assert!(ds.longhorn_ready() && !ds.needs_longhorn());
         }
-        // A foreign real CSI default (EBS gp2) no longer satisfies the gate.
-        let ds = classify_storage_classes(&[sc("gp2", "ebs.csi.aws.com", true)]);
-        assert_eq!(ds, DeploymentStorage::ForeignDefault("gp2".into()));
-        // An SC merely *named* longhorn with a foreign provisioner doesn't count.
+        // ADR-061 (amends ADR-043): an SC merely *named* longhorn with a
+        // foreign provisioner doesn't count as Longhorn, but its default
+        // annotation still makes it the class deployments ride.
         let ds = classify_storage_classes(&[sc("longhorn", "ebs.csi.aws.com", true)]);
         assert_eq!(ds, DeploymentStorage::ForeignDefault("longhorn".into()));
-        // Node-local default / nothing at all — same remediation as before.
+        // Foreign CSI default (EBS gp2) → accepted as durable, no install.
+        let ds = classify_storage_classes(&[sc("gp2", "ebs.csi.aws.com", true)]);
+        assert_eq!(ds, DeploymentStorage::ForeignDefault("gp2".into()));
+        // Node-local default (k3s local-path) → accepted with a durability
+        // warning, no install.
         let ds = classify_storage_classes(&[sc("local-path", "rancher.io/local-path", true)]);
         assert_eq!(ds, DeploymentStorage::NodeLocal("local-path".into()));
+        // No default at all → the only case the Longhorn install is owed.
         assert_eq!(classify_storage_classes(&[]), DeploymentStorage::Absent);
-        // Everything that isn't Longhorn triggers the install.
         for ds in [
+            DeploymentStorage::Longhorn { default: true },
             DeploymentStorage::ForeignDefault("gp2".into()),
             DeploymentStorage::NodeLocal("local-path".into()),
-            DeploymentStorage::Absent,
         ] {
-            assert!(!ds.longhorn_ready(), "{ds:?} must not read as ready");
             assert!(
-                ds.needs_longhorn(),
-                "{ds:?} must trigger the Longhorn install"
+                ds.longhorn_ready() || !ds.needs_longhorn(),
+                "{ds:?} must be usable WITHOUT an install"
+            );
+            assert!(
+                !ds.needs_longhorn(),
+                "{ds:?} must not trigger the Longhorn install (ADR-061)"
             );
         }
+        let absent = DeploymentStorage::Absent;
+        assert!(!absent.longhorn_ready() && absent.needs_longhorn());
     }
 
     #[test]
@@ -2016,25 +2093,31 @@ parameters:
         assert_eq!(name.as_deref(), Some("longhorn"));
         assert!(detail.contains("Longhorn") && detail.contains("longhorn"));
 
-        // Foreign CSI default → not durable, auto-install (ADR-043).
+        // Foreign CSI default → durable, no install (ADR-061).
         let (durable, needs, name, detail) =
             describe_storage(&DeploymentStorage::ForeignDefault("gp2".into()));
-        assert!(!durable && needs);
+        assert!(durable && !needs);
         assert_eq!(name.as_deref(), Some("gp2"));
         assert!(detail.contains("foreign") && detail.contains("gp2"));
 
-        // Node-local default → not durable, auto-install, named, "node-local".
+        // Node-local default → usable but NOT durable, no install, named, and
+        // the durability warning says what is lost.
         let (durable, needs, name, detail) =
             describe_storage(&DeploymentStorage::NodeLocal("local-path".into()));
-        assert!(!durable && needs);
+        assert!(!durable && !needs);
         assert_eq!(name.as_deref(), Some("local-path"));
         assert!(detail.contains("node-local") && detail.contains("local-path"));
+        assert!(
+            detail.contains("reschedule") && detail.contains("Longhorn"),
+            "the warning must say data is lost on reschedule and name the HA fix: {detail}"
+        );
 
-        // Absent default → not durable, auto-install, no name.
+        // Absent default → the one case that installs: not durable,
+        // needs_longhorn, no name.
         let (durable, needs, name, detail) = describe_storage(&DeploymentStorage::Absent);
         assert!(!durable && needs);
         assert!(name.is_none());
-        assert!(detail.contains("no default"));
+        assert!(detail.contains("no default") && detail.contains("Longhorn"));
     }
 
     #[test]

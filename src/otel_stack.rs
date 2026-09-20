@@ -1245,8 +1245,24 @@ fn config_map(deployment: &str, part: &str, file: &str, body: &str) -> K8sObject
     }
 }
 
-fn pvc(deployment: &str, part: &str, gib: u64) -> K8sObject {
+fn pvc(deployment: &str, part: &str, gib: u64, longhorn_sc: bool) -> K8sObject {
     let name = obj_name(deployment, part);
+    // ADR-043 pinned these to `longhorn` explicitly; the flexible-default
+    // contract (ADR-061, #88) makes the pin conditional: name the class only
+    // when it exists, else omit `storageClassName` so the claim rides the
+    // cluster's own default instead of hanging Pending forever.
+    let spec = if longhorn_sc {
+        serde_json::json!({
+            "storageClassName": crate::bootstrap::LONGHORN_SC,
+            "accessModes": ["ReadWriteOnce"],
+            "resources": { "requests": { "storage": format!("{gib}Gi") } }
+        })
+    } else {
+        serde_json::json!({
+            "accessModes": ["ReadWriteOnce"],
+            "resources": { "requests": { "storage": format!("{gib}Gi") } }
+        })
+    };
     K8sObject {
         group: "",
         version: "v1",
@@ -1255,13 +1271,7 @@ fn pvc(deployment: &str, part: &str, gib: u64) -> K8sObject {
         manifest: serde_json::json!({
             "apiVersion": "v1", "kind": "PersistentVolumeClaim",
             "metadata": { "name": name, "namespace": AGENT_NS, "labels": labels(deployment) },
-            "spec": {
-                // ADR-043: Longhorn is named explicitly rather than falling
-                // through to whatever the cluster's default happens to be.
-                "storageClassName": crate::bootstrap::LONGHORN_SC,
-                "accessModes": ["ReadWriteOnce"],
-                "resources": { "requests": { "storage": format!("{gib}Gi") } }
-            }
+            "spec": spec,
         }),
         name,
     }
@@ -1428,12 +1438,31 @@ fn deployment_obj(
 }
 
 /// The single inventory. Applied in order, deleted in reverse.
+///
+/// Identity-only callers (delete lists, created-object sets) use this
+/// pinned-Longhorn form; the apply paths use [`manifests_with`] so the PVC pin
+/// follows the flexible-default contract (ADR-061) — the `storageClassName`
+/// value never changes object identity.
 pub fn manifests(
     dep: &Deployment,
     os_user: &str,
     os_password: &str,
     targets: &ScrapeTargets,
     endpoint: &EndpointAccess,
+) -> Vec<K8sObject> {
+    manifests_with(dep, os_user, os_password, targets, endpoint, true)
+}
+
+/// [`manifests`] with the storage-class decision made explicit: `longhorn_sc`
+/// false omits `storageClassName` from every PVC so claims bind through the
+/// cluster's default StorageClass (ADR-061, #88).
+pub fn manifests_with(
+    dep: &Deployment,
+    os_user: &str,
+    os_password: &str,
+    targets: &ScrapeTargets,
+    endpoint: &EndpointAccess,
+    longhorn_sc: bool,
 ) -> Vec<K8sObject> {
     let deployment = dep.name();
     let mut v = Vec::new();
@@ -1491,8 +1520,8 @@ pub fn manifests(
     });
 
     // ---- storage ----
-    v.push(pvc(deployment, "cortex", CORTEX_DISK_GIB));
-    v.push(pvc(deployment, "alertmanager", AM_DISK_GIB));
+    v.push(pvc(deployment, "cortex", CORTEX_DISK_GIB, longhorn_sc));
+    v.push(pvc(deployment, "alertmanager", AM_DISK_GIB, longhorn_sc));
 
     // ---- cortex ----
     v.push(deployment_obj(
@@ -1868,7 +1897,14 @@ pub async fn install(dep: &Deployment, targets: ScrapeTargets) -> Result<()> {
             }
         }
     }
-    for o in manifests(dep, &user, &password, &targets, &endpoint) {
+    // Flexible default storage (ADR-061): pin the stack's PVCs to `longhorn`
+    // only when that class exists; classification failure degrades to riding
+    // the cluster default rather than naming a class that may not be there.
+    let longhorn_sc = crate::bootstrap::classify_storage(&client)
+        .await
+        .map(|d| d.longhorn_ready())
+        .unwrap_or(false);
+    for o in manifests_with(dep, &user, &password, &targets, &endpoint, longhorn_sc) {
         crate::k8s::apply_dynamic(
             &client,
             o.group,
@@ -3187,7 +3223,18 @@ pub async fn reset_credentials(dep: &Deployment) -> Result<(String, String)> {
 
     let client = crate::k8s::client().await?;
     let targets = ScrapeTargets::default();
-    for o in manifests(dep, &user, &password, &targets, &endpoint) {
+    // PVC `spec` is immutable after creation, so a rotate never re-applies
+    // them: the apply is a no-op at best, and if the storage-class decision
+    // changed since install (ADR-061 pin vs cluster default) it would be an
+    // immutable-field rejection. Existing claims are whatever they are.
+    let longhorn_sc = crate::bootstrap::classify_storage(&client)
+        .await
+        .map(|d| d.longhorn_ready())
+        .unwrap_or(false);
+    for o in manifests_with(dep, &user, &password, &targets, &endpoint, longhorn_sc)
+        .into_iter()
+        .filter(|o| o.kind != "PersistentVolumeClaim")
+    {
         crate::k8s::apply_dynamic(
             &client,
             o.group,
@@ -3941,6 +3988,8 @@ mod tests {
 
     #[test]
     fn pvcs_pin_longhorn() {
+        // The identity-form inventory (and the install path on a cluster where
+        // the `longhorn` SC exists) pins claims to `longhorn` (ADR-043).
         for o in manifests(
             &d(),
             "u",
@@ -3953,6 +4002,38 @@ mod tests {
                     o.manifest["spec"]["storageClassName"].as_str().unwrap(),
                     crate::bootstrap::LONGHORN_SC,
                     "ADR-043: deployment storage is Longhorn, named explicitly"
+                );
+            }
+        }
+    }
+
+    /// Flexible default storage (ADR-061, #88): without the `longhorn` SC the
+    /// claims must OMIT `storageClassName` and ride the cluster default —
+    /// identity (kind/name/namespace) unchanged so install/teardown stay in
+    /// lockstep.
+    #[test]
+    fn pvcs_omit_the_pin_without_longhorn() {
+        for o in manifests_with(
+            &d(),
+            "u",
+            "p",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+            false,
+        ) {
+            if o.kind == "PersistentVolumeClaim" {
+                assert!(
+                    o.manifest["spec"].get("storageClassName").is_none(),
+                    "storageClassName must be omitted (ADR-061): {}",
+                    o.name
+                );
+                assert_eq!(
+                    o.manifest["spec"]["accessModes"]
+                        .as_array()
+                        .map(|a| a.len()),
+                    Some(1),
+                    "the PVC claim itself stays: {}",
+                    o.name
                 );
             }
         }

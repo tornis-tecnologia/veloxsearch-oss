@@ -9,6 +9,10 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Changed
+- **Deployment storage is now flexible: Longhorn when present, otherwise the
+  cluster's default StorageClass** — node-local defaults create with a
+  durability warning instead of refusing; only a fully StorageClass-less
+  cluster triggers the Longhorn bootstrap (ADR-043 amended, #88).
 - install.yaml ships `service/veloxsearch` as NodePort 30080 — the UI answers
   at `http://<node-ip>:30080` on any cluster, with or without an Ingress
   controller (#87).

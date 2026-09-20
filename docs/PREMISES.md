@@ -22,55 +22,62 @@ The premises map onto the requirements: **P1** is the storage side of **R3**,
 
 ---
 
-## P1 — Longhorn is auto-installed only when the cluster has no durable default storage
+## P1 — Flexible default storage: Longhorn when present, otherwise the cluster's default (ADR-061)
 
-**Premise.** OpenSearch node pools claim PVCs (ADR-031), so a deployment must never
-be provisioned against storage that loses data on a pod reschedule. On first
-deployment-create VeloxSearch inspects the cluster's **default StorageClass** and
-decides:
+**Premise.** OpenSearch node pools claim PVCs (ADR-031), so a deployment must
+never be provisioned against storage that cannot bind. On first
+deployment-create VeloxSearch inspects the cluster's StorageClasses and decides
+(`classify_storage`, `src/bootstrap.rs`):
 
-| Default StorageClass | Classification | Action |
+| Cluster storage | Classification | Action |
 |---|---|---|
-| A real distributed/CSI default (e.g. `longhorn`=`driver.longhorn.io`, Ceph/rook, EBS/PD/Azure Disk) | **durable** | **Use it untouched.** No install. |
-| A **node-local** provisioner — `rancher.io/local-path` (k3s), `kubernetes.io/no-provisioner`, any `*hostpath*`, `openebs.io/local` | **not durable** | **Install Longhorn.** |
-| **No default StorageClass at all** | **absent** | **Install Longhorn.** |
+| The `longhorn` SC exists (`driver.longhorn.io`) | **durable** | **Use it**: node-pool PVCs are pinned to `storageClass: longhorn` (ADR-043) and replica sizing is reconciled (`#26`). Unchanged behaviour. |
+| **No Longhorn, but a default SC exists** backed by a foreign CSI (EBS/PD/Ceph…) | **durable** | **Use the cluster default**: no install, no refusal. PVCs omit `storageClassName` so they ride it. |
+| Default SC is **node-local** (`rancher.io/local-path` (k3s), `kubernetes.io/no-provisioner`, any `*hostpath*`, `openebs.io/local`) | **not durable** | **Use the cluster default with a durability warning**: data is lost on pod reschedule; the R3 row and the storage status say so, and installing Longhorn for HA storage is the operator's call. |
+| **No default StorageClass at all** | **absent** | **Auto-bootstrap Longhorn** — the only case the install is owed (nothing else to ride). |
 
-The classifier is `default_storage()` (`src/bootstrap.rs:103`), which finds the
-StorageClass carrying the `…/is-default-class: "true"` annotation
-(`sc_is_default`, `src/bootstrap.rs:66`) and tests its provisioner against the
-node-local list `NODE_LOCAL_PROVISIONERS` plus any provisioner containing
-`hostpath` (`provisioner_is_node_local`, `src/bootstrap.rs:55-63`). It returns one
-of three states — `Real`, `NodeLocal`, `Absent` (`DefaultStorage`,
-`src/bootstrap.rs:78-86`); only `Real` is treated as durable
-(`is_real`/`needs_longhorn`, `src/bootstrap.rs:88-98`).
+This generalises the two earlier contracts: ADR-031 ("any real default works")
+and ADR-043 ("Longhorn only") are both amended by **ADR-061 (flexible default
+storage, ratified 2026-09-20 by the operator)** — day-0 evaluation on a stock
+k3s/k0s must not require a storage stack, but a cluster that has nothing gets
+the same auto-install as before.
+
+The classifier is pure over a StorageClass list (`classify_storage_classes`,
+`src/bootstrap.rs`): the `longhorn` SC is matched **by name + provisioner**;
+otherwise the class carrying the `…/is-default-class: "true"` annotation
+(`sc_is_default`) is tested against the node-local list `NODE_LOCAL_PROVISIONERS`
+plus any provisioner containing `hostpath` (`provisioner_is_node_local`). It
+returns one of four states — `Longhorn`, `ForeignDefault`, `NodeLocal`,
+`Absent` (`DeploymentStorage`); only `Absent` sets
+`needs_longhorn`, and `durable` is true for `Longhorn` + `ForeignDefault`
+(`describe_storage`).
 
 **When it fires.** The Longhorn install is **deferred to first deployment-create**,
 not run during the initial bootstrap (`run_install` step 4 explicitly installs
-nothing here — `src/bootstrap.rs:609-614`). The storage-ready gate
-`ensure_storage_ready` (`src/bootstrap.rs:160`) runs at the top of
-`create_cluster` (`src/k8s.rs:494`): it returns immediately if the default is
-already durable, otherwise it installs Longhorn and only returns `Ok` once a real
-default is in place (`src/bootstrap.rs:160-187`). On a real-CSI cluster (Tornis
-prod's `longhorn` default) the whole premise is a no-op.
+nothing here). The storage-ready gate `ensure_storage_ready` runs at the top of
+`create_cluster` (`src/k8s.rs`): Longhorn present → reconcile sizing; a default
+SC present → log the choice and pass (no install, no refusal); Absent → install
+Longhorn and only return `Ok` once the `longhorn` SC is in place. On a
+real-CSI cluster (Tornis prod's `longhorn` default) the whole premise is a
+no-op.
 
-**What the install does** (`install_longhorn`, `src/bootstrap.rs:841-862`):
+**What the install does** (`install_longhorn` — Absent case only):
 1. Server-side-applies the vendored `deploy/bootstrap/longhorn.yaml` bundle.
 2. Waits for the `longhorn-manager` DaemonSet and the `longhorn-driver-deployer`
    Deployment to come up — these register the CSI driver that creates the
    `longhorn` StorageClass.
 3. Waits for that `longhorn` StorageClass to exist
-   (`wait_longhorn_storage_ready`, `src/bootstrap.rs:771`).
+   (`wait_longhorn_storage_ready`).
 4. Demotes any *node-local* StorageClass still flagged default
-   (`demote_node_local_defaults`, `src/bootstrap.rs:806`) so `longhorn` is the
-   cluster's **sole** default — two defaults make PVC binding ambiguous.
+   (`demote_node_local_defaults`) so `longhorn` is the cluster's **sole**
+   default — two defaults make PVC binding ambiguous.
 5. Asserts a real default is now in place before returning.
 
 Progress is surfaced, not hidden: the create flow polls `storage_status()`
-(`src/bootstrap.rs:230`) and the shared install-job snapshot to render an
-"installing Longhorn storage…" step and a completion notice — the install runs as
-a detached job so no HTTP/proxy timeout can kill it. This is an **install-and-inform**
-decision (operator call, 2026-06-30: "install it and tell the user, don't ask" —
-`src/bootstrap.rs:148-159`).
+and the shared install-job snapshot to render an "installing Longhorn
+storage…" step and a completion notice — the install runs as a detached job so
+no HTTP/proxy timeout can kill it. This remains an **install-and-inform**
+decision (operator call, 2026-06-30: "install it and tell the user, don't ask").
 
 ### P1 — RBAC / permissions
 
@@ -80,15 +87,15 @@ one-time `veloxsearch-bootstrap` **ClusterRoleBinding → `cluster-admin`** ship
 `deploy/install.yaml`. The key sequencing point:
 
 - The bootstrap binding is **kept past the cert-manager/operator install** and
-  revoked only once storage is durable. A node-local/absent cluster still needs
-  `cluster-admin` for this deferred Longhorn install, so `run_install` revokes the
-  binding **only** when the default is already real (`src/bootstrap.rs:622-624`);
-  otherwise the binding lingers until the create-flow install makes storage durable.
-- `ensure_storage_ready` performs that **self-revoke** the moment the Longhorn
-  install succeeds — it calls `revoke_bootstrap` (`src/bootstrap.rs:168-172`,
-  `633-644`), which deletes the `veloxsearch-bootstrap` ClusterRoleBinding
-  (constant `BOOTSTRAP_BINDING`, `src/bootstrap.rs:628`). After that the app runs
-  on the enumerated `veloxsearch-runtime` ClusterRole only.
+  revoked only once no deferred Longhorn install is still owed. Under the
+  flexible contract that is any cluster WITH usable storage (Longhorn, or any
+  default SC the gate rides); only a fully StorageClass-less cluster keeps the
+  binding for the create-flow install (`run_install` step 5;
+  `ensure_storage_ready` performs the same self-revoke the moment storage is
+  proven usable — however that happened).
+- `revoke_bootstrap` deletes the `veloxsearch-bootstrap` ClusterRoleBinding
+  (constant `BOOTSTRAP_BINDING`). After that the app runs on the enumerated
+  `veloxsearch-runtime` ClusterRole only.
 
 The enumerated runtime role already carries the **read-only** storage permissions
 the classifier needs every day — `storageclasses` get/list, `longhorn.io/nodes`
@@ -96,30 +103,31 @@ get/list, `nodes`/`nodes/proxy` for the capacity panel (see the
 `veloxsearch-runtime` ClusterRole in `deploy/install.yaml`). Only the **write** of
 CRDs/ClusterRoles during the install itself needs the elevated binding.
 
-> **What the operator should expect:** on a real-CSI cluster, nothing — the binding
-> self-revokes at the end of the normal bootstrap. On a node-local/absent cluster,
-> the `veloxsearch-bootstrap` cluster-admin binding stays until the first deployment
-> triggers the Longhorn install, then disappears on its own. If you re-apply
-> `install.yaml` (e.g. a component upgrade) the binding is recreated and
-> re-revoked the same way (ADR-027 caveat).
+> **What the operator should expect:** on a cluster that already has usable
+> storage, nothing — the binding self-revokes at the end of the normal
+> bootstrap. On a StorageClass-less cluster, the `veloxsearch-bootstrap`
+> cluster-admin binding stays until the first deployment triggers the Longhorn
+> install, then disappears on its own. If you re-apply `install.yaml` (e.g. a
+> component upgrade) the binding is recreated and re-revoked the same way
+> (ADR-027 caveat).
 
 ### P1 — Node prerequisites and informative failure
 
-Longhorn has its own per-node prerequisites: **`open-iscsi` installed with `iscsid`
-running**, plus a **schedulable spare disk** (and `nfs-common` for RWX). VeloxSearch
-cannot install host packages, so where a node can't host Longhorn volumes the
-storage gate **fails with a clear message rather than leaving PVCs `Pending`
-forever** (the honesty rule, ADR-031):
+These apply only where the Longhorn install actually runs (the Absent case).
+Longhorn has its own per-node prerequisites: **`open-iscsi` installed with
+`iscsid` running**, plus a **schedulable spare disk** (and `nfs-common` for
+RWX). VeloxSearch cannot install host packages, so where a node can't host
+Longhorn volumes the storage gate **fails with a clear message rather than
+leaving PVCs `Pending` forever** (the honesty rule, ADR-031):
 
 - A node reporting Longhorn reason `MissingDependency` (e.g. `iscsiadm not found`
   = no `open-iscsi`) is a **fatal, fail-fast** prerequisite gap — the wait aborts
   immediately with a message naming the node and telling you to install the
-  prerequisites or provide a real default StorageClass
-  (`reason_is_missing_prereq` → `node_issue_from_status` →
-  `wait_longhorn_storage_ready`, `src/bootstrap.rs:689, 696-750, 771-801`).
+  prerequisites (`reason_is_missing_prereq` → `node_issue_from_status` →
+  `wait_longhorn_storage_ready`).
 - A node with **no schedulable disk** is reported but not failed fast (a fresh disk
   can take a moment to register); if the wait does time out, the error names the
-  node/disk cause instead of a bare timeout (`src/bootstrap.rs:718-748, 791-800`).
+  node/disk cause instead of a bare timeout.
 
 On Debian/Ubuntu nodes:
 `sudo apt-get install -y open-iscsi && sudo systemctl enable --now iscsid`.
