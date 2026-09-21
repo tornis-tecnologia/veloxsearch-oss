@@ -8,6 +8,12 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+- `velox init --pull-token` is deprecated and now prints a deprecation
+  warning (the pull Secret it creates has no effect on the default catalog);
+  every doc that taught the flag now leads with the manual `velox-pull`
+  Secret procedure, canonical in SECRETS.md (#74).
+
 ## [0.10.4] - 2026-09-21
 
 ### Added
