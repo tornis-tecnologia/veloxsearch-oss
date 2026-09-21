@@ -1488,6 +1488,9 @@ pub struct PvcInfo {
     pub phase: String,
     /// `status.capacity.storage` when bound, else the requested size, in bytes.
     pub capacity_bytes: u64,
+    /// `spec.storageClassName` the claim pins, or "" when it rides the cluster
+    /// default — the signal for whether capacity is enforced (#95).
+    pub storage_class: String,
 }
 
 /// A Kubernetes storage Quantity ("10Gi" / "512Mi" / plain bytes) → bytes.
@@ -1552,8 +1555,34 @@ async fn data_pvcs_in(namespace: &str, name: &str) -> BTreeMap<String, PvcInfo> 
             PvcInfo {
                 phase,
                 capacity_bytes: cap,
+                storage_class: pvc
+                    .spec
+                    .as_ref()
+                    .and_then(|sp| sp.storage_class_name.clone())
+                    .unwrap_or_default(),
             },
         );
+    }
+    out
+}
+
+/// Provisioner per StorageClass name, cluster-wide. Best-effort like the PVC
+/// listing above: any error (no kube client, RBAC, list failure) degrades to
+/// an empty map, and callers read an unknown class as enforced (#95).
+pub async fn storage_class_provisioners() -> BTreeMap<String, String> {
+    use k8s_openapi::api::storage::v1::StorageClass;
+    let mut out = BTreeMap::new();
+    let Ok(client) = client().await else {
+        return out;
+    };
+    let api: Api<StorageClass> = Api::all(client);
+    let Ok(list) = api.list(&ListParams::default()).await else {
+        return out;
+    };
+    for sc in list {
+        if let Some(name) = sc.metadata.name {
+            out.insert(name, sc.provisioner);
+        }
     }
     out
 }

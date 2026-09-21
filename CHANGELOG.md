@@ -15,6 +15,12 @@ are called out explicitly.
   last terminated reason and exit code — read from the pod object the app
   already lists, no new RBAC and no logs (#97).
 
+### Fixed
+- Storage usage on the deployment Overview shows the actual OpenSearch data
+  size and marks capacity as not enforced under node-local provisioners
+  (local-path), instead of summing each node's whole root disk against the
+  PVC requests and printing figures like 164% (#95).
+
 ## [0.10.3] - 2026-09-20
 
 ### Changed

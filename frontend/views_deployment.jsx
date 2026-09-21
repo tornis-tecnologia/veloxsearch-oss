@@ -370,7 +370,7 @@ function ProvisioningBanner({ d, lang, onToast }) {
 function OverviewTab({ d, lang, onToast, openUpgrade }) {
   const t = STR[lang];
   const [nodes, setNodes] = useState([]);
-  const [totals, setTotals] = useState({ docs: 0 });
+  const [totals, setTotals] = useState({ docs: 0, dataBytes: 0, enforced: true });
   const [points, setPoints] = useState([]);
   // When the numbers on screen were last confirmed. Both polls used to swallow
   // their errors, so a dead backend left stale numbers looking live.
@@ -392,7 +392,7 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
         if (!alive) return;
         const a = adaptMetrics(m);
         setNodes(a.nodes);
-        setTotals({ docs: a.total_docs });
+        setTotals({ docs: a.total_docs, dataBytes: a.data_used_bytes, enforced: a.capacity_enforced });
         setLastOk(Date.now());
       })
       .catch(() => {});
@@ -432,6 +432,14 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
   const hasMonitors = monitorDocs !== null;
   const monitorReceiving = hasMonitors && monitorDocs > 0;
   // Cluster-wide storage: the deployment's PVCs, not the host disks (ADR-031).
+  // #95: under a node-local provisioner (local-path…) the data path IS the
+  // node root disk and the requested capacity is never enforced — the old
+  // used/requested bar summed OS + images + everything against an advisory
+  // 5Gi and printed "164%". There the tile shows the actual OpenSearch data
+  // size against the requests, labeled as data, with no percentage; enforced
+  // provisioners (Longhorn, CSI) keep the old bar semantics exactly.
+  const enforced = totals.enforced !== false;
+  const dataGib = (totals.dataBytes || 0) / (1024 ** 3);
   const diskUsed = nodes.reduce((s, n) => s + (n.pvcBound ? n.diskUsed : 0), 0);
   const diskTotal = nodes.reduce((s, n) => s + (n.pvcBound ? n.diskTotal : 0), 0);
   const diskPct = diskTotal ? (diskUsed / diskTotal) * 100 : 0;
@@ -495,9 +503,14 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
             : (monitorReceiving ? t.ov_receiving : t.ov_no_data)}
           tone={hasMonitors ? (monitorReceiving ? "ok" : "warn") : ""} />
         <StatTile label={t.ov_storage}
-          value={diskTotal ? `${gib(diskUsed)} / ${gib(diskTotal)}` : "—"}
-          sub={diskTotal ? `${diskPct.toFixed(0)}%` : t.ov_awaiting}
-          tone={diskPct >= 85 ? "warn" : ""} />
+          value={diskTotal
+            ? (enforced ? `${gib(diskUsed)} / ${gib(diskTotal)}`
+                        : `${gib(dataGib)} / ${gib(diskTotal)}`)
+            : "—"}
+          sub={!diskTotal ? t.ov_awaiting
+            : enforced ? `${diskPct.toFixed(0)}%`
+            : t.ov_storage_not_enforced}
+          tone={diskTotal && enforced && diskPct >= 85 ? "warn" : ""} />
         <StatTile label={t.nodes} value={`${d.nodes_ready}/${d.node_count}`}
           sub={nodesSub}
           tone={nodesOk && act.kind === "idle" ? "ok" : "warn"} />

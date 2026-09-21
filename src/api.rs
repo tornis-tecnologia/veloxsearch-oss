@@ -504,6 +504,18 @@ pub struct ClusterMetrics {
     pub nodes: Vec<NodeStat>,
     pub total_docs: u64,
     pub store_size_bytes: u64,
+    /// Actual OpenSearch data footprint — the sum of per-node
+    /// `indices.store.size_in_bytes`. This, not the `fs.data` figure, is the
+    /// honest "used" under a non-enforcing provisioner (#95).
+    #[serde(default)]
+    pub data_used_bytes: u64,
+    /// Whether the provisioner backing the data PVCs enforces the requested
+    /// capacity. Longhorn and foreign CSI defaults do; node-local ones
+    /// (local-path, hostpath, no-provisioner) never do — the request is
+    /// advisory. Unknown degrades to `true`, the long-standing reading, so
+    /// the UI hint never fires spuriously (#95).
+    #[serde(default = "default_true")]
+    pub capacity_enforced: bool,
 }
 
 /// One downsampled time-bucket of cluster-aggregate health (#9, the "second
@@ -2168,7 +2180,12 @@ mod server {
         // cluster comes up. A deployment the caller does not own takes the
         // same branch, so "not yours" is indistinguishable from "not ready".
         let Some(dep) = scope.resolve(&req.name).await.unwrap_or(None) else {
-            return Json(ClusterMetrics::default());
+            // `capacity_enforced: true`: the empty stub has no PVCs behind it,
+            // and "not enforced" is a claim about a provisioner we never saw.
+            return Json(ClusterMetrics {
+                capacity_enforced: true,
+                ..Default::default()
+            });
         };
         Json(crate::metrics::node_stats(&dep).await.unwrap_or_default())
     }
