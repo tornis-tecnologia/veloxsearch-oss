@@ -8,6 +8,15 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- Rolling restarts no longer wedge on security-index peer recovery stuck in
+  `init` — the #27 remediation now covers restart waves (#96). While the
+  operator's `RollingRestart` is in progress, a recovery sitting in `init` at
+  0 bytes past 10 minutes arms the same proven remediation (transient
+  `node_concurrent_recoveries` raise + bounce of the one node holding the
+  wedged shard), and the raised setting is handed back once the recoveries
+  drain. The stalled banner already names the recovery and the bounced pod.
+
 ## [0.10.3] - 2026-09-20
 
 ### Changed

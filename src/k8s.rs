@@ -2527,12 +2527,18 @@ async fn status_from(
     } else {
         nodes_desired
     };
+    // #96: a raise from a past episode still owes its hand-back, and the
+    // fast path below would skip the watch that performs it — so an entry in
+    // the remediation log (one HashMap probe) keeps this deployment on the
+    // slow path until the restore confirms.
+    let dep_key = format!("{obj_ns}/{name}");
     let plainly_stable = health == "green"
         && target_nodes > 0
         && nodes_ready == target_nodes
         && nodes_updated == target_nodes
         && initialized
-        && !upgrade.in_flight();
+        && !upgrade.in_flight()
+        && !throttle_still_raised(&dep_key);
     let activity = if plainly_stable
         && components
             .iter()
@@ -2575,6 +2581,22 @@ async fn status_from(
         let pvcs = data_pvcs_in(&obj_ns, &name).await;
         let pvcs_total = pvcs.len() as i32;
         let pvcs_bound = pvcs.values().filter(|p| p.phase == "Bound").count() as i32;
+        // #96: while a restart wave walks (or until a raised throttle is
+        // handed back), watch its recoveries directly — the #27 detector
+        // below only arms once the deployment reads *stalled*, and a wave
+        // resets that clock at every pod the operator replaces. Arming
+        // happens inside the watch, through the same remediation log; the
+        // returned facts join the stall diagnosis on the stalled branch.
+        // Borrowed `components` before the ActivityInput below moves it.
+        let wave_block = restart_wave_watch(
+            &obj_ns,
+            &name,
+            initialized,
+            nodes_updated,
+            target_nodes,
+            &components,
+        )
+        .await;
         let mut input = crate::activity::ActivityInput {
             phase: phase.clone(),
             health: health.clone(),
@@ -2608,7 +2630,8 @@ async fn status_from(
         if !first.stalled {
             first
         } else {
-            input.cluster = Some(stall_diagnosis_in(&obj_ns, &name).await);
+            let diagnosis = stall_diagnosis_in(&obj_ns, &name).await;
+            input.cluster = Some(merge_cluster_facts(diagnosis, wave_block));
             // #46: a stall that landed exactly on the dashboards rung (nodes
             // green, security done, Dashboards never ready) has its own
             // question to ask — and its own remediation to arm. The fetch is
@@ -3221,6 +3244,375 @@ async fn remediate_wedged_recovery(namespace: &str, name: &str, index: &str) -> 
             None
         }
     }
+}
+
+// ───────────── restart-wave wedge watch (#96) ──────────────────────────────
+//
+// The remediation above only arms after `activity::evaluate` calls a
+// deployment *stalled* — and the stall clock is the newest node pod's age,
+// which a rolling restart resets on every pod the operator replaces. A wave
+// that keeps walking can wedge the security index's peer recovery for the
+// whole roll without the #27 detector ever waking: observed live 2026-09-21
+// (issue #96), two peer recoveries of the 208-byte `.opendistro_security`
+// index in stage `init` at 0 bytes for 46.8m and 36.8m while a third
+// recovery of the same index completed in 1.6s — cluster yellow, CR
+// `RollingRestart InProgress`, remediation silent. So while a restart wave
+// is in progress — and until any throttle a fire raised is handed back — the
+// wave is watched directly: the same `_cat/recovery` question, the same
+// proven remediation, one more trigger.
+
+/// #96: a recovery sitting in `init` with ZERO bytes transferred for this
+/// long is not slow, it is wedged — the incident's exact signature, against
+/// a healthy recovery of the same index finishing in 1.6s. Same order of
+/// magnitude as [`REMEDIATE_AFTER_SECS`]; an independent const so the two
+/// policies can tune separately.
+const RESTART_WEDGE_AFTER_SECS: i64 = 600;
+
+/// One `_cat/recovery` row, narrowed to what the wedge detector reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecoveryRow {
+    index: String,
+    stage: String,
+    /// Bytes already moved by this recovery. `init` at 0 is the wedge.
+    bytes_recovered: i64,
+    /// Seconds the recovery has been running (the row's `time` cell).
+    secs: i64,
+}
+
+/// Parse a `_cat/recovery` `time` cell into seconds. The column renders in
+/// whatever unit fits (`1.6s`, `46.8m`, `13h`); `?time=s` pins seconds, but
+/// the parser accepts the rest so the detector never silently depends on
+/// the cluster honouring the parameter.
+fn parse_cat_duration(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (value, mult) = if let Some(n) = s.strip_suffix("ms") {
+        (n, 0.001)
+    } else if let Some(n) = s.strip_suffix('d') {
+        (n, 86_400.0)
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n, 3_600.0)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 60.0)
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n, 1.0)
+    } else {
+        (s, 1.0)
+    };
+    value.trim().parse::<f64>().ok().map(|v| (v * mult) as i64)
+}
+
+/// Narrow a `_cat/recovery?format=json` payload to [`RecoveryRow`]s. Cells
+/// the cluster renders oddly (absent, `-`, stringified numbers) degrade
+/// toward "not evidence": a row without a readable stage or duration can
+/// neither arm a bounce nor hold the throttle back, and an unreadable byte
+/// count reads as the zero an `init` row honestly reports.
+fn parse_recovery_rows(v: &serde_json::Value) -> Vec<RecoveryRow> {
+    let cell = |row: &serde_json::Value, name: &str| {
+        row.get(name).map(|x| {
+            x.as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| x.to_string())
+        })
+    };
+    let num = |row: &serde_json::Value, name: &str| -> i64 {
+        row.get(name)
+            .and_then(|x| {
+                x.as_i64()
+                    .or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))
+            })
+            .unwrap_or(0)
+    };
+    v.as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let stage = cell(row, "stage")?;
+                    let secs = cell(row, "time").and_then(|t| parse_cat_duration(&t))?;
+                    Some(RecoveryRow {
+                        index: cell(row, "index").unwrap_or_default(),
+                        stage,
+                        bytes_recovered: num(row, "bytes_recovered"),
+                        secs,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The wedge signature, ranked worst-first: in `init`, nothing transferred,
+/// past the budget. The OLDEST such row is the one to name — the session
+/// that queued everything else behind it.
+fn worst_wedged_init(rows: &[RecoveryRow]) -> Option<&RecoveryRow> {
+    rows.iter()
+        .filter(|r| {
+            r.stage.eq_ignore_ascii_case("init")
+                && r.bytes_recovered == 0
+                && r.secs >= RESTART_WEDGE_AFTER_SECS
+        })
+        .max_by_key(|r| r.secs)
+}
+
+/// The pure #96 decision, same contract as [`should_remediate`]: a wedged
+/// row past the budget, the shared cooldown respected. Returns the index to
+/// remediate and the wedge's age — which [`remediate_wedged_recovery`]
+/// already knows how to act on.
+fn restart_wave_should_remediate(
+    rows: &[RecoveryRow],
+    last_fired_ago: Option<std::time::Duration>,
+) -> Option<(String, i64)> {
+    // Under cooldown (a recent pass, from EITHER trigger — one shared log,
+    // one bounce episode at a time) nothing new arms.
+    if last_fired_ago.is_some_and(|ago| ago < REMEDIATE_COOLDOWN) {
+        return None;
+    }
+    worst_wedged_init(rows).map(|r| (r.index.clone(), r.secs))
+}
+
+/// Has every recovery actually started moving (or finished)? The restore
+/// half of the #96 contract: the throttle raise exists to let queued
+/// recoveries flow past dead sessions, so it is handed back only once
+/// nothing sits in `init` at zero bytes — a fresh recovery that has not yet
+/// moved its first byte counts as still settling.
+fn wave_settled(rows: &[RecoveryRow]) -> bool {
+    !rows
+        .iter()
+        .any(|r| r.stage.eq_ignore_ascii_case("init") && r.bytes_recovered == 0)
+}
+
+/// Is a restart wave walking right now? The operator's own account: a
+/// non-terminal `RollingRestart` row in `componentsStatus` (the CR's
+/// `InProgress`), or node pods still converging on the current revision.
+/// `initialized` keeps the watch off first-boot creates, where slow
+/// security recoveries are the normal price of a bootstrap.
+fn restart_wave_in_progress(
+    initialized: bool,
+    nodes_updated: i32,
+    nodes_desired: i32,
+    components: &[(String, String)],
+) -> bool {
+    initialized
+        && (nodes_updated < nodes_desired
+            || components.iter().any(|(c, s)| {
+                c.eq_ignore_ascii_case("RollingRestart")
+                    && !crate::activity::component_is_terminal(s)
+            }))
+}
+
+/// Does this deployment still owe a throttle hand-back? One HashMap probe;
+/// true only between a remediation fire and the confirmed restore. The fast
+/// status path checks it so a raise can never outlive its episode by
+/// slipping behind the short-circuit.
+fn throttle_still_raised(key: &str) -> bool {
+    remediation_log()
+        .lock()
+        .ok()
+        .is_some_and(|m| m.contains_key(key))
+}
+
+/// #96: the wave watch and the stall diagnosis read overlapping facts
+/// through different cache windows (one holds rows, the other a whole
+/// block). Merge into the diagnosis, never over it: the diagnosis ran for
+/// the stall verdict and its answers win; the wave watch only fills a gap.
+fn merge_cluster_facts(
+    mut d: crate::activity::ClusterBlock,
+    w: Option<crate::activity::ClusterBlock>,
+) -> crate::activity::ClusterBlock {
+    let Some(w) = w else { return d };
+    if d.recovery_index.is_empty() {
+        d.recovery_index = w.recovery_index;
+        d.recovery_stage = w.recovery_stage;
+        d.recovery_secs = w.recovery_secs;
+    }
+    if d.remediated_node.is_none() {
+        d.remediated_node = w.remediated_node;
+    }
+    d
+}
+
+/// TTL cache for the wave watch's `_cat/recovery` reading, same contract as
+/// [`diagnosis_cache`]: the SSE stream re-renders every 3s and a wedge lasts
+/// minutes, so the question is asked at most once per [`DIAGNOSIS_TTL`].
+/// `None` = the cluster did not answer — cached as its own fact, never as
+/// healthy emptiness, because the restore half must not mistake a dark
+/// cluster for a drained one.
+type WaveCache = std::sync::Mutex<
+    std::collections::HashMap<String, (std::time::Instant, Option<Vec<RecoveryRow>>)>,
+>;
+
+fn wave_cache() -> &'static WaveCache {
+    static CACHE: std::sync::OnceLock<WaveCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Ask the cluster for its active recoveries, narrowed to what the wave
+/// watch reads. `?time=s` pins the duration column to seconds; the parser
+/// tolerates anything else the cluster decides to render.
+async fn cat_recovery_rows(namespace: &str, name: &str) -> Option<Vec<RecoveryRow>> {
+    let key = format!("{namespace}/{name}");
+    if let Ok(cache) = wave_cache().lock() {
+        if let Some((at, hit)) = cache.get(&key) {
+            if at.elapsed() < DIAGNOSIS_TTL {
+                return hit.clone();
+            }
+        }
+    }
+    let rows = async {
+        let base = crate::recipes::os_base_in(name, namespace);
+        let http = crate::recipes::http().ok()?;
+        let (user, pass) = admin_creds_in(namespace, name).await;
+        let resp = http
+            .get(format!(
+                "{base}/_cat/recovery?format=json&h=index,stage,time,bytes_recovered&time=s"
+            ))
+            .basic_auth(&user, Some(&pass))
+            .timeout(DIAGNOSIS_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v = resp.json::<serde_json::Value>().await.ok()?;
+        Some(parse_recovery_rows(&v))
+    }
+    .await;
+    if let Ok(mut cache) = wave_cache().lock() {
+        cache.insert(key, (std::time::Instant::now(), rows.clone()));
+    }
+    rows
+}
+
+/// The transient-settings body that hands `node_concurrent_recoveries`
+/// back: updating the setting to `null` removes the override, which is the
+/// honest opposite of the #27 raise (the operator default is two).
+fn restore_throttle_payload() -> serde_json::Value {
+    serde_json::json!({
+        "transient": { "cluster.routing.allocation.node_concurrent_recoveries": null }
+    })
+}
+
+/// PUT the reset. Best-effort like every half of the remediation: a failure
+/// is loud, logged, and retried on the next watch pass — the log entry that
+/// tracks the raise is only removed once the cluster confirms, so the
+/// restore can never be forgotten, only delayed.
+async fn restore_throttle(namespace: &str, name: &str) -> bool {
+    let ok = async {
+        let base = crate::recipes::os_base_in(name, namespace);
+        let http = crate::recipes::http().ok()?;
+        let (user, pass) = admin_creds_in(namespace, name).await;
+        let resp = http
+            .put(format!("{base}/_cluster/settings"))
+            .basic_auth(&user, Some(&pass))
+            .timeout(DIAGNOSIS_TIMEOUT)
+            .json(&restore_throttle_payload())
+            .send()
+            .await
+            .ok()?;
+        Some(resp.status().is_success())
+    }
+    .await;
+    matches!(ok, Some(true))
+}
+
+/// The #96 extension of the #27 machinery: while a restart wave walks (or
+/// until a throttle this machinery raised is handed back), watch the wave's
+/// recoveries directly and arm the proven remediation on the incident's
+/// signature. Returns the facts the stalled banner should carry — the worst
+/// wedged row and the pod a previous pass bounced — or `None` when the wave
+/// has nothing to say.
+///
+/// The hook sits in `status_from`'s slow path, BEFORE the stalled branch:
+/// arming through the SAME [`remediation_log`] the #27 half uses means one
+/// pass can never double-fire — the placeholder this inserts makes
+/// `should_remediate` see a just-fired entry. A wave that wedges hard
+/// eventually also reads stalled, and the existing banner then names the
+/// recovery and the bounced pod through the fields the SPA already renders;
+/// nothing new crosses the wire.
+async fn restart_wave_watch(
+    namespace: &str,
+    name: &str,
+    initialized: bool,
+    nodes_updated: i32,
+    nodes_desired: i32,
+    components: &[(String, String)],
+) -> Option<crate::activity::ClusterBlock> {
+    let key = format!("{namespace}/{name}");
+    let last = remediation_log()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).cloned());
+    let in_progress =
+        restart_wave_in_progress(initialized, nodes_updated, nodes_desired, components);
+    // Watch while the wave walks — and keep watching after it ends until the
+    // raised throttle is confirmed handed back, which is what makes the
+    // restore survive the wave finishing between two passes.
+    if !in_progress && last.is_none() {
+        return None;
+    }
+    let Some(rows) = cat_recovery_rows(namespace, name).await else {
+        // The cluster did not answer. While the wave walks that is a fact to
+        // retry on the next pass; with the wave over, the entry stands and
+        // the restore keeps retrying against it. A dead cluster takes its
+        // transient settings with it, so there is nothing to clean up on the
+        // far side.
+        return None;
+    };
+
+    // Arm the #27 remediation on the wave's trigger — same dance as the
+    // stalled path: placeholder first (so a concurrent pass sees a
+    // just-fired entry), then the bounce updates the log with the pod.
+    let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
+    if let Some((index, secs)) = restart_wave_should_remediate(&rows, fired_ago) {
+        if let Ok(mut log) = remediation_log().lock() {
+            log.insert(key.clone(), (std::time::Instant::now(), None));
+        }
+        let (ns, nm, idx) = (namespace.to_string(), name.to_string(), index);
+        tracing::warn!(
+            "#96 restart-wave remediation armed for {ns}/{nm}: recovery of {idx} wedged in \
+             init at 0 bytes for {secs}s"
+        );
+        tokio::spawn(async move {
+            let pod = remediate_wedged_recovery(&ns, &nm, &idx).await;
+            if let Ok(mut log) = remediation_log().lock() {
+                log.insert(format!("{ns}/{nm}"), (std::time::Instant::now(), pod));
+            }
+        });
+    }
+
+    // Hand the throttle back once nothing sits in init at zero bytes. The
+    // guard reads the entry fetched before arming, so a fire this pass
+    // cannot be undone by its own restore clause — the rows still carry the
+    // wedge the fire just armed against.
+    if last.is_some() && wave_settled(&rows) && restore_throttle(namespace, name).await {
+        if let Ok(mut log) = remediation_log().lock() {
+            log.remove(&key);
+        }
+        tracing::info!(
+            "#96 restart-wave remediation for {namespace}/{name}: recoveries drained, \
+             node_concurrent_recoveries handed back"
+        );
+    }
+
+    // Facts for the stalled banner: the worst wedged row, whatever its age,
+    // and the pod a previous pass bounced. Absent rows leave the defaults —
+    // the SPA says only what it knows.
+    let wedged = rows
+        .iter()
+        .filter(|r| r.stage.eq_ignore_ascii_case("init") && r.bytes_recovered == 0)
+        .max_by_key(|r| r.secs);
+    let remediated_node = last.and_then(|(_, pod)| pod);
+    if wedged.is_none() && remediated_node.is_none() {
+        return None;
+    }
+    Some(crate::activity::ClusterBlock {
+        // The watch never asks `_cluster/health` — "unknown", never zero.
+        unassigned_shards: -1,
+        recovery_index: wedged.map(|r| r.index.clone()).unwrap_or_default(),
+        recovery_stage: wedged.map(|r| r.stage.clone()).unwrap_or_default(),
+        recovery_secs: wedged.map(|r| r.secs).unwrap_or_default(),
+        remediated_node,
+    })
 }
 
 // ───────────── dashboards stall diagnosis + remediation (#46) ───────────────
@@ -5670,6 +6062,231 @@ mod tests {
             "CrashLoopBackOff",
             Some(DASHBOARDS_REMEDIATE_COOLDOWN)
         ));
+    }
+
+    // ── restart-wave wedge watch (#96) ─────────────────────────────────
+    //
+    // Same split as #27: the ACTIONS (throttle raise, pod bounce, settings
+    // hand-back) are the fleet-validated ones reused as-is; the POLICY —
+    // what counts as wedged during a wave, when a wave is watched, when the
+    // throttle comes back — is pure and proven here.
+
+    fn row(index: &str, stage: &str, secs: i64, bytes: i64) -> RecoveryRow {
+        RecoveryRow {
+            index: index.into(),
+            stage: stage.into(),
+            bytes_recovered: bytes,
+            secs,
+        }
+    }
+
+    #[test]
+    fn cat_durations_parse_in_every_unit_the_cluster_renders() {
+        assert_eq!(parse_cat_duration("2808s"), Some(2_808));
+        // the default unit: fractional minutes, exactly the incident's row
+        assert_eq!(parse_cat_duration("46.8m"), Some(2_808));
+        assert_eq!(parse_cat_duration("1.6s"), Some(1));
+        assert_eq!(parse_cat_duration("13h"), Some(46_800));
+        assert_eq!(parse_cat_duration("2d"), Some(172_800));
+        assert_eq!(parse_cat_duration("850ms"), Some(0));
+        // garbage is not evidence
+        assert_eq!(parse_cat_duration("-"), None);
+        assert_eq!(parse_cat_duration(""), None);
+        assert_eq!(parse_cat_duration("soon"), None);
+    }
+
+    /// Exactly what `?format=json&h=index,stage,time,bytes_recovered&time=s`
+    /// answers for the incident's cluster.
+    #[test]
+    fn recovery_rows_parse_from_the_cat_payload() {
+        let payload = serde_json::json!([
+            {"index": ".opendistro_security", "shard": "0", "stage": "init",
+             "time": "2808s", "bytes_recovered": 0},
+            {"index": "logs-2026.09", "shard": "1", "stage": "index",
+             "time": "45s", "bytes_recovered": "8192"}
+        ]);
+        let rows = parse_recovery_rows(&payload);
+        assert_eq!(
+            rows,
+            vec![
+                RecoveryRow {
+                    index: ".opendistro_security".into(),
+                    stage: "init".into(),
+                    bytes_recovered: 0,
+                    secs: 2_808,
+                },
+                RecoveryRow {
+                    index: "logs-2026.09".into(),
+                    stage: "index".into(),
+                    bytes_recovered: 8_192,
+                    secs: 45,
+                },
+            ]
+        );
+
+        // A row without a readable stage or duration is skipped, not guessed.
+        let junk = serde_json::json!([{"index": "x", "bytes_recovered": 1}, {"nope": true}]);
+        assert!(parse_recovery_rows(&junk).is_empty());
+        assert!(parse_recovery_rows(&serde_json::json!({})).is_empty());
+    }
+
+    /// The incident, as the detector must see it: two peer recoveries of the
+    /// 208-byte security index in `init` at 0 bytes, one healthy recovery
+    /// moving bytes beside them.
+    #[test]
+    fn restart_wave_remediation_fires_on_the_incident_signature() {
+        let rows = vec![
+            row("logs-2026.09", "index", 45, 8_192),
+            row(".opendistro_security", "init", 2_808, 0),
+            row(".opendistro_security", "init", 36.8_f64 as i64 * 60, 0),
+        ];
+        let (index, secs) = restart_wave_should_remediate(&rows, None)
+            .expect("46.8m in init at 0 bytes is the wedge");
+        assert_eq!(index, ".opendistro_security");
+        assert_eq!(secs, 2_808, "the OLDEST wedged row is the one named");
+    }
+
+    /// Healthy recoveries never arm a bounce: a fresh one still in its first
+    /// seconds, one slowly moving bytes, one already done.
+    #[test]
+    fn restart_wave_remediation_ignores_healthy_and_fast_recoveries() {
+        let rows = vec![
+            row(".opendistro_security", "init", 3, 0),
+            row("logs-2026.09", "index", RESTART_WEDGE_AFTER_SECS * 3, 4_096),
+            row("logs-2026.09", "done", 9_999_999, 0),
+        ];
+        assert_eq!(restart_wave_should_remediate(&rows, None), None);
+    }
+
+    #[test]
+    fn restart_wave_remediation_respects_budget_and_shared_cooldown() {
+        use std::time::Duration;
+        // One second under the budget must NOT fire; the budget second must.
+        let almost = vec![row(
+            ".opendistro_security",
+            "init",
+            RESTART_WEDGE_AFTER_SECS - 1,
+            0,
+        )];
+        assert_eq!(restart_wave_should_remediate(&almost, None), None);
+        let at = vec![row(
+            ".opendistro_security",
+            "init",
+            RESTART_WEDGE_AFTER_SECS,
+            0,
+        )];
+        assert!(restart_wave_should_remediate(&at, None).is_some());
+        // The cooldown is the SAME one #27 fires under — one bounce episode
+        // at a time, whichever trigger armed it.
+        assert_eq!(
+            restart_wave_should_remediate(&at, Some(Duration::from_secs(60))),
+            None
+        );
+        let just_under = REMEDIATE_COOLDOWN - Duration::from_secs(1);
+        assert_eq!(restart_wave_should_remediate(&at, Some(just_under)), None);
+        assert!(restart_wave_should_remediate(&at, Some(REMEDIATE_COOLDOWN)).is_some());
+    }
+
+    #[test]
+    fn a_wave_is_in_progress_only_while_the_operator_is_rolling() {
+        // The incident: CR `RollingRestart InProgress`, every pod ready.
+        assert!(restart_wave_in_progress(
+            true,
+            1,
+            3,
+            &[("RollingRestart".into(), "Running".into())]
+        ));
+        // The other roll signal: pods still converging on the revision.
+        assert!(restart_wave_in_progress(true, 1, 3, &[]));
+        // The component row alone carries it, even late in the roll.
+        assert!(restart_wave_in_progress(
+            true,
+            3,
+            3,
+            &[("RollingRestart".into(), "Running".into())]
+        ));
+        // Finished roll: nothing to watch.
+        assert!(!restart_wave_in_progress(
+            true,
+            3,
+            3,
+            &[("RollingRestart".into(), "Finished".into())]
+        ));
+        // First boot: slow security recoveries are the bootstrap's normal
+        // price, and the wave watch must never fire into a create.
+        assert!(!restart_wave_in_progress(false, 0, 3, &[]));
+        assert!(!restart_wave_in_progress(
+            false,
+            0,
+            3,
+            &[("RollingRestart".into(), "Running".into())]
+        ));
+    }
+
+    /// The restore half: the throttle comes back only once nothing sits in
+    /// `init` at zero bytes, and the hand-back body is the honest opposite
+    /// of the #27 raise — `null` removes the transient override entirely.
+    #[test]
+    fn a_settled_wave_hands_the_throttle_back() {
+        // Anything still wedged — even seconds old — holds the raise.
+        assert!(!wave_settled(&[row(".opendistro_security", "init", 5, 0)]));
+        // Bytes moving, recoveries finished, or the cluster quiet: hand it back.
+        assert!(wave_settled(&[row(
+            ".opendistro_security",
+            "index",
+            5,
+            4_096
+        )]));
+        assert!(wave_settled(&[row(
+            ".opendistro_security",
+            "done",
+            9_999,
+            208
+        )]));
+        assert!(wave_settled(&[]));
+
+        let body = restore_throttle_payload();
+        assert_eq!(
+            body["transient"]["cluster.routing.allocation.node_concurrent_recoveries"],
+            serde_json::Value::Null,
+            "the reset removes the override; it does not pin another number"
+        );
+    }
+
+    /// The wave watch fills a gap in the stall diagnosis and never
+    /// overwrites it — the diagnosis ran for the verdict, its answers win.
+    #[test]
+    fn wave_facts_fill_the_diagnosis_without_overwriting_it() {
+        use crate::activity::ClusterBlock;
+        let wave = ClusterBlock {
+            unassigned_shards: -1,
+            recovery_index: ".opendistro_security".into(),
+            recovery_stage: "init".into(),
+            recovery_secs: 2_808,
+            remediated_node: Some("demo0-nodes-1".into()),
+        };
+        // A diagnosis that answered keeps every one of its answers.
+        let full = ClusterBlock {
+            unassigned_shards: 7,
+            recovery_index: "logs-2026.09".into(),
+            recovery_stage: "index".into(),
+            recovery_secs: 90,
+            remediated_node: Some("demo0-nodes-0".into()),
+        };
+        let merged = merge_cluster_facts(full.clone(), Some(wave.clone()));
+        assert_eq!(merged, full);
+        // A diagnosis that came back empty gains the wave's facts.
+        let empty = ClusterBlock::default();
+        let merged = merge_cluster_facts(empty, Some(wave));
+        assert_eq!(merged.recovery_index, ".opendistro_security");
+        assert_eq!(merged.recovery_stage, "init");
+        assert_eq!(merged.recovery_secs, 2_808);
+        assert_eq!(merged.remediated_node.as_deref(), Some("demo0-nodes-1"));
+        // No wave, no change.
+        assert_eq!(
+            merge_cluster_facts(ClusterBlock::default(), None),
+            ClusterBlock::default()
+        );
     }
 
     // ── per-tenant isolation primitives (#81, ADR-044/051) ─────────────
