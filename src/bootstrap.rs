@@ -88,7 +88,7 @@ const NODE_LOCAL_PROVISIONERS: &[&str] = &[
     "openebs.io/local",
 ];
 
-fn provisioner_is_node_local(p: &str) -> bool {
+pub(crate) fn provisioner_is_node_local(p: &str) -> bool {
     p.contains("hostpath") || NODE_LOCAL_PROVISIONERS.contains(&p)
 }
 

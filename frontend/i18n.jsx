@@ -26,6 +26,7 @@ const STR = {
     // overview summary tiles
     ov_ingestion: "Ingestão",
     ov_storage: "Armazenamento",
+    ov_storage_not_enforced: "dados — capacidade do disco do nó não é garantida (local-path)",
     ov_receiving: "recebendo",
     ov_no_monitors: "nenhum monitor instalado",
     ov_no_data: "sem dados chegando",
@@ -605,6 +606,7 @@ const STR = {
     // overview summary tiles
     ov_ingestion: "Ingestion",
     ov_storage: "Storage",
+    ov_storage_not_enforced: "data — node disk capacity not enforced (local-path)",
     ov_receiving: "receiving",
     ov_no_monitors: "no monitors installed",
     ov_no_data: "no data arriving",
@@ -1178,6 +1180,7 @@ const STR = {
     // tiles del resumen del overview
     ov_ingestion: "Ingesta",
     ov_storage: "Almacenamiento",
+    ov_storage_not_enforced: "datos — capacidad del disco del nodo no garantizada (local-path)",
     ov_receiving: "recibiendo",
     ov_no_monitors: "ningún monitor instalado",
     ov_no_data: "no llegan datos",

@@ -127,10 +127,52 @@ pub async fn node_stats(deployment: &Deployment) -> Result<ClusterMetrics> {
         }
     }
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // #95: does the provisioner behind the data PVCs actually ENFORCE the
+    // requested capacity? Node-local ones (local-path, hostpath,
+    // no-provisioner) never do — under them `fs.data` IS the node root disk,
+    // so "used" would sum the whole node (OS, images, everything) against an
+    // advisory request and print figures like 164%. Explicitly-pinned classes
+    // are classified by provisioner; PVCs riding the cluster default (the
+    // ADR-061 shapes) fall back to the storage classifier. Best-effort: no
+    // PVC info or an unresolvable class degrades to `true`, the long-standing
+    // reading — the UI hint must never fire spuriously.
+    let sc_names: Vec<&str> = {
+        let mut names: Vec<&str> = pvcs
+            .values()
+            .map(|p| p.storage_class.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    };
+    let capacity_enforced = if sc_names.is_empty() {
+        match crate::k8s::client().await {
+            Ok(client) => !matches!(
+                crate::bootstrap::classify_storage(&client).await,
+                Ok(crate::bootstrap::DeploymentStorage::NodeLocal(_))
+            ),
+            Err(_) => true,
+        }
+    } else {
+        let provisioners = crate::k8s::storage_class_provisioners().await;
+        sc_names.iter().all(|name| {
+            provisioners
+                .get(*name)
+                .map(|p| !crate::bootstrap::provisioner_is_node_local(p))
+                .unwrap_or(true)
+        })
+    };
+
     Ok(ClusterMetrics {
         nodes,
         total_docs,
         store_size_bytes,
+        // The real data footprint (summed above, node by node) — what the UI
+        // shows against the requested capacity when capacity isn't enforced.
+        data_used_bytes: store_size_bytes,
+        capacity_enforced,
     })
 }
 
