@@ -8,6 +8,13 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- Stalled deployments now show the real blocker on the stalled view: a
+  probe-kill loop (the kubelet restarting the container on failed startup
+  probes) surfaces as a first-class fact with per-pod restart counts, the
+  last terminated reason and exit code — read from the pod object the app
+  already lists, no new RBAC and no logs (#97).
+
 ### Fixed
 - Rolling restarts no longer wedge on security-index peer recovery stuck in
   `init` — the #27 remediation now covers restart waves (#96). While the
@@ -16,6 +23,10 @@ are called out explicitly.
   `node_concurrent_recoveries` raise + bounce of the one node holding the
   wedged shard), and the raised setting is handed back once the recoveries
   drain. The stalled banner already names the recovery and the bounced pod.
+- Storage usage on the deployment Overview shows the actual OpenSearch data
+  size and marks capacity as not enforced under node-local provisioners
+  (local-path), instead of summing each node's whole root disk against the
+  PVC requests and printing figures like 164% (#95).
 
 ## [0.10.3] - 2026-09-20
 
