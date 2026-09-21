@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-09-21
+
 ### Added
 - Stalled deployments now show the real blocker on the stalled view: a
   probe-kill loop (the kubelet restarting the container on failed startup
