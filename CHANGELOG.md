@@ -8,6 +8,13 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- Stalled deployments now show the real blocker on the stalled view: a
+  probe-kill loop (the kubelet restarting the container on failed startup
+  probes) surfaces as a first-class fact with per-pod restart counts, the
+  last terminated reason and exit code — read from the pod object the app
+  already lists, no new RBAC and no logs (#97).
+
 ### Fixed
 - Storage usage on the deployment Overview shows the actual OpenSearch data
   size and marks capacity as not enforced under node-local provisioners
