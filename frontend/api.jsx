@@ -328,12 +328,17 @@ function adaptNodeStat(ns) {
   };
 }
 
-// ClusterMetrics -> { nodes:[…], total_docs, store_size_bytes }
+// ClusterMetrics -> { nodes:[…], total_docs, store_size_bytes, … }
 function adaptMetrics(metrics) {
   return {
     nodes: (metrics?.nodes || []).map(adaptNodeStat),
     total_docs: metrics?.total_docs || 0,
     store_size_bytes: metrics?.store_size_bytes || 0,
+    // #95: the honest figures — actual OpenSearch data size, and whether the
+    // provisioner enforces the requested capacity. An absent flag (old
+    // backend) reads as enforced so the hint never fires spuriously.
+    data_used_bytes: metrics?.data_used_bytes ?? (metrics?.store_size_bytes || 0),
+    capacity_enforced: metrics?.capacity_enforced ?? true,
   };
 }
 

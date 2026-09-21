@@ -52,6 +52,15 @@ returns one of four states — `Longhorn`, `ForeignDefault`, `NodeLocal`,
 `needs_longhorn`, and `durable` is true for `Longhorn` + `ForeignDefault`
 (`describe_storage`).
 
+**Capacity enforcement is a property of the provisioner.** A CSI provisioner
+(Longhorn, EBS, Ceph…) enforces the PVC request; a node-local one does not —
+under `local-path` the data path is the node's **root disk** (OS, container
+images, everything) and the request is advisory. The deployment Overview
+therefore reports the *actual OpenSearch data size* against the requested
+capacity and marks node-local-backed deployments as capacity-not-enforced
+(`capacity_enforced`, #95). The node's real root-disk usage still matters —
+to kubelet DiskPressure, not to the storage figure.
+
 **When it fires.** The Longhorn install is **deferred to first deployment-create**,
 not run during the initial bootstrap (`run_install` step 4 explicitly installs
 nothing here). The storage-ready gate `ensure_storage_ready` runs at the top of

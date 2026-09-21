@@ -26,6 +26,7 @@ const STR = {
     // overview summary tiles
     ov_ingestion: "Ingestão",
     ov_storage: "Armazenamento",
+    ov_storage_not_enforced: "dados — capacidade do disco do nó não é garantida (local-path)",
     ov_receiving: "recebendo",
     ov_no_monitors: "nenhum monitor instalado",
     ov_no_data: "sem dados chegando",
@@ -353,6 +354,11 @@ const STR = {
     act_stall_remediated: "O nó travado ({0}) foi reiniciado automaticamente para liberar a recuperação.",
     act_stall_dashboards: "O Dashboards está em {0} ({1} reinícios) — a primeira migração pode ter sido interrompida.",
     act_stall_dashboards_remediated: "O índice .kibana_1 travado foi excluído e o Dashboards reiniciado automaticamente.",
+    // #97: o que o próprio pod do nó relata — o kubelet mata o contêiner
+    // (SIGTERM) quando o startup probe falha; o vocabulário do cluster
+    // (Error, CrashLoopBackOff) cruza a rede verbatim.
+    act_stall_probe_kill: "Startup probe falhando — contêiner reiniciado {0}x (último: {1}, código de saída {2}).",
+    act_stall_pod_restarts: "O pod do nó foi reiniciado {0} vezes (último: {1}).",
     single_copy_h: "1 cópia dos dados",
     single_copy_p: "este cluster tem {0} nó(s) — cada volume terá uma única cópia no Longhorn. Perder o nó perde os dados; configure snapshots (aba Backup) antes de confiar neste deployment.",
     kernel_bad_h: "OpenSearch 3.8.0 × kernel 6.1.0-52: incompatível",
@@ -605,6 +611,7 @@ const STR = {
     // overview summary tiles
     ov_ingestion: "Ingestion",
     ov_storage: "Storage",
+    ov_storage_not_enforced: "data — node disk capacity not enforced (local-path)",
     ov_receiving: "receiving",
     ov_no_monitors: "no monitors installed",
     ov_no_data: "no data arriving",
@@ -932,6 +939,11 @@ const STR = {
     act_stall_remediated: "The wedged node ({0}) was restarted automatically to release the recovery.",
     act_stall_dashboards: "Dashboards is in {0} ({1} restarts) — its first migration may have been interrupted.",
     act_stall_dashboards_remediated: "The wedged .kibana_1 index was deleted and Dashboards restarted automatically.",
+    // #97: what the node pod itself reports — the kubelet kills the container
+    // (SIGTERM) when its startup probe keeps failing; the cluster's vocabulary
+    // (Error, CrashLoopBackOff) crosses the wire verbatim.
+    act_stall_probe_kill: "Startup probe failing — container restarted {0}x (last: {1}, exit code {2}).",
+    act_stall_pod_restarts: "The node pod was restarted {0} times (last: {1}).",
     act_stall_component: "The operator has not finished {0} ({1}).",
     act_stall_unknown: "The cluster gave no reason. Open Details below: the Events and pod state are what is left.",
     act_stall_serving: "This is not an outage: primaries are up, the cluster is serving and still indexing. What has not finished is converging.",
@@ -1178,6 +1190,7 @@ const STR = {
     // tiles del resumen del overview
     ov_ingestion: "Ingesta",
     ov_storage: "Almacenamiento",
+    ov_storage_not_enforced: "datos — capacidad del disco del nodo no garantizada (local-path)",
     ov_receiving: "recibiendo",
     ov_no_monitors: "ningún monitor instalado",
     ov_no_data: "no llegan datos",
@@ -1508,6 +1521,11 @@ const STR = {
     act_stall_remediated: "El nodo bloqueado ({0}) se reinició automáticamente para liberar la recuperación.",
     act_stall_dashboards: "Dashboards está en {0} ({1} reinicios) — su primera migración pudo haber sido interrumpida.",
     act_stall_dashboards_remediated: "El índice .kibana_1 bloqueado fue eliminado y Dashboards se reinició automáticamente.",
+    // #97: lo que el propio pod del nodo reporta — el kubelet mata el
+    // contenedor (SIGTERM) cuando su startup probe sigue fallando; el
+    // vocabulario del clúster (Error, CrashLoopBackOff) cruza la red verbatim.
+    act_stall_probe_kill: "Startup probe fallando — contenedor reiniciado {0}x (último: {1}, código de salida {2}).",
+    act_stall_pod_restarts: "El pod del nodo se reinició {0} veces (último: {1}).",
     act_stall_component: "El operator no ha terminado {0} ({1}).",
     act_stall_unknown: "El clúster no dio un motivo. Abre los Detalles de abajo: los Events y el estado de los pods es lo que queda.",
     act_stall_serving: "Esto no es una caída: las primarias están en marcha, el clúster atiende y sigue indexando. Lo que no ha terminado es la convergencia.",
