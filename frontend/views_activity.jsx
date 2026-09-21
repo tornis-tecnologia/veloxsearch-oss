@@ -104,6 +104,17 @@ function StallNotice({ a, lang }) {
   // #27: what the app already DID about it — stated as a fact, only after
   // the bounce happened (the backend sets the field on success).
   if (b.remediated_node) lines.push(fmt(t.act_stall_remediated, b.remediated_node));
+  // #97: the node pod's own account of the stall. A probe kill is named as
+  // such — the kubelet SIGTERMs the container when its startup probe keeps
+  // failing — with the restart count and the last exit; anything else the
+  // pod reports (`Error`/`CrashLoopBackOff`, the cluster's own words) still
+  // shows as plain restarts. All of it rides the pod object the server
+  // already lists; no logs are read.
+  if (b.nodes_probe_kill) {
+    lines.push(fmt(t.act_stall_probe_kill, b.nodes_restarts, b.nodes_last_reason || "?", b.nodes_last_exit_code >= 0 ? b.nodes_last_exit_code : "?"));
+  } else if (b.nodes_restarts >= 0 && (b.nodes_last_reason || b.nodes_waiting)) {
+    lines.push(fmt(t.act_stall_pod_restarts, b.nodes_restarts, b.nodes_last_reason || b.nodes_waiting));
+  }
   // #46: the dashboards rung's own account — restarts and the verbatim
   // waiting reason, and what a previous pass already did about the deadlock.
   if (b.dashboards_restarts >= 0) {

@@ -2569,6 +2569,7 @@ async fn status_from(
                 since_secs: 0,
                 cluster: None,
                 dashboards: None,
+                nodes: None,
             })
         }
     } else {
@@ -2596,6 +2597,7 @@ async fn status_from(
             .await,
             cluster: None,
             dashboards: None,
+            nodes: None,
         };
         // Two passes, on purpose (issue #131). The first is the pure verdict
         // from Kubernetes alone; only if THAT says the deployment has been
@@ -2609,6 +2611,11 @@ async fn status_from(
             first
         } else {
             input.cluster = Some(stall_diagnosis_in(&obj_ns, &name).await);
+            // #97: the node-pool pods' own account of the same stall — the
+            // worst container's restart count and last terminated reason.
+            // One `pods` read per cache window, gated on the stall like every
+            // other diagnosis, so it changes nothing for a healthy cluster.
+            input.nodes = Some(node_pod_block_in(&obj_ns, &name).await);
             // #46: a stall that landed exactly on the dashboards rung (nodes
             // green, security done, Dashboards never ready) has its own
             // question to ask — and its own remediation to arm. The fetch is
@@ -3358,6 +3365,115 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
     }
 
     if let Ok(mut cache) = dashboards_cache().lock() {
+        cache.retain(|_, (at, _)| at.elapsed() < DIAGNOSIS_TTL * 20);
+        cache.insert(key, (std::time::Instant::now(), out.clone()));
+    }
+    out
+}
+
+/// TTL cache for the node-pod half (#97), same contract as `diagnosis_cache`:
+/// the SSE loop asks every 3s, and the answer is only paid for by deployments
+/// that are actually stalled.
+type NodePodCache = std::sync::Mutex<
+    std::collections::HashMap<String, (std::time::Instant, crate::activity::NodesBlock)>,
+>;
+
+fn node_pod_cache() -> &'static NodePodCache {
+    static CACHE: std::sync::OnceLock<NodePodCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// The node-pool pods' half of a stall (#97): the worst container's restart
+/// count, `lastState.terminated` (reason, exit code) and waiting reason, from
+/// the same `pods` read `node_pool_age_secs` already makes — NOT the container
+/// logs (see [`crate::activity::NodesBlock`] for why that refusal stands, and
+/// ADR-044 for the grant it would need). Memoized per [`DIAGNOSIS_TTL`], and
+/// only ever called for a deployment `activity::evaluate` already called
+/// stalled, so an unstalled deployment pays nothing.
+///
+/// "Worst" is the most-restarted container across the pool — the one whose
+/// death is the story; a healthy sibling must not soften it, the same rule
+/// `dashboards_block_in` applies. Whether the loop is a probe-kill loop is
+/// [`crate::activity::is_probe_kill_loop`]'s call, fed with the "probe"
+/// spelling from the waiting/terminated reason chain when the cluster says it.
+async fn node_pod_block_in(namespace: &str, name: &str) -> crate::activity::NodesBlock {
+    let key = format!("{namespace}/{name}");
+    if let Ok(cache) = node_pod_cache().lock() {
+        if let Some((at, hit)) = cache.get(&key) {
+            if at.elapsed() < DIAGNOSIS_TTL {
+                return hit.clone();
+            }
+        }
+    }
+
+    let mut out = crate::activity::NodesBlock::default();
+    let prefix = format!("{name}-nodes-");
+    if let Ok(client) = client().await {
+        use k8s_openapi::api::core::v1::Pod;
+        let pods: Api<Pod> = Api::namespaced(client, namespace);
+        if let Ok(list) = pods.list(&ListParams::default()).await {
+            for pod in list {
+                if !pod
+                    .metadata
+                    .name
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with(&prefix))
+                {
+                    continue;
+                }
+                let Some(status) = pod.status else { continue };
+                let pod_name = pod.metadata.name.clone().unwrap_or_default();
+                for cs in status.container_statuses.unwrap_or_default() {
+                    // The worst container is the story; a healthy sibling
+                    // replica must not soften it (same rule as the
+                    // Dashboards half).
+                    if cs.restart_count <= out.restarts {
+                        continue;
+                    }
+                    let waiting = cs.state.and_then(|s| s.waiting);
+                    let terminated = cs.last_state.and_then(|s| s.terminated);
+                    // "Startup probe failed" / "failed startup probe" —
+                    // wherever the waiting/terminated reason chain says it,
+                    // the loop is a probe's. Borrowed first, moved after.
+                    let chain = [
+                        waiting.as_ref().and_then(|w| w.reason.as_deref()),
+                        waiting.as_ref().and_then(|w| w.message.as_deref()),
+                        terminated.as_ref().and_then(|t| t.reason.as_deref()),
+                        terminated.as_ref().and_then(|t| t.message.as_deref()),
+                    ];
+                    let probe_named = chain
+                        .iter()
+                        .flatten()
+                        .any(|s| s.to_ascii_lowercase().contains("probe"));
+                    out.restarts = cs.restart_count;
+                    out.pod = pod_name.clone();
+                    out.container = cs.name.clone();
+                    // The cluster's own vocabulary, kept verbatim — the
+                    // panel words it, the wire never does.
+                    out.waiting_reason = waiting
+                        .and_then(|w| w.reason)
+                        .filter(|r| !r.is_empty())
+                        .unwrap_or_default();
+                    if let Some(term) = terminated {
+                        out.last_reason = term.reason.filter(|r| !r.is_empty()).unwrap_or_default();
+                        // 143 = the kubelet's SIGTERM — the probe-kill
+                        // signature `is_probe_kill_loop` looks for.
+                        out.last_exit_code = term.exit_code;
+                    }
+                    out.probe_kill = crate::activity::is_probe_kill_loop(
+                        out.restarts,
+                        &out.last_reason,
+                        out.last_exit_code,
+                        probe_named,
+                    );
+                }
+            }
+        }
+    }
+
+    if let Ok(mut cache) = node_pod_cache().lock() {
+        // Deleted deployments would otherwise leak an entry each (same
+        // retention as the other two halves).
         cache.retain(|_, (at, _)| at.elapsed() < DIAGNOSIS_TTL * 20);
         cache.insert(key, (std::time::Instant::now(), out.clone()));
     }
