@@ -8,6 +8,12 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- Storage usage on the deployment Overview shows the actual OpenSearch data
+  size and marks capacity as not enforced under node-local provisioners
+  (local-path), instead of summing each node's whole root disk against the
+  PVC requests and printing figures like 164% (#95).
+
 ## [0.10.3] - 2026-09-20
 
 ### Changed
