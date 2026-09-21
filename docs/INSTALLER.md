@@ -32,7 +32,9 @@ cargo build --release --bin velox     # target/release/velox
 ```
 velox init [OPTIONS]
 
-  --pull-token <TOKEN>       Registry password or token. When given, velox
+  --pull-token <TOKEN>       DEPRECATED — creates a Secret that has no
+                             effect on the default catalog. Prefer the manual
+                             Secret (docs/SECRETS.md). When given, velox
                              creates a kubernetes.io/dockerconfigjson Secret in
                              veloxsearch-system BEFORE applying the manifest.
                              Omit it to install with no secret.
@@ -52,16 +54,21 @@ CLI and the manifest are therefore always the same version, and there is no
 ## Private-mirror install
 
 ```sh
-velox init \
-  --registry registry.example.com \
-  --pull-user velox-deploy \
-  --pull-token "$TOKEN"
+# 1. create the pull Secret manually (canonical — docs/SECRETS.md):
+kubectl -n veloxsearch-system create secret docker-registry velox-pull \
+  --docker-server=registry.example.com --docker-username=velox-deploy \
+  --docker-password="$TOKEN"
+
+# 2. apply the manifest:
+velox init --registry registry.example.com
 ```
 
-This creates the `velox-pull` Secret in `veloxsearch-system`, then applies the
-manifest. The manifest's `veloxsearch` ServiceAccount does **not** reference
-`velox-pull` — it ships without `imagePullSecrets`, because the default image is
-public — so attach the Secret, then point the Deployment at your mirror:
+`velox init --pull-token "$TOKEN" --registry …` still applies the manifest and
+creates the Secret, but the flag is **deprecated** (no effect on the default
+catalog) and prints a deprecation warning. The manifest's `veloxsearch`
+ServiceAccount does **not** reference `velox-pull` — it ships without
+`imagePullSecrets`, because the default image is public — so attach the
+Secret, then point the Deployment at your mirror:
 
 ```sh
 kubectl -n veloxsearch-system patch serviceaccount veloxsearch \
@@ -77,7 +84,8 @@ when it is created, and `set image` is what creates the new pod.
 
 ```sh
 velox init --dry-run
-velox init --dry-run --pull-token fake | less
+velox init --dry-run | less
+# (the pull Secret is created manually — docs/SECRETS.md)
 ```
 
 `--dry-run` lists every object it would apply — as `Kind/name (namespace)`, plus

@@ -143,7 +143,10 @@ kubectl -n veloxsearch-system set image deploy/veloxsearch \
 
 The ServiceAccount patch must come before `set image`: a pod picks up its
 ServiceAccount's pull secrets when it is created, and `set image` is what creates
-the new pod. `velox init --pull-token` creates the same `velox-pull` Secret
+the new pod. create the same `velox-pull` Secret manually (see
+[SECRETS.md](SECRETS.md#private-registry-pull-credentials); the
+`velox init --pull-token` path is deprecated and has no effect on the
+default catalog)
 before applying the manifest it was built with; the ServiceAccount patch and the
 image change are still yours to do — see [`INSTALLER.md`](INSTALLER.md).
 
@@ -426,7 +429,8 @@ it. See [`integrations/signing.md`](integrations/signing.md).
 - **Air-gapped:** the **side-load + `kubectl apply`** path (§2c, §3) still works
   for clusters with no registry egress, and is what the conformance fleet runs.
 - **Private mirror:** if you mirror the image into a private registry, create
-  the `velox-pull` Secret (by hand or with `velox init --pull-token`), attach it
+  the `velox-pull` Secret by hand (see
+[SECRETS.md](SECRETS.md#private-registry-pull-credentials)), attach it
   to the `veloxsearch` ServiceAccount — the manifest ships it without
   `imagePullSecrets` — and point the Deployment at your mirror (§2b).
 

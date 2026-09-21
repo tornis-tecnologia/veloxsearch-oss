@@ -135,12 +135,16 @@ configuration.
 Only needed if you pull the image from a private mirror; the default image is
 public and needs none.
 
+Create the `velox-pull` Secret manually (canonical):
+
 ```sh
-velox init --pull-token <token> --pull-user <user> --registry <host>
+kubectl -n veloxsearch-system create secret docker-registry velox-pull \
+  --docker-server=<host> --docker-username=<user> --docker-password=<token>
 ```
 
-This creates a `kubernetes.io/dockerconfigjson` Secret named `velox-pull` in
-`veloxsearch-system` before applying the manifest. See
+`velox init --pull-token <token> --pull-user <user> --registry <host>` also
+creates this Secret, but the flag is **deprecated** — it has no effect on the
+default public catalog and will print a deprecation warning. See
 [INSTALLER.md](INSTALLER.md).
 
 ### Integration registry token
