@@ -27,6 +27,11 @@ base, user, pw = sys.argv[1], sys.argv[2], sys.argv[3]
 errors, console = [], []
 
 
+def detail_tab(n_from_end):
+    """The Nth-from-last button of the deployment-detail nav (the last nav.tabs)."""
+    return page.locator("nav.tabs").last.locator(f"button:nth-last-child({n_from_end})")
+
+
 def fail(msg):
     print("FAIL:", msg)
     sys.exit(1)
@@ -112,16 +117,17 @@ with sync_playwright() as p:
     # lift. The sentinel (reset-pass) only RENDERS on the Security tab — go
     # there first, then wait for it enabled (it stays disabled while busy).
     page.wait_for_selector("nav.tabs", timeout=20000)
-    page.click("nav.tabs button:nth-last-child(2)")
+    detail_tab(2).click()
     page.wait_for_selector('[data-testid="reset-pass"]:not([disabled])', timeout=1800000)
     print(f"  {dep_name} settled (edits unlocked)")
 
     # 4. detail tabs: the global nav STAYS inside a deployment (app.jsx:
     #    "Global navigation stays put inside a deployment too") — the single
-    #    nav.tabs holds the 4 top tabs followed by the 6 detail tabs
+    #    page holds TWO nav.tabs: the 4 top tabs, then the 6 detail tabs
     #    (Overview / Edit / Integrations / Snapshot / Security / Auth).
-    #    Address detail tabs positionally from the END so the global tab
-    #    count can change without breaking this.
+    #    Detail tabs are addressed inside the LAST nav, positionally from the
+    #    end — a bare `nav.tabs button:nth-last-child(N)` resolves in the FIRST
+    #    nav (top tabs) and navigates away from the deployment.
     page.wait_for_selector("nav.tabs", timeout=20000)
     page.wait_for_timeout(1000)
     n_tabs = page.locator("nav.tabs button").count()
@@ -129,7 +135,7 @@ with sync_playwright() as p:
         fail(f"expected 6 detail tabs after the 4 global ones, got {n_tabs - 4}")
 
     # 5. Edit tab: size <select>, automatic (disabled) JVM field, NO purpose cards.
-    page.click("nav.tabs button:nth-last-child(5)")
+    detail_tab(5).click()
     page.wait_for_selector("select.select", timeout=10000)
     jvm = [page.locator("input[disabled]").nth(i).input_value()
            for i in range(page.locator("input[disabled]").count())]
@@ -145,7 +151,7 @@ with sync_playwright() as p:
     #    password inputs. Assert the reset action + its confirm modal exist
     #    (and cancel out: this journey must not rotate credentials).
     import re as _re
-    page.click("nav.tabs button:nth-last-child(2)")
+    detail_tab(2).click()
     page.wait_for_timeout(800)
     n_pw = page.locator('input[type="password"]').count()
     if n_pw != 0:
@@ -158,7 +164,7 @@ with sync_playwright() as p:
 
     # 7. cleanup — delete via the stable hooks (#33): the danger-zone
     #    delete-deployment button arms the modal, delete-confirm commits it.
-    page.click("nav.tabs button:nth-last-child(6)")  # overview
+    detail_tab(6).click()  # overview
     page.wait_for_timeout(500)
     page.click('[data-testid="delete-deployment"]')        # arm: opens the Confirm modal
     page.wait_for_selector('[data-testid="delete-confirm"]', timeout=5000)
