@@ -196,9 +196,12 @@ def main():
         **_echo(d), "memory": "100Gi"}, "62Gi")
     expect_refusal("weak admin password", "reset_admin_password", {
         "name": name, "new_password": "short"}, "8 characters")
+    # The ownership layer (#80, ADR-044) answers a missing AND a foreign
+    # deployment with the same anti-enumeration 404 — assert that wording, not
+    # the pre-#80 "no deployment named ..." one, which is no longer reachable.
     expect_refusal("password reset on missing deployment", "reset_admin_password", {
         "name": "day2-does-not-exist", "new_password": "LongEnough1_"},
-        "no deployment")
+        "deployment not found")
     for f in ("memory", "disk", "replicas"):
         if str(get_deployment(name)[f]) != str({"memory": base_mem, "disk": base_disk,
                                                 "replicas": base_nodes}[f]):
