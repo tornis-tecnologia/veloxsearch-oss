@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-09-24
+
 ### Changed
 - `velox init --pull-token` is deprecated and now prints a deprecation
   warning (the pull Secret it creates has no effect on the default catalog);
