@@ -14,6 +14,21 @@ are called out explicitly.
   every doc that taught the flag now leads with the manual `velox-pull`
   Secret procedure, canonical in SECRETS.md (#74).
 
+### Fixed
+- A rolling restart wedged on a recovery stuck in `init` now actually gets
+  remediated on fresh installs. The #27/#96 remediation armed, but its pod
+  bounce was forbidden: the runtime RBAC had no pod `delete`, and only
+  installs still holding the bootstrap cluster-admin binding could bounce.
+  The grant is namespaced to `veloxsearch-system`, never cluster-wide.
+- The Dashboards survivability patch (#46) lands again. Setting `Recreate`
+  by server-side apply collided with the API server's defaulted
+  `rollingUpdate`, and the whole patch was rejected, including the
+  30-minute startup-probe budget. The strategy now goes through a merge
+  patch that removes `rollingUpdate`.
+- `tests/journey_check.py` addresses detail tabs inside the deployment's own
+  `nav.tabs`, and `tests/day2_check.py` expects the #80 anti-enumeration
+  refusal (`deployment not found`).
+
 ## [0.10.4] - 2026-09-21
 
 ### Added
