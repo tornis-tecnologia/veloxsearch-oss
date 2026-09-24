@@ -154,6 +154,15 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "delete"]
+  # Stall remediation (#27/#96): bounce the ONE OpenSearch node pod holding a
+  # recovery wedged in `init`; the operator's StatefulSet recreates it.
+  # Namespaced on purpose — never a cluster-wide pod delete. Without it the
+  # remediation arms and is FORBIDDEN on every fresh install (the bootstrap
+  # cluster-admin binding is revoked after first run, ADR-027), so a wedged
+  # rolling restart stays yellow forever.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
@@ -328,7 +337,7 @@ spec:
           # `kubectl apply` of a floating tag makes the running version a
           # function of when the pod last restarted. The release job rewrites
           # this line, so the manifest and the binary are always one artifact.
-          image: docker.io/tornistecnologia/veloxsearch-oss:0.10.4
+          image: docker.io/tornistecnologia/veloxsearch-oss:0.10.5
           imagePullPolicy: IfNotPresent
           # Container hardening (#118). The image already runs as uid 10001, but
           # an image USER is a default a cluster can override; this makes it a
