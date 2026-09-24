@@ -154,6 +154,15 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "delete"]
+  # Stall remediation (#27/#96): bounce the ONE OpenSearch node pod holding a
+  # recovery wedged in `init`; the operator's StatefulSet recreates it.
+  # Namespaced on purpose — never a cluster-wide pod delete. Without it the
+  # remediation arms and is FORBIDDEN on every fresh install (the bootstrap
+  # cluster-admin binding is revoked after first run, ADR-027), so a wedged
+  # rolling restart stays yellow forever.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]

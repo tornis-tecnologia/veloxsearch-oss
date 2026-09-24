@@ -4034,13 +4034,47 @@ async fn ensure_dashboards_survivability(client: &Client, namespace: &str, name:
 
     let deploy: Api<Deployment> = Api::namespaced(client.clone(), namespace);
     let object = format!("{name}-dashboards");
+    // Two patches, not one. The strategy CANNOT go through server-side apply:
+    // the API server defaults `strategy.rollingUpdate` at create time and
+    // attributes it to the operator's field manager, so an apply of
+    // `type: Recreate` merges next to it and the whole request is rejected
+    // ("spec.strategy.rollingUpdate: Forbidden: may not be specified when
+    // strategy `type` is 'Recreate'") — probe budget included. Observed on
+    // every deployment of the 2026-09-24 in-house e2e run. A JSON merge patch
+    // can null the defaulted block; the probe stays a field-managed apply.
+    if let Err(e) = deploy
+        .patch(
+            &object,
+            &PatchParams::default(),
+            &Patch::Merge(&survivability_strategy_patch()),
+        )
+        .await
+    {
+        tracing::warn!("#46 Recreate strategy for {namespace}/{object} failed: {e:#}");
+    }
     let pp = PatchParams::apply("veloxsearch-dashboards-survivability").force();
-    let manifest = serde_json::json!({
+    let manifest = survivability_probe_apply(namespace, &object);
+    if let Err(e) = deploy.patch(&object, &pp, &Patch::Apply(&manifest)).await {
+        tracing::warn!("#46 startup-probe budget for {namespace}/{object} failed: {e:#}");
+    }
+}
+
+/// #46 strategy: `Recreate`, with the API server's defaulted `rollingUpdate`
+/// explicitly removed (merge-patch `null`) — the two are mutually exclusive.
+fn survivability_strategy_patch() -> serde_json::Value {
+    serde_json::json!({
+        "spec": { "strategy": { "type": "Recreate", "rollingUpdate": null } }
+    })
+}
+
+/// #46 probe budget, claimed under our own field manager. Carries NO
+/// `strategy` — see `ensure_dashboards_survivability` for why.
+fn survivability_probe_apply(namespace: &str, object: &str) -> serde_json::Value {
+    serde_json::json!({
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": { "name": object, "namespace": namespace },
         "spec": {
-            "strategy": { "type": "Recreate" },
             "template": {
                 "spec": {
                     "containers": [{
@@ -4050,10 +4084,7 @@ async fn ensure_dashboards_survivability(client: &Client, namespace: &str, name:
                 }
             }
         }
-    });
-    if let Err(e) = deploy.patch(&object, &pp, &Patch::Apply(&manifest)).await {
-        tracing::warn!("#46 survivability patch for {namespace}/{object} failed: {e:#}");
-    }
+    })
 }
 
 /// Wait (bounded, best-effort) for the operator to materialize the Dashboards
@@ -6138,6 +6169,75 @@ pub async fn provision_tenant(t: &TenantIdentity, q: &TenantQuota) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #46 survivability patches ──────────────────────────────────────
+
+    #[test]
+    fn survivability_strategy_nulls_the_defaulted_rolling_update() {
+        let p = survivability_strategy_patch();
+        assert_eq!(p["spec"]["strategy"]["type"], "Recreate");
+        // present-and-null is the merge-patch delete; absent would keep the
+        // API server's default and the request would be rejected again
+        let strategy = p["spec"]["strategy"].as_object().unwrap();
+        assert!(strategy.contains_key("rollingUpdate"));
+        assert!(strategy["rollingUpdate"].is_null());
+    }
+
+    #[test]
+    fn survivability_probe_apply_never_claims_the_strategy() {
+        let m = survivability_probe_apply("ns", "d-dashboards");
+        assert!(m["spec"].get("strategy").is_none());
+        assert_eq!(
+            m["spec"]["template"]["spec"]["containers"][0]["startupProbe"]["failureThreshold"],
+            90
+        );
+    }
+
+    // ── runtime RBAC covers the #27/#96 bounce ─────────────────────────
+
+    #[test]
+    fn runtime_role_can_bounce_pods_in_the_app_namespace_only() {
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let docs: Vec<serde_yaml::Value> = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .filter(|v| !v.is_null())
+            .collect();
+        let grants_pod_delete = |v: &serde_yaml::Value| {
+            v["rules"].as_sequence().into_iter().flatten().any(|r| {
+                let has = |k: &str, x: &str| {
+                    r[k].as_sequence()
+                        .into_iter()
+                        .flatten()
+                        .any(|e| e.as_str() == Some(x))
+                };
+                has("apiGroups", "") && has("resources", "pods") && has("verbs", "delete")
+            })
+        };
+        let role = docs
+            .iter()
+            .find(|v| {
+                v["kind"].as_str() == Some("Role")
+                    && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+                    && v["metadata"]["namespace"].as_str() == Some("veloxsearch-system")
+            })
+            .expect("veloxsearch-system runtime Role");
+        assert!(
+            grants_pod_delete(role),
+            "the #27/#96 bounce needs pods/delete here"
+        );
+        let cluster = docs
+            .iter()
+            .find(|v| {
+                v["kind"].as_str() == Some("ClusterRole")
+                    && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+            })
+            .expect("runtime ClusterRole");
+        assert!(
+            !grants_pod_delete(cluster),
+            "pod delete must never be cluster-wide"
+        );
+    }
 
     // ── stall-remediation policy (#27) ─────────────────────────────────
     //
