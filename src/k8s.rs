@@ -3204,6 +3204,28 @@ fn should_remediate(
         && last_fired_ago.is_none_or(|ago| ago >= REMEDIATE_COOLDOWN)
 }
 
+/// The node to bounce for a wedged peer recovery: the SOURCE of a row in
+/// `init` with nothing transferred. Pure, over a `_cat/recovery?format=json`
+/// payload; `None` when no row shows the wedge (or it names no source — a
+/// store/snapshot recovery has none to bounce).
+fn wedged_recovery_source(v: &serde_json::Value) -> Option<String> {
+    v.as_array()?
+        .iter()
+        .find(|r| {
+            let stage = r.get("stage").and_then(|s| s.as_str()).unwrap_or("");
+            let bytes = r
+                .get("bytes_recovered")
+                .and_then(|b| b.as_i64().or_else(|| b.as_str()?.trim().parse().ok()))
+                .unwrap_or(0);
+            stage.eq_ignore_ascii_case("init") && bytes == 0
+        })?
+        .get("source_node")
+        .and_then(|n| n.as_str())
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && *n != "n/a" && *n != "-")
+        .map(str::to_string)
+}
+
 /// Break a wedged rolling restart, the sequence proven live on the
 /// conformance fleet's 30-hour stall (#27): the operator's node restart leaves
 /// dead peer-recovery sessions behind, they occupy OpenSearch's default TWO
@@ -3211,8 +3233,13 @@ fn should_remediate(
 /// including the one blocking green — queues behind them for eternity.
 ///
 /// 1. Raise the recovery throttle transiently: the queued recoveries flow.
-/// 2. Bounce the node holding the wedged recovery: a fresh JVM is a fresh
-///    recovery listener, and the operator tolerates the pod coming back.
+/// 2. Bounce the recovery's SOURCE node (the one serving the primary): its
+///    dead outgoing sessions are what hold the slots, and a fresh JVM
+///    releases them; the operator tolerates the pod coming back. Bouncing the
+///    TARGET only moves the stall — proven live 2026-09-24 on v0.10.5: target
+///    `nodes-0` bounced, every recovery re-wedged in `init` from source
+///    `nodes-1` for 15 min; bouncing `nodes-1` went green in 60 s (the same
+///    remedy the 2026-08 prod incidents needed, by hand).
 ///
 /// Both actions were validated by hand against the live stalled deployment
 /// (the restart walked 25% → 40% seconds later, first motion in a day and a
@@ -3238,28 +3265,46 @@ async fn remediate_wedged_recovery(namespace: &str, name: &str, index: &str) -> 
         tracing::warn!("#27 throttle raise for {namespace}/{name} failed: {e:#}");
     }
 
-    // 2. Name the node holding the wedged recovery — the INITIALIZING replica
-    //    of the index we already diagnosed. Its node name IS the pod name
-    //    (network.publish_host is the pod name by operator convention).
-    let node = auth(http.get(format!(
-        "{base}/_cat/shards/{index}?h=state,node&format=json"
+    // 2. Name the SOURCE of the wedged recovery (see step 2 above). Node
+    //    names ARE pod names (network.publish_host is the pod name by
+    //    operator convention). Fall back to the INITIALIZING replica's node
+    //    only when the recovery row cannot be read.
+    let recovery = auth(http.get(format!(
+        "{base}/_cat/recovery/{index}?active_only=true&h=stage,bytes_recovered,source_node,target_node&format=json"
     )))
     .send()
     .await
-    .ok()?
-    .json::<serde_json::Value>()
-    .await
-    .ok()?
-    .as_array()?
-    .iter()
-    .find(|r| {
-        r.get("state")
-            .and_then(|s| s.as_str())
-            .is_some_and(|s| s.eq_ignore_ascii_case("initializing"))
-    })?
-    .get("node")
-    .and_then(|n| n.as_str())?
-    .to_string();
+    .ok();
+    let source = match recovery {
+        Some(r) => r
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| wedged_recovery_source(&v)),
+        None => None,
+    };
+    let node = match source {
+        Some(n) => n,
+        None => auth(http.get(format!(
+            "{base}/_cat/shards/{index}?h=state,node&format=json"
+        )))
+        .send()
+        .await
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?
+        .as_array()?
+        .iter()
+        .find(|r| {
+            r.get("state")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("initializing"))
+        })?
+        .get("node")
+        .and_then(|n| n.as_str())?
+        .to_string(),
+    };
 
     // 3. The bounce. Best-effort by design: the operator owns the pod's
     //    lifecycle and will recreate it; our job was to clear the dead
@@ -6169,6 +6214,33 @@ pub async fn provision_tenant(t: &TenantIdentity, q: &TenantQuota) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #27/#96 bounce target: the recovery SOURCE ─────────────────────
+
+    #[test]
+    fn wedged_recovery_bounces_the_source_not_the_target() {
+        // the live 2026-09-24 shape: every wedged row sources from nodes-1
+        let v = serde_json::json!([
+            {"stage": "done", "bytes_recovered": "208", "source_node": "d-nodes-2", "target_node": "d-nodes-0"},
+            {"stage": "init", "bytes_recovered": "0", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
+            {"stage": "init", "bytes_recovered": 0, "source_node": "d-nodes-1", "target_node": "d-nodes-2"}
+        ]);
+        assert_eq!(wedged_recovery_source(&v).as_deref(), Some("d-nodes-1"));
+    }
+
+    #[test]
+    fn wedged_recovery_source_needs_a_real_wedge_and_a_source() {
+        let moving = serde_json::json!([
+            {"stage": "init", "bytes_recovered": "4096", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
+            {"stage": "index", "bytes_recovered": "0", "source_node": "d-nodes-1", "target_node": "d-nodes-2"}
+        ]);
+        assert_eq!(wedged_recovery_source(&moving), None);
+        let no_source = serde_json::json!([
+            {"stage": "init", "bytes_recovered": "0", "source_node": "n/a", "target_node": "d-nodes-0"}
+        ]);
+        assert_eq!(wedged_recovery_source(&no_source), None);
+        assert_eq!(wedged_recovery_source(&serde_json::json!({})), None);
+    }
 
     // ── #46 survivability patches ──────────────────────────────────────
 
