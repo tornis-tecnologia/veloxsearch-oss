@@ -33,6 +33,47 @@ jobs:
       - name: Every source file carries the licence header
         run: ./.github/scripts/check-headers.sh
 
+  # The repo's install.yaml must pin the image of the version this tree IS (#54).
+  # It drifted once: `main` said 0.9.0 in Cargo.toml while install.yaml still
+  # pinned 0.8.1, so `kubectl apply -f deploy/install.yaml` from a checkout
+  # silently rolled a 0.9.0 install back past its forward-only migrations. A
+  # release PR that forgets the tag bump now fails here, not in production.
+  manifest-version:
+    name: install.yaml pins the crate version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Image tag equals Cargo.toml version
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tags=$(sed -n 's|^[[:space:]]*image: docker\.io/tornistecnologia/veloxsearch-oss:\(.*\)$|\1|p' deploy/install.yaml)
+          [ -n "$tags" ] || { echo "::error file=deploy/install.yaml::no veloxsearch-oss image line found"; exit 1; }
+          for tag in $tags; do
+            if [ "$tag" != "$version" ]; then
+              echo "::error file=deploy/install.yaml::image tag $tag != Cargo.toml version $version — bump the tag in the same PR as the version"
+              exit 1
+            fi
+          done
+          echo "install.yaml pins veloxsearch-oss:$version"
+
+      # release.yml derives the upgrade asset with this script (ADR-057); a
+      # manifest it cannot split must fail on the PR, not on the release.
+      - name: The upgrade manifest drops only the bootstrap binding
+        run: |
+          set -euo pipefail
+          deploy/upgrade-manifest.sh deploy/install.yaml > upgrade.yaml
+          python3 - <<'PY'
+          import yaml
+          docs = lambda p: [d for d in yaml.safe_load_all(open(p)) if d]
+          key = lambda d: (d["kind"], d["metadata"]["name"])
+          full, upgrade = docs("deploy/install.yaml"), docs("upgrade.yaml")
+          expected = [d for d in full if key(d) != ("ClusterRoleBinding", "veloxsearch-bootstrap")]
+          assert len(expected) == len(full) - 1, "install.yaml has no bootstrap binding"
+          assert upgrade == expected, "upgrade.yaml differs from install.yaml beyond the binding"
+          print(f"upgrade.yaml = install.yaml minus the bootstrap binding ({len(upgrade)} documents)")
+          PY
+
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest

@@ -116,9 +116,10 @@ CRDs/ClusterRoles during the install itself needs the elevated binding.
 > storage, nothing — the binding self-revokes at the end of the normal
 > bootstrap. On a StorageClass-less cluster, the `veloxsearch-bootstrap`
 > cluster-admin binding stays until the first deployment triggers the Longhorn
-> install, then disappears on its own. If you re-apply `install.yaml` (e.g. a
-> component upgrade) the binding is recreated and re-revoked the same way
-> (ADR-027 caveat).
+> install, then disappears on its own. Upgrades apply the release's
+> `upgrade.yaml`, which does not contain the binding (ADR-057). If you re-apply
+> `install.yaml` instead, the binding is recreated and the running app revokes
+> it again once bootstrap is complete (ADR-027 caveat).
 
 ### P1 — Node prerequisites and informative failure
 
