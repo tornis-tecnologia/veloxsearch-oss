@@ -102,7 +102,7 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-056 | A healed dependency re-arms one exhausted provisioning wave — the metrics sampler triggers it, the CR counter still bounds it (amends ADR-052 rule 4) |
 | ADR-058 | Multiple integration catalog sources — sources as Secret-backed config, per-source key pinning with admin-approved keys, `source/id` provenance, install records so uninstall outlives a source, collector configs confined (proposed) |
 | ADR-059 | *Proposed.* Collector configuration for sources outside the cluster — optional `collectors` manifest section (schema 1.1), a write-only `_bulk` ingest route per deployment, one ingest-only OpenSearch principal per integration, never admin credentials |
-| ADR-060 | *(proposed)* A bounded cluster profile (`GET /api/cluster_profile`): derived facts only, one field allowlist enforced by test, tenant-scoped, workload percentiles over the sampler's retained window, exported only by admin download — never pushed |
+| ADR-060 | A bounded cluster profile (`GET /api/cluster_profile`): derived facts only, one field allowlist enforced by test, tenant-scoped, workload percentiles over the sampler's retained window, exported only by download — never pushed (accepted 2026-09-26, #59) |
 | ADR-061 | Flexible default storage — Longhorn when present; otherwise the cluster's default StorageClass (foreign CSI durable, node-local warned); Longhorn auto-bootstrap only when no default exists (amends ADR-043, #88) |
 
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were

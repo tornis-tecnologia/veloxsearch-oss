@@ -3837,6 +3837,41 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
     out
 }
 
+/// Container restarts of a deployment's node-pool pods and of its Dashboards
+/// pods, each summed across containers — for the ADR-060 cluster profile.
+/// Cumulative since each pod was created, so a roll resets it. The same `pods`
+/// read `dashboards_block_in`/`node_pod_block_in` make, but side-effect free:
+/// those two arm remediations, and a read-only export must never do that.
+/// `None` when the pods could not be listed.
+pub async fn pod_restarts(dep: &Deployment) -> Option<(i64, i64)> {
+    use k8s_openapi::api::core::v1::Pod;
+    let client = client().await.ok()?;
+    let pods: Api<Pod> = Api::namespaced(client, dep.namespace());
+    let list = pods.list(&ListParams::default()).await.ok()?;
+    let (nodes_prefix, dash_prefix) = (
+        format!("{}-nodes-", dep.name()),
+        format!("{}-dashboards", dep.name()),
+    );
+    let (mut nodes, mut dashboards) = (0i64, 0i64);
+    for pod in list {
+        let name = pod.metadata.name.as_deref().unwrap_or_default();
+        let slot = if name.starts_with(&nodes_prefix) {
+            &mut nodes
+        } else if name.starts_with(&dash_prefix) {
+            &mut dashboards
+        } else {
+            continue;
+        };
+        let statuses = pod.status.and_then(|s| s.container_statuses);
+        *slot += statuses
+            .unwrap_or_default()
+            .iter()
+            .map(|cs| i64::from(cs.restart_count))
+            .sum::<i64>();
+    }
+    Some((nodes, dashboards))
+}
+
 /// TTL cache for the node-pod half (#97), same contract as `diagnosis_cache`:
 /// the SSE loop asks every 3s, and the answer is only paid for by deployments
 /// that are actually stalled.

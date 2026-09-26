@@ -68,6 +68,11 @@ pub mod metrics;
 #[cfg(feature = "ssr")]
 pub mod capacity;
 
+// ADR-060: the bounded, derived cluster profile — a read-only capacity export
+// with its own DTOs, an allowlist of fields and keyed pseudonyms.
+#[cfg(feature = "ssr")]
+pub mod profile;
+
 #[cfg(feature = "ssr")]
 pub mod db;
 

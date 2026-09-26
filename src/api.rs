@@ -1456,6 +1456,27 @@ mod server {
             .map_err(ApiError::internal)
     }
 
+    /// `?names=true` opts real deployment and index-family names (and, for the
+    /// admin, tenant slugs) into the profile. Absent or anything else: off.
+    #[derive(Deserialize)]
+    pub struct ClusterProfileQuery {
+        #[serde(default)]
+        names: bool,
+    }
+
+    /// The ADR-060 cluster profile: a bounded, derived, read-only document of
+    /// size, shape, load and health, for the caller's own scope. It leaves the
+    /// cluster only as this response — there is no other export path.
+    async fn cluster_profile(
+        scope: Scope,
+        axum::extract::Query(q): axum::extract::Query<ClusterProfileQuery>,
+    ) -> Result<Json<crate::profile::ClusterProfile>, ApiError> {
+        crate::profile::gather(&scope, q.names)
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
+
     /// One deployment's detail, or `null`.
     ///
     /// Anti-enumeration: `scope.resolve` answers `None` identically for a name
@@ -2525,6 +2546,7 @@ mod server {
         RoutePolicy { path: "/plan_snapshot_config", policy: TenantScoped, note: "dry run over the STORED config — unscoped it would leak whether a bucket is set." },
         RoutePolicy { path: "/save_snapshot_config", policy: TenantScoped, note: "writes the repository slice, its Secret and the policy CR; resolve-before-mutate." },
         RoutePolicy { path: "/verify_snapshot_repo", policy: TenantScoped, note: "makes the deployment's nodes reach the bucket with its stored credentials." },
+        RoutePolicy { path: "/cluster_profile", policy: TenantScoped, note: "ADR-060 read-only capacity export. Takes no deployment name: its only list is k8s::scoped_deployments(&scope). Installation sections (kubernetes/nodes/storage/fit) only for the admin; a tenant gets its own deployments plus its quota row as headroom." },
         RoutePolicy { path: "/deployment_activity_log", policy: TenantScoped, note: "Events, pod state and componentsStatus OF that deployment (ADR-050)." },
         // -- OTel observability stack (ADR-053) ---------------------------
         RoutePolicy { path: "/otel_stack_info", policy: Authenticated, note: "static component/image/resource-cost table out of the binary (otel_stack::resource_cost) — names no deployment and reads no cluster." },
@@ -2611,6 +2633,8 @@ mod server {
             .route(p("/plan_snapshot_config"), post(plan_snapshot_config))
             .route(p("/save_snapshot_config"), post(save_snapshot_config))
             .route(p("/verify_snapshot_repo"), post(verify_snapshot_repo))
+            // -- cluster profile export (ADR-060)
+            .route(p("/cluster_profile"), get(cluster_profile))
             // -- deployment activity (ADR-050)
             .route(p("/deployment_activity_log"), post(deployment_activity_log))
             // -- OTel observability stack (ADR-053)
