@@ -8,6 +8,18 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- The Kubernetes Events integration indexes events again (#104). Every event
+  was rejected with `mapper_parsing_exception` ("field name cannot contain
+  only the character [.]"): raw Event objects carry `metadata.managedFields`
+  and other empty maps that flatten to dot-only field names, so the
+  `k8s-events` index stayed empty and its dashboard could not resolve its
+  fields. The collector now runs a static Lua filter that drops
+  `managedFields` and prunes empty maps, mounted next to its config.
+  Collectors created before this fix are repaired on the next start of the
+  app; collectors the app does not manage are left alone. The
+  `k8s-events` registry package needs the regenerated `agent.conf.tmpl`.
+
 ## [0.10.5] - 2026-09-24
 
 ### Changed
