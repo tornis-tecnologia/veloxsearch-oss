@@ -219,6 +219,13 @@ pub struct Sample {
     pub disk_used_bytes: u64,
     pub docs: u64,
     pub index_total: u64,
+    /// `indices.search.query_total`, summed across nodes — monotonic like
+    /// `index_total` (ADR-060 decision 7).
+    pub query_total: u64,
+    /// `jvm.gc.collectors.old.collection_time_in_millis`, summed across nodes.
+    pub gc_old_millis: u64,
+    /// `jvm.gc.collectors.young.collection_time_in_millis`, summed across nodes.
+    pub gc_young_millis: u64,
 }
 
 fn now_ms() -> i64 {
@@ -291,10 +298,23 @@ async fn collect_sample(deployment: &Deployment) -> Result<Sample> {
         .await
         .context("parsing _nodes/stats")?;
 
+    Ok(sample_from_nodes_stats(&body, now_ms()))
+}
+
+/// Fold one `_nodes/stats/os,jvm,fs,indices` response into a cluster-aggregate
+/// sample: CPU/heap are meaned across nodes; disk used, docs and the monotonic
+/// counters are summed. Pure, so the sampler and the cluster profile (ADR-060)
+/// read the same payload the same way.
+pub fn sample_from_nodes_stats(body: &serde_json::Value, ts: i64) -> Sample {
     let (mut cpu_sum, mut heap_sum) = (0i64, 0i64);
-    let (mut n, mut disk_used, mut docs, mut index_total) = (0u64, 0u64, 0u64, 0u64);
+    let mut n = 0u64;
+    let mut out = Sample {
+        ts,
+        ..Sample::default()
+    };
     if let Some(map) = body.get("nodes").and_then(|v| v.as_object()) {
         for node in map.values() {
+            let u = |path: &str| node.pointer(path).and_then(|v| v.as_u64()).unwrap_or(0);
             n += 1;
             cpu_sum += node
                 .pointer("/os/cpu/percent")
@@ -304,14 +324,11 @@ async fn collect_sample(deployment: &Deployment) -> Result<Sample> {
                 .pointer("/jvm/mem/heap_used_percent")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            docs += node
-                .pointer("/indices/docs/count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            index_total += node
-                .pointer("/indices/indexing/index_total")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            out.docs += u("/indices/docs/count");
+            out.index_total += u("/indices/indexing/index_total");
+            out.query_total += u("/indices/search/query_total");
+            out.gc_old_millis += u("/jvm/gc/collectors/old/collection_time_in_millis");
+            out.gc_young_millis += u("/jvm/gc/collectors/young/collection_time_in_millis");
             // Disk used = data-path total − available (ADR-031: the PVC mount,
             // not the node fs). Summed across nodes for a cluster figure.
             if let Some(arr) = node.pointer("/fs/data").and_then(|v| v.as_array()) {
@@ -324,20 +341,15 @@ async fn collect_sample(deployment: &Deployment) -> Result<Sample> {
                         .get("available_in_bytes")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    disk_used += t.saturating_sub(a);
+                    out.disk_used_bytes += t.saturating_sub(a);
                 }
             }
         }
     }
     let nf = n.max(1) as f64;
-    Ok(Sample {
-        ts: now_ms(),
-        cpu_percent: cpu_sum as f64 / nf,
-        heap_percent: heap_sum as f64 / nf,
-        disk_used_bytes: disk_used,
-        docs,
-        index_total,
-    })
+    out.cpu_percent = cpu_sum as f64 / nf;
+    out.heap_percent = heap_sum as f64 / nf;
+    out
 }
 
 /// Append a sample through the rollover alias. Dynamic mapping is pinned by the
@@ -356,6 +368,9 @@ async fn record_sample(deployment: &Deployment, s: &Sample) -> Result<()> {
             "disk_used_bytes": s.disk_used_bytes,
             "docs": s.docs,
             "index_total": s.index_total,
+            "query_total": s.query_total,
+            "gc_old_millis": s.gc_old_millis,
+            "gc_young_millis": s.gc_young_millis,
         }))
         .send()
         .await
@@ -417,6 +432,22 @@ async fn ensure_metrics_index(deployment: &Deployment) -> Result<()> {
                     "disk_used_bytes": { "type": "long" },
                     "docs": { "type": "long" },
                     "index_total": { "type": "long" },
+                    // ADR-060 decision 7 — additive: a template applies at the
+                    // next rollover, so older backing indices simply lack these.
+                    "query_total": { "type": "long" },
+                    "gc_old_millis": { "type": "long" },
+                    "gc_young_millis": { "type": "long" },
+                    // `stall` marks an ADR-060 stall-episode document; samples
+                    // carry no `kind`, which is how every sample reader
+                    // excludes episodes.
+                    "kind": { "type": "keyword" },
+                    "stage": { "type": "keyword" },
+                    "component": { "type": "keyword" },
+                    "component_status": { "type": "keyword" },
+                    "recovery_stage": { "type": "keyword" },
+                    "recovery_index_class": { "type": "keyword" },
+                    "recovery_secs": { "type": "long" },
+                    "remediation": { "type": "keyword" },
                 }},
             },
         }))
@@ -515,6 +546,7 @@ pub async fn series(
                 disk_used_bytes: uu("disk_used_bytes"),
                 docs: uu("docs"),
                 index_total: uu("index_total"),
+                ..Sample::default()
             });
         }
     }
@@ -544,9 +576,13 @@ fn series_query(window_minutes: i64) -> serde_json::Value {
         "sort": [{ "@timestamp": "desc" }],
         "_source": ["@timestamp", "cpu_percent", "heap_percent",
                     "disk_used_bytes", "docs", "index_total"],
-        "query": { "range": { "@timestamp": {
-            "gte": format!("now-{window_minutes}m"), "format": "epoch_millis"
-        }}},
+        "query": { "bool": {
+            "filter": [{ "range": { "@timestamp": {
+                "gte": format!("now-{window_minutes}m"), "format": "epoch_millis"
+            }}}],
+            // ADR-060 stall episodes share the alias; they are not samples.
+            "must_not": [{ "term": { "kind": STALL_KIND } }],
+        }},
     })
 }
 
@@ -608,17 +644,9 @@ pub fn downsample(samples: &[Sample], bucket_ms: i64) -> Vec<MetricPoint> {
     let mut points = Vec::with_capacity(raws.len());
     let mut prev: Option<(i64, u64)> = None; // (last_ts, index_total)
     for r in &raws {
-        let indexing_rate = match prev {
-            Some((pt, pidx)) if r.last_ts > pt && r.idx >= pidx => {
-                let dt = (r.last_ts - pt) as f64 / 1000.0;
-                if dt > 0.0 {
-                    (r.idx - pidx) as f64 / dt
-                } else {
-                    0.0
-                }
-            }
-            _ => 0.0,
-        };
+        let indexing_rate = prev
+            .map(|p| counter_rate(p, (r.last_ts, r.idx)))
+            .unwrap_or(0.0);
         points.push(MetricPoint {
             ts: r.start,
             cpu_percent: r.sum_cpu / r.n as f64,
@@ -632,6 +660,21 @@ pub fn downsample(samples: &[Sample], bucket_ms: i64) -> Vec<MetricPoint> {
     points
 }
 
+/// Per-second rate of a monotonic counter between two `(epoch_ms, value)`
+/// readings, clamped to 0 across a counter reset (a node restart zeroes its
+/// share) or a non-advancing clock. The one rule every rate here uses —
+/// `downsample`'s indexing rate and the ADR-060 profile's rates alike.
+pub fn counter_rate(prev: (i64, u64), cur: (i64, u64)) -> f64 {
+    let ((pt, pv), (ct, cv)) = (prev, cur);
+    if ct <= pt || cv < pv {
+        return 0.0;
+    }
+    (cv - pv) as f64 / ((ct - pt) as f64 / 1000.0)
+}
+
+/// `kind` value of an ADR-060 stall-episode document in `velox-metrics-*`.
+pub const STALL_KIND: &str = "stall";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,7 +685,12 @@ mod tests {
         let q = series_query(7 * 24 * 60);
         assert_eq!(q["sort"][0]["@timestamp"], "desc");
         assert_eq!(q["size"], SERIES_MAX_SAMPLES);
-        assert_eq!(q["query"]["range"]["@timestamp"]["gte"], "now-10080m");
+        assert_eq!(
+            q["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gte"],
+            "now-10080m"
+        );
+        // ADR-060: stall episodes share the alias and are never samples.
+        assert_eq!(q["query"]["bool"]["must_not"][0]["term"]["kind"], "stall");
     }
 
     #[test]
@@ -668,6 +716,7 @@ mod tests {
             disk_used_bytes: disk,
             docs,
             index_total: idx,
+            ..Sample::default()
         }
     }
 
