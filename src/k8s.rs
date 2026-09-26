@@ -1036,7 +1036,25 @@ pub async fn create_cluster(
         general["additionalConfig"] = serde_json::Value::Object(ov.additional_config);
     }
 
+    // #46 (ADR-063): a NEW deployment's Dashboards is held at zero replicas
+    // until the cluster has settled — its first saved-objects migration must
+    // not run against a cluster that is still allocating. The sampler
+    // releases the hold (`maybe_release_dashboards`). A save of an existing
+    // deployment re-applies whatever hold the CR carries, never a new one, so
+    // this path can neither start a held Dashboards early nor stop a running
+    // one.
+    let dashboards_hold = match existing.as_ref() {
+        None => Some(DASHBOARDS_HOLD_FIRST_BOOT.to_string()),
+        Some(o) => dashboards_hold_of(o.metadata.annotations.as_ref()),
+    };
+
     let mut annotations = serde_json::Map::new();
+    if let Some(reason) = &dashboards_hold {
+        annotations.insert(
+            LABEL_DASHBOARDS_HOLD.to_string(),
+            serde_json::Value::String(reason.clone()),
+        );
+    }
     if !ov.monitors.is_empty() {
         annotations.insert(
             LABEL_MONITORS.to_string(),
@@ -1068,15 +1086,7 @@ pub async fn create_cluster(
                 "tls": { "transport": { "generate": true }, "http": { "generate": true } },
                 "config": { "adminCredentialsSecret": { "name": admin_secret_name(name) } }
             },
-            "dashboards": {
-                "enable": true,
-                "version": dash_version,
-                "replicas": 1,
-                "resources": {
-                    "requests": { "memory": "512Mi", "cpu": "200m" },
-                    "limits": { "memory": "1Gi", "cpu": "500m" }
-                }
-            },
+            "dashboards": dashboards_spec(&dash_version, dashboards_hold.is_some()),
             "nodePools": [node_pool(replicas, &disk, &mem, s.cpu_req, s.cpu_lim, longhorn_sc)]
         }
     });
@@ -1084,14 +1094,6 @@ pub async fn create_cluster(
         .patch(name, &pp, &Patch::Apply(&manifest))
         .await
         .context("applying OpenSearchCluster CR")?;
-
-    // #46: the operator materializes the Dashboards Deployment asynchronously
-    // after the CR is accepted; make it survivable the moment it exists
-    // (probe budget + Recreate), off the create flow's critical path.
-    tokio::spawn(spawn_dashboards_survivability(
-        dep.namespace().to_string(),
-        name.to_string(),
-    ));
 
     // Public dashboards ingress at <name>.<base_domain> — ingress mode only
     // (ADR-027). In portforward mode no Ingress exists and the UI hands out a
@@ -3705,9 +3707,9 @@ async fn restart_wave_watch(
 // "another instance is migrating", waits forever, and is killed again — a
 // self-sustaining crash-loop that only ever ends by hand. Observed live:
 // 235 restarts over 17 hours on a cluster that was green in every other
-// respect. The fix has two halves: make the first boot survivable (below,
-// `ensure_dashboards_survivability`) and self-heal the deadlock if it happens
-// anyway (`remediate_kibana_deadlock`).
+// respect. The fix has two halves: hold the first boot until the cluster has
+// settled (the Dashboards hold below, ADR-063) and self-heal the deadlock if
+// it happens anyway (`remediate_kibana_deadlock`).
 
 /// #46: three full crash cycles is a pattern, not a flake. One restart is a
 /// slow cluster; three means the boot is deterministically dying, which is
@@ -3946,10 +3948,13 @@ async fn node_pod_block_in(namespace: &str, name: &str) -> crate::activity::Node
     out
 }
 
-/// Break the `.kibana_1` migration deadlock (#46): scale the Dashboards
-/// Deployment to zero, delete the dead index, scale it back. This is the
-/// exact sequence validated live against the incident cluster (recovered in
-/// 65 seconds after 17 hours of crash-looping).
+/// Break the `.kibana_1` migration deadlock (#46): hold Dashboards at zero
+/// replicas, delete the dead index, release the hold. The same sequence that
+/// recovered the incident cluster by hand (65 seconds after 17 hours of
+/// crash-looping), expressed through the CR (ADR-063): the operator renders
+/// the Dashboards Deployment from `spec.dashboards.replicas` and reverts any
+/// direct edit of the Deployment within a second, so a scale written to the
+/// Deployment itself would never quiesce anything.
 ///
 /// **Why deleting `.kibana_1` is always safe here.** The remediation only
 /// ever arms from `dashboards_block_in`, which `status_from` only calls on
@@ -3958,29 +3963,28 @@ async fn node_pod_block_in(namespace: &str, name: &str) -> crate::activity::Node
 /// hold anything but aborted migration state. It must never be reachable for
 /// a deployment past the rung.
 ///
-/// Best-effort by design: the operator owns the Deployment and reconciles
-/// replicas toward the CR; a failed step is loud, logged, and retried only
-/// after the cooldown.
+/// Best-effort by design: a failed step is loud, logged, and retried only
+/// after the cooldown. A backend that dies between the hold and the release
+/// leaves the hold annotation on the CR, and the sampler's
+/// `maybe_release_dashboards` releases it — the in-flight guard there only
+/// defers to a pass this process is still running.
 async fn remediate_kibana_deadlock(namespace: &str, name: &str) -> bool {
-    use k8s_openapi::api::apps::v1::Deployment;
-
     let Ok(client) = client().await else {
         return false;
     };
-    let deploy: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-    let object = format!("{name}-dashboards");
+    let api = cluster_api_in(&client, namespace);
 
     // 1. Quiesce: no Dashboards pod may be mid-boot against the index we are
     //    about to delete.
-    if let Err(e) = deploy
+    if let Err(e) = api
         .patch(
-            &object,
+            name,
             &PatchParams::default(),
-            &Patch::Merge(&serde_json::json!({ "spec": { "replicas": 0 } })),
+            &Patch::Merge(&dashboards_hold_patch(Some(DASHBOARDS_HOLD_REMEDIATION))),
         )
         .await
     {
-        tracing::warn!("#46 scale-to-zero of {namespace}/{object} failed: {e:#}");
+        tracing::warn!("#46 dashboards hold on {namespace}/{name} failed: {e:#}");
         return false;
     }
     for _ in 0..20 {
@@ -4013,26 +4017,29 @@ async fn remediate_kibana_deadlock(namespace: &str, name: &str) -> bool {
     .unwrap_or(false);
 
     // 3. Let it boot fresh: a clean migration on a settled cluster completes
-    //    in seconds, well inside any probe budget.
-    if let Err(e) = deploy
+    //    in seconds, well inside the operator's probe budget.
+    if let Err(e) = api
         .patch(
-            &object,
+            name,
             &PatchParams::default(),
-            &Patch::Merge(&serde_json::json!({ "spec": { "replicas": 1 } })),
+            &Patch::Merge(&dashboards_hold_patch(None)),
         )
         .await
     {
-        tracing::warn!("#46 scale-back of {namespace}/{object} failed: {e:#}");
+        tracing::warn!(
+            "#46 dashboards release on {namespace}/{name} failed: {e:#} \
+             (the sampler releases the hold on its next tick)"
+        );
         return false;
     }
     if deleted {
         tracing::warn!(
             "#46 remediation for {namespace}/{name}: deleted the dead .kibana_1 and \
-             restarted {object}"
+             restarted Dashboards"
         );
     } else {
         tracing::warn!(
-            "#46 index delete for {namespace}/{name} failed; {object} was restarted anyway"
+            "#46 index delete for {namespace}/{name} failed; Dashboards was restarted anyway"
         );
     }
     deleted
@@ -4057,107 +4064,129 @@ async fn dashboards_pod_count(client: &Client, namespace: &str, name: &str) -> O
     )
 }
 
-/// Make the Dashboards Deployment survive its own first boot (#46): the
-/// operator hardcodes a ~210s startup probe, and Dashboards does not bind
-/// :5601 until saved-objects migrations complete — so a boot that starts
-/// while the cluster is still settling can be killed mid-migration, which is
-/// what poisons `.kibana_1` in the first place. We claim two fields the
-/// operator does not fight over, under our own field manager:
-///
-/// * `strategy.type = Recreate` — a one-replica bootstrap service must not
-///   roll; a stuck rollout leaves two pods racing the same migration, which
-///   is what made the incident's deadlock perpetual.
-/// * `startupProbe.failureThreshold = 90` — a 30-minute budget instead of
-///   ~210 seconds, sized for a first migration on a cluster that is still
-///   allocating shards.
-///
-/// Idempotent (server-side apply only claims what changed) and best-effort:
-/// if the patch cannot land, the stall diagnosis + remediation above are the
-/// backstop.
-async fn ensure_dashboards_survivability(client: &Client, namespace: &str, name: &str) {
-    use k8s_openapi::api::apps::v1::Deployment;
+// ───────────── Dashboards first-boot hold (#46, ADR-063) ────────────────────
+//
+// What the Dashboards Deployment needs to survive its first boot — a longer
+// startup budget, a `Recreate` strategy — is not ours to set: operator
+// 3.0.x renders both as constants (probe 10s + 10 × 20s, `RollingUpdate`),
+// exposes neither on `spec.dashboards`, and reverts a patch of either within
+// a second of it landing. What the CR does expose is `spec.dashboards.replicas`,
+// so the intent is expressed there instead: the first boot does not happen
+// until the cluster has settled, where the migration takes seconds and the
+// fixed budget is ample. The `.kibana_1` remediation uses the same hold.
 
-    let deploy: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-    let object = format!("{name}-dashboards");
-    // Two patches, not one. The strategy CANNOT go through server-side apply:
-    // the API server defaults `strategy.rollingUpdate` at create time and
-    // attributes it to the operator's field manager, so an apply of
-    // `type: Recreate` merges next to it and the whole request is rejected
-    // ("spec.strategy.rollingUpdate: Forbidden: may not be specified when
-    // strategy `type` is 'Recreate'") — probe budget included. Observed on
-    // every deployment of the 2026-09-24 in-house e2e run. A JSON merge patch
-    // can null the defaulted block; the probe stays a field-managed apply.
-    if let Err(e) = deploy
+/// Annotation carrying an active Dashboards hold; its value is the reason
+/// (`first-boot` or `remediation`), for whoever reads the CR by hand. Present
+/// means `spec.dashboards.replicas` is 0 on purpose; absent means 1.
+const LABEL_DASHBOARDS_HOLD: &str = "veloxsearch.ai/dashboards-hold";
+const DASHBOARDS_HOLD_FIRST_BOOT: &str = "first-boot";
+const DASHBOARDS_HOLD_REMEDIATION: &str = "remediation";
+
+/// Past this CR age an initialized cluster gets its Dashboards even if it is
+/// not green. The hold exists to wait out settling, and a cluster that stays
+/// yellow (a replica that cannot be placed) must not be left without
+/// Dashboards forever — booting on a yellow cluster is what happened before
+/// the hold, with the remediation as the backstop.
+const DASHBOARDS_HOLD_MAX_SECS: i64 = 20 * 60;
+
+/// `spec.dashboards` as `create_cluster` applies it; `held` renders zero
+/// replicas. Pure, so the rendering is testable without a cluster.
+fn dashboards_spec(version: &str, held: bool) -> serde_json::Value {
+    serde_json::json!({
+        "enable": true,
+        "version": version,
+        "replicas": if held { 0 } else { 1 },
+        "resources": {
+            "requests": { "memory": "512Mi", "cpu": "200m" },
+            "limits": { "memory": "1Gi", "cpu": "500m" }
+        }
+    })
+}
+
+/// The hold reason a CR carries, if any.
+fn dashboards_hold_of(
+    annotations: Option<&std::collections::BTreeMap<String, String>>,
+) -> Option<String> {
+    annotations
+        .and_then(|a| a.get(LABEL_DASHBOARDS_HOLD))
+        .filter(|r| !r.is_empty())
+        .cloned()
+}
+
+/// JSON merge patch that places (`Some(reason)`) or releases (`None`) the
+/// hold. Replicas and annotation move in ONE request, so a CR can never say
+/// "held" with a running Dashboards or the reverse. Merge rather than apply:
+/// the same idiom as the version bump (`patch_version`) — it touches exactly
+/// these two fields, and the next save re-applies the same values because
+/// `create_cluster` reads the hold back off the CR.
+fn dashboards_hold_patch(reason: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "metadata": { "annotations": { LABEL_DASHBOARDS_HOLD: reason } },
+        "spec": { "dashboards": { "replicas": if reason.is_some() { 0 } else { 1 } } }
+    })
+}
+
+/// The release decision: the security plugin is initialized (before that
+/// Dashboards cannot even authenticate) and the cluster is green, or the
+/// hold has outlived [`DASHBOARDS_HOLD_MAX_SECS`].
+fn should_release_dashboards(initialized: bool, health: &str, cr_age_secs: i64) -> bool {
+    initialized && (health.eq_ignore_ascii_case("green") || cr_age_secs >= DASHBOARDS_HOLD_MAX_SECS)
+}
+
+/// Release a Dashboards hold whose reason has passed. Called by the sampler
+/// every tick for every deployment (the #47 re-arm is the precedent), so the
+/// state lives on the CR and a backend restart resumes it; a CR without the
+/// annotation costs one GET and nothing else.
+pub async fn maybe_release_dashboards(dep: &Deployment) {
+    let Ok(client) = client().await else {
+        return;
+    };
+    let api = os_api(&client, dep);
+    let Ok(Some(obj)) = api.get_opt(dep.name()).await else {
+        return;
+    };
+    if dashboards_hold_of(obj.metadata.annotations.as_ref()).is_none() {
+        return;
+    }
+    // A remediation this process is still running owns its own release; the
+    // sampler only picks up a hold whose remediation died with a backend.
+    let key = format!("{}/{}", dep.namespace(), dep.name());
+    let in_flight = dashboards_remediation_log()
+        .lock()
+        .ok()
+        .is_some_and(|m| matches!(m.get(&key), Some((_, None))));
+    if in_flight {
+        return;
+    }
+    let status = obj.data.get("status");
+    let initialized = status
+        .and_then(|s| s.get("initialized"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let health = status
+        .and_then(|s| s.get("health"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let age = obj
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| (k8s_openapi::chrono::Utc::now() - t.0).num_seconds())
+        .unwrap_or(0);
+    if !should_release_dashboards(initialized, health, age) {
+        return;
+    }
+    match api
         .patch(
-            &object,
+            dep.name(),
             &PatchParams::default(),
-            &Patch::Merge(&survivability_strategy_patch()),
+            &Patch::Merge(&dashboards_hold_patch(None)),
         )
         .await
     {
-        tracing::warn!("#46 Recreate strategy for {namespace}/{object} failed: {e:#}");
+        Ok(_) => tracing::info!("#46 released the Dashboards hold of {dep} ({health})"),
+        Err(e) => tracing::warn!("#46 releasing the Dashboards hold of {dep} failed: {e:#}"),
     }
-    let pp = PatchParams::apply("veloxsearch-dashboards-survivability").force();
-    let manifest = survivability_probe_apply(namespace, &object);
-    if let Err(e) = deploy.patch(&object, &pp, &Patch::Apply(&manifest)).await {
-        tracing::warn!("#46 startup-probe budget for {namespace}/{object} failed: {e:#}");
-    }
-}
-
-/// #46 strategy: `Recreate`, with the API server's defaulted `rollingUpdate`
-/// explicitly removed (merge-patch `null`) — the two are mutually exclusive.
-fn survivability_strategy_patch() -> serde_json::Value {
-    serde_json::json!({
-        "spec": { "strategy": { "type": "Recreate", "rollingUpdate": null } }
-    })
-}
-
-/// #46 probe budget, claimed under our own field manager. Carries NO
-/// `strategy` — see `ensure_dashboards_survivability` for why.
-fn survivability_probe_apply(namespace: &str, object: &str) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "metadata": { "name": object, "namespace": namespace },
-        "spec": {
-            "template": {
-                "spec": {
-                    "containers": [{
-                        "name": "dashboards",
-                        "startupProbe": { "failureThreshold": 90 }
-                    }]
-                }
-            }
-        }
-    })
-}
-
-/// Wait (bounded, best-effort) for the operator to materialize the Dashboards
-/// Deployment after a CR apply, then make it survivable. Spawned fire-and-
-/// forget from `create_cluster` so the create flow never blocks on the
-/// operator's reconcile cadence.
-async fn spawn_dashboards_survivability(namespace: String, name: String) {
-    // The operator creates the Deployment within seconds of accepting the CR;
-    // the window only needs to cover a slow reconcile, not the whole create.
-    for _ in 0..24 {
-        if let Ok(client) = client().await {
-            use k8s_openapi::api::apps::v1::Deployment;
-            let deploy: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
-            if deploy
-                .get_opt(&format!("{name}-dashboards"))
-                .await
-                .is_ok_and(|o| o.is_some())
-            {
-                ensure_dashboards_survivability(&client, &namespace, &name).await;
-                return;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-    tracing::warn!(
-        "#46 Dashboards Deployment for {namespace}/{name} never appeared; \
-         survivability patch skipped (stall remediation remains the backstop)"
-    );
 }
 
 /// Message of the most recent `Warning`/`Upgrade` Event on a deployment's CR.
@@ -6242,26 +6271,136 @@ mod tests {
         assert_eq!(wedged_recovery_source(&serde_json::json!({})), None);
     }
 
-    // ── #46 survivability patches ──────────────────────────────────────
+    // ── #46 Dashboards hold (ADR-063) ──────────────────────────────────
 
     #[test]
-    fn survivability_strategy_nulls_the_defaulted_rolling_update() {
-        let p = survivability_strategy_patch();
-        assert_eq!(p["spec"]["strategy"]["type"], "Recreate");
-        // present-and-null is the merge-patch delete; absent would keep the
-        // API server's default and the request would be rejected again
-        let strategy = p["spec"]["strategy"].as_object().unwrap();
-        assert!(strategy.contains_key("rollingUpdate"));
-        assert!(strategy["rollingUpdate"].is_null());
+    fn a_held_dashboards_spec_renders_zero_replicas() {
+        let held = dashboards_spec("3.3.0", true);
+        assert_eq!(held["replicas"], 0);
+        assert_eq!(
+            held["enable"], true,
+            "held is not disabled: the Deployment must exist"
+        );
+        assert_eq!(held["version"], "3.3.0");
+        assert_eq!(dashboards_spec("3.3.0", false)["replicas"], 1);
     }
 
     #[test]
-    fn survivability_probe_apply_never_claims_the_strategy() {
-        let m = survivability_probe_apply("ns", "d-dashboards");
-        assert!(m["spec"].get("strategy").is_none());
+    fn the_dashboards_spec_claims_nothing_the_operator_cannot_render() {
+        // Operator 3.0.x has no probe or strategy field under
+        // spec.dashboards; an unknown field would be pruned by the API server
+        // and read as a fix that is not there.
+        let spec = dashboards_spec("3.3.0", true);
+        let keys: Vec<&str> = spec
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for k in &keys {
+            assert!(
+                ["enable", "version", "replicas", "resources"].contains(k),
+                "unexpected spec.dashboards field {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn hold_and_release_move_replicas_and_annotation_together() {
+        let hold = dashboards_hold_patch(Some(DASHBOARDS_HOLD_REMEDIATION));
+        assert_eq!(hold["spec"]["dashboards"]["replicas"], 0);
         assert_eq!(
-            m["spec"]["template"]["spec"]["containers"][0]["startupProbe"]["failureThreshold"],
-            90
+            hold["metadata"]["annotations"][LABEL_DASHBOARDS_HOLD],
+            DASHBOARDS_HOLD_REMEDIATION
+        );
+        let release = dashboards_hold_patch(None);
+        assert_eq!(release["spec"]["dashboards"]["replicas"], 1);
+        // present-and-null is the merge-patch delete of the annotation
+        let ann = release["metadata"]["annotations"].as_object().unwrap();
+        assert!(ann.contains_key(LABEL_DASHBOARDS_HOLD));
+        assert!(ann[LABEL_DASHBOARDS_HOLD].is_null());
+        // a merge patch that touched anything else could clobber the spec
+        assert_eq!(release["spec"].as_object().unwrap().len(), 1);
+        assert_eq!(release["spec"]["dashboards"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_hold_is_read_back_off_the_cr() {
+        let mut a = std::collections::BTreeMap::new();
+        assert_eq!(dashboards_hold_of(None), None);
+        assert_eq!(dashboards_hold_of(Some(&a)), None);
+        a.insert(LABEL_DASHBOARDS_HOLD.to_string(), String::new());
+        assert_eq!(dashboards_hold_of(Some(&a)), None, "empty is no hold");
+        a.insert(
+            LABEL_DASHBOARDS_HOLD.to_string(),
+            DASHBOARDS_HOLD_FIRST_BOOT.to_string(),
+        );
+        assert_eq!(
+            dashboards_hold_of(Some(&a)).as_deref(),
+            Some(DASHBOARDS_HOLD_FIRST_BOOT)
+        );
+    }
+
+    #[test]
+    fn the_hold_releases_on_a_settled_cluster_or_after_its_ceiling() {
+        // settled
+        assert!(should_release_dashboards(true, "green", 60));
+        assert!(should_release_dashboards(true, "GREEN", 0));
+        // still settling
+        assert!(!should_release_dashboards(true, "yellow", 60));
+        assert!(!should_release_dashboards(
+            true,
+            "red",
+            DASHBOARDS_HOLD_MAX_SECS - 1
+        ));
+        // security not initialized: Dashboards could not authenticate anyway
+        assert!(!should_release_dashboards(false, "green", 60));
+        assert!(!should_release_dashboards(
+            false,
+            "yellow",
+            DASHBOARDS_HOLD_MAX_SECS
+        ));
+        // a cluster that never turns green still gets its Dashboards
+        assert!(should_release_dashboards(
+            true,
+            "yellow",
+            DASHBOARDS_HOLD_MAX_SECS
+        ));
+    }
+
+    #[test]
+    fn runtime_cluster_role_never_writes_deployments() {
+        // ADR-063 withdraws the ADR-055 exception: the operator reverts any
+        // Deployment edit, so the grant bought nothing but blast radius.
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let cluster = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .find(|v| {
+                v["kind"].as_str() == Some("ClusterRole")
+                    && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+            })
+            .expect("runtime ClusterRole");
+        let writes = cluster["rules"]
+            .as_sequence()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                let has = |k: &str, x: &str| {
+                    r[k].as_sequence()
+                        .into_iter()
+                        .flatten()
+                        .any(|e| e.as_str() == Some(x))
+                };
+                has("apiGroups", "apps")
+                    && has("resources", "deployments")
+                    && ["patch", "update", "create", "delete"]
+                        .iter()
+                        .any(|v| has("verbs", v))
+            });
+        assert!(
+            !writes,
+            "the runtime ClusterRole must not write Deployments"
         );
     }
 
