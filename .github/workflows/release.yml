@@ -50,6 +50,13 @@ jobs:
             echo "::error::tag v$now already exists but Cargo.toml just changed to it"
             exit 1
           fi
+          # Versions only move forward. A lower version would publish a release
+          # whose install.yaml pins an OLDER image than the one already out,
+          # and applying it rolls installs back past forward-only migrations.
+          if [ -n "$before" ] && [ "$(printf '%s\n%s\n' "$before" "$now" | sort -V | tail -1)" != "$now" ]; then
+            echo "::error::Cargo.toml version went backwards ($before -> $now)"
+            exit 1
+          fi
           echo "version $before -> $now — releasing"
           echo "release=true" >> "$GITHUB_OUTPUT"
 
