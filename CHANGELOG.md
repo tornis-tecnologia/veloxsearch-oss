@@ -8,6 +8,18 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **The Dashboards first-boot fix now sticks (#46):** the 0.10.5 run showed
+  the operator reverts the `Recreate` strategy and startup budget on its
+  Deployment within a second, and it reverted the remediation's 0/1 scale the
+  same way. The operator's CR has no probe or strategy field, so the fix now
+  goes through `spec.dashboards.replicas`. A new deployment's Dashboards is
+  held at zero replicas until the cluster is initialized and green (or 20
+  minutes old), so its first migration runs on a settled cluster. The
+  `.kibana_1` remediation holds and releases through the CR too. The
+  Deployment patch is gone, and so is the runtime `patch` grant on
+  Deployments (ADR-063).
+
 ## [0.10.5] - 2026-09-24
 
 ### Changed

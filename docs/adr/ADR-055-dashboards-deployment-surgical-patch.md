@@ -1,6 +1,6 @@
 # ADR-055 — VeloxSearch may surgically patch the operator's Dashboards Deployment
 
-**Status:** accepted
+**Status:** decision 1 superseded by ADR-063 (the operator reverts the patch); decisions 2 and 3 stand
 **Date:** 2026-09-10
 
 ## Context
