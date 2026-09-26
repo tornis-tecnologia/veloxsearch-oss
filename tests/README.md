@@ -18,6 +18,7 @@ when you reshape a screen.
 | `firstrun_check.py <base> <user> <pw> pass\|reject [shot.png]` | Playwright | The first-run conformity gate, in both outcomes |
 | `journey_check.py <base> <user> <pw>` | Playwright | The create-deployment journey, submitted with a double click that must yield one deployment |
 | `create_submit_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | The create button disables from the first click and sends one request; it holds `create_cluster` in the browser, so it never provisions anything (#56) |
+| `profile_dialog_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | The Capacity view's cluster-profile dialog (ADR-060): one request per names setting, and the saved file is byte-for-byte the preview. It answers `cluster_profile` and `cluster_capacity` in the browser |
 | `browser_check.py <base> <user> <pw>` | Playwright | Browser smoke plus a network gate: the console must stay free of hydration and panic errors |
 
 `<base>` is the URL the app is reachable at, e.g. `http://localhost:3000` behind

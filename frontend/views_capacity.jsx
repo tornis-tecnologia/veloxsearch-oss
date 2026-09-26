@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 import { STR, sizeMeta } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Gauge, MiniMeter, StatTile, Icon } from "./ui.jsx";
+import { Gauge, MiniMeter, StatTile, Icon, Btn } from "./ui.jsx";
 
 const MiB = 1024 ** 2, GiB = 1024 ** 3, TiB = 1024 ** 4;
 const HIST = 60; // ring-buffer length (~5 min at 5s)
@@ -73,11 +73,93 @@ function limitText(t, by) {
   return by === "cpu" ? t.cap_limited_cpu : by === "mem" ? t.cap_limited_mem : t.cap_limited_disk;
 }
 
+/* Cluster profile export (ADR-060). One fetch per names setting; the preview
+   shows the pretty-printed document, and "Save" writes THOSE bytes from a
+   client-side Blob. There is no second request, so the file cannot differ
+   from what the user just read. Nothing is sent anywhere: the only request
+   is the GET that fetches the profile. */
+function ProfileDialog({ t, onClose }) {
+  const [names, setNames] = useState(false);
+  const [text, setText] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+  const seq = useRef(0);
+
+  useEffect(() => {
+    // A toggle flipped mid-fetch must not let the older answer win.
+    const mine = ++seq.current;
+    setLoading(true);
+    setErr("");
+    API.clusterProfile(names)
+      .then(p => {
+        if (mine !== seq.current) return;
+        setText(JSON.stringify(p, null, 2) + "\n");
+        setLoading(false);
+      })
+      .catch(e => {
+        if (mine !== seq.current) return;
+        setText("");
+        setErr(e.message || t.prof_error);
+        setLoading(false);
+      });
+  }, [names]);
+
+  useEffect(() => {
+    const onKey = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const save = () => {
+    let stamp = "";
+    try { stamp = JSON.parse(text).generated_at || ""; } catch (e) { /* preview is the source of truth */ }
+    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `cluster-profile${stamp ? "-" + stamp.replace(/[:]/g, "") : ""}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 300,
+      background: "rgb(0 0 0 / 0.55)", backdropFilter: "blur(3px)",
+      display: "grid", placeItems: "center", padding: 20,
+    }} onClick={onClose}>
+      <div className="card pad profile-dialog" role="dialog" aria-modal="true" aria-labelledby="profile-title"
+        data-testid="profile-dialog" onClick={e => e.stopPropagation()}>
+        <h3 id="profile-title" style={{ margin: "0 0 6px", fontFamily: "var(--font-mono)", fontSize: 16 }}>{t.prof_title}</h3>
+        <p style={{ margin: "0 0 12px", color: "var(--text-2)", fontSize: 14 }}>{t.prof_lead}</p>
+        <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+          <input type="checkbox" checked={names} onChange={e => setNames(e.target.checked)}
+            style={{ accentColor: "var(--accent)", width: 16, height: 16 }}
+            data-testid="profile-names" />
+          <span style={{ fontSize: 14 }}>{t.prof_names}</span>
+        </label>
+        <p className="hint" style={{ margin: "4px 0 10px 26px", fontSize: 13 }}>{t.prof_names_hint}</p>
+        <div className="section-title" style={{ margin: "4px 0 0" }}>{t.prof_preview_h}</div>
+        {err
+          ? <p className="hint" style={{ color: "var(--danger)" }} data-testid="profile-error">{t.prof_error} {err}</p>
+          : <pre className="profile-pre" data-testid="profile-preview" aria-busy={loading}>{loading ? t.prof_loading : text}</pre>}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
+          <Btn variant="outline" onClick={onClose} data-testid="profile-close">{t.prof_close}</Btn>
+          <Btn variant="primary" icon="download" disabled={loading || !!err || !text} onClick={save}
+            data-testid="profile-save">{t.prof_save}</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CapacityView({ lang }) {
   const t = STR[lang];
   const [cap, setCap] = useState(null);
   const [err, setErr] = useState(false);
   const [updated, setUpdated] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
   const hist = useRef({ cpu: [], mem: [], nodes: {} }); // ring-buffers
 
   useEffect(() => {
@@ -141,12 +223,16 @@ function CapacityView({ lang }) {
           <h1 className="page-title" style={{ marginBottom: 4 }}>{t.cap_title}</h1>
           <p className="lead" style={{ margin: 0 }}>{t.cap_lead}</p>
         </div>
-        <div className="cap-live">
-          <span className="statusdot green" />
-          <span>{t.cap_live}</span>
-          {updated && <span className="cap-ts">{t.cap_updated} {updated.toLocaleTimeString(lang === "pt" ? "pt-BR" : lang === "es" ? "es-ES" : "en-US")}</span>}
+        <div className="cap-actions">
+          <div className="cap-live">
+            <span className="statusdot green" />
+            <span>{t.cap_live}</span>
+            {updated && <span className="cap-ts">{t.cap_updated} {updated.toLocaleTimeString(lang === "pt" ? "pt-BR" : lang === "es" ? "es-ES" : "en-US")}</span>}
+          </div>
+          <Btn variant="outline" icon="download" onClick={() => setProfileOpen(true)} data-testid="profile-open">{t.prof_btn}</Btn>
         </div>
       </div>
+      {profileOpen && <ProfileDialog t={t} onClose={() => setProfileOpen(false)} />}
 
       {!on && (
         <div className="cap-notice"><Icon name="activity" size={15} />{t.cap_no_metrics}</div>
