@@ -590,6 +590,17 @@ const STR = {
     cap_ready: "Pronto", cap_notready: "Indisponível",
     cap_loading: "Coletando métricas do cluster…",
     cap_error: "Não foi possível ler a capacidade do cluster.",
+    // cluster profile export (ADR-060)
+    prof_btn: "Baixar perfil do cluster",
+    prof_title: "Perfil do cluster",
+    prof_lead: "Um resumo somente leitura de tamanho, forma, carga e saúde dos deployments. O que aparece abaixo é exatamente o que o arquivo vai conter; nada é enviado a lugar algum.",
+    prof_names: "Incluir nomes de deployments e índices",
+    prof_names_hint: "Desligado: deployments, nós e tenants aparecem como pseudônimos estáveis.",
+    prof_preview_h: "Conteúdo do arquivo",
+    prof_loading: "Montando o perfil…",
+    prof_error: "Não foi possível montar o perfil.",
+    prof_save: "Salvar arquivo",
+    prof_close: "Fechar",
   },
   en: {
     nav_status: "Status", nav_create: "Create", nav_capacity: "Capacity", nav_settings: "Settings",
@@ -1169,6 +1180,17 @@ const STR = {
     cap_ready: "Ready", cap_notready: "Not ready",
     cap_loading: "Gathering cluster metrics…",
     cap_error: "Could not read cluster capacity.",
+    // cluster profile export (ADR-060)
+    prof_btn: "Download cluster profile",
+    prof_title: "Cluster profile",
+    prof_lead: "A read-only summary of the size, shape, load and health of your deployments. What you see below is exactly what the file will contain; nothing is sent anywhere.",
+    prof_names: "Include deployment and index names",
+    prof_names_hint: "Off: deployments, nodes and tenants appear as stable pseudonyms.",
+    prof_preview_h: "File contents",
+    prof_loading: "Building the profile…",
+    prof_error: "Could not build the profile.",
+    prof_save: "Save file",
+    prof_close: "Close",
   },
   es: {
     nav_status: "Estado", nav_create: "Crear", nav_capacity: "Capacidad", nav_settings: "Ajustes",
@@ -1752,6 +1774,17 @@ const STR = {
     cap_ready: "Listo", cap_notready: "No listo",
     cap_loading: "Recopilando métricas del clúster…",
     cap_error: "No se pudo leer la capacidad del clúster.",
+    // cluster profile export (ADR-060)
+    prof_btn: "Descargar perfil del clúster",
+    prof_title: "Perfil del clúster",
+    prof_lead: "Un resumen de solo lectura del tamaño, la forma, la carga y la salud de sus deployments. Lo que ve abajo es exactamente lo que contendrá el archivo; no se envía nada a ningún lugar.",
+    prof_names: "Incluir nombres de deployments e índices",
+    prof_names_hint: "Desactivado: deployments, nodos y tenants aparecen como seudónimos estables.",
+    prof_preview_h: "Contenido del archivo",
+    prof_loading: "Generando el perfil…",
+    prof_error: "No se pudo generar el perfil.",
+    prof_save: "Guardar archivo",
+    prof_close: "Cerrar",
   }
 };
 
