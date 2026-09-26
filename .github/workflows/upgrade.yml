@@ -181,6 +181,20 @@ jobs:
             kubectl apply -f candidate-install.yaml
           fi
           kubectl -n veloxsearch-system rollout status deploy/veloxsearch --timeout=600s
+          # `rollout status` returns while the N-1 Pod is still Terminating, and
+          # a port-forward stays attached to it; the first run of this lane had
+          # the OLD binary answer bootstrap_ensure. Wait until only the
+          # candidate's Pod exists, then until the port-forward serves again.
+          for _ in $(seq 120); do
+            [ "$(kubectl -n veloxsearch-system get pods -l app=veloxsearch --no-headers 2>/dev/null | wc -l)" = 1 ] && break
+            sleep 5
+          done
+          kubectl -n veloxsearch-system get pods -l app=veloxsearch -o wide
+          [ "$(kubectl -n veloxsearch-system get pods -l app=veloxsearch --no-headers | wc -l)" = 1 ]
+          # Re-attach: kill the kubectl child, the loop restarts it on the new Pod.
+          pkill -f '^kubectl -n veloxsearch-system port-forward' || true
+          for _ in $(seq 60); do curl -fsS -o /dev/null "$BASE/" && break; sleep 2; done
+          curl -fsS -o /dev/null "$BASE/"
 
       - name: "operator-ready: the upgrade granted no cluster-admin"
         if: matrix.variant == 'operator-ready'
