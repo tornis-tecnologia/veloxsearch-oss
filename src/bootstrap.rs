@@ -1415,10 +1415,19 @@ fn binding_is_ours(b: &k8s_openapi::api::rbac::v1::ClusterRoleBinding, own_ns: &
     })
 }
 
+/// Whether the bootstrap binding has nothing left to do: bootstrap is ready and
+/// no deferred Longhorn install is owed. Under ADR-061 that install is owed only
+/// on a cluster with NO default StorageClass; a cluster riding its own default
+/// (node-local or CSI) never installs Longhorn, so waiting for Longhorn there
+/// would keep cluster-admin forever. The same storage test `ensure()` and
+/// `run_install` revoke on.
+fn revoke_due(bootstrap_ready: bool, storage: &DeploymentStorage) -> bool {
+    bootstrap_ready && !storage.needs_longhorn()
+}
+
 /// The ADR-027 revoke condition, probed directly: cert-manager and the
-/// operator serving with no foreign-operator block, and Longhorn in place
-/// (the deferred Longhorn install is the last thing that needs cluster-admin,
-/// ADR-031). The same condition `ensure()` and `run_install` revoke on.
+/// operator serving with no foreign-operator block, and no deferred Longhorn
+/// install owed (`revoke_due`).
 async fn bootstrap_complete(client: &Client) -> Result<bool> {
     let cert_manager_ready =
         cert_manager_step(&cert_manager_deploys(client).await) == InstallStep::Ready;
@@ -1426,12 +1435,13 @@ async fn bootstrap_complete(client: &Client) -> Result<bool> {
         .await
         .context("probing the OpenSearch operator")?;
     let (_, operator_ready) = operator_flags(&presence);
-    Ok(bootstrap_ready(
+    let ready = bootstrap_ready(
         cert_manager_ready,
         operator_ready,
         &presence,
         allow_foreign_operator(),
-    ) && classify_storage(client).await?.longhorn_ready())
+    );
+    Ok(revoke_due(ready, &classify_storage(client).await?))
 }
 
 /// Background watch (spawned once in `main`): drop the `veloxsearch-bootstrap`
@@ -2433,6 +2443,25 @@ parameters:
             OWN_NS
         ));
         assert!(!binding_is_ours(&crb(&[]), OWN_NS));
+    }
+
+    /// The watch revokes on the same storage test as `ensure()`: any usable
+    /// default counts (ADR-061). Requiring Longhorn kept cluster-admin forever
+    /// on a cluster that rides its own default StorageClass.
+    #[test]
+    fn the_revoke_watch_does_not_wait_for_longhorn_on_flexible_storage() {
+        for ds in [
+            DeploymentStorage::Longhorn { default: false },
+            DeploymentStorage::ForeignDefault("gp3".into()),
+            DeploymentStorage::NodeLocal("standard".into()),
+        ] {
+            assert!(revoke_due(true, &ds), "{ds:?}");
+            assert!(!revoke_due(false, &ds), "bootstrap not ready: {ds:?}");
+        }
+        assert!(
+            !revoke_due(true, &DeploymentStorage::Absent),
+            "the deferred Longhorn install still needs the binding"
+        );
     }
 
     // --- Operator drift (ADR-057, #54) -------------------------------------
