@@ -45,9 +45,11 @@ metadata:
 #  - veloxsearch-runtime: day-to-day permissions, enumerated below.
 #  - veloxsearch-bootstrap: cluster-admin ONLY for the one-time self-bootstrap
 #    (cert-manager + operator: CRDs, webhooks, broad ClusterRoles). The app
-#    DELETES THIS BINDING ITSELF once bootstrap completes (ADR-027). Re-applying
-#    this file (an upgrade) re-creates it; the running app deletes it again
-#    within a minute once bootstrap and storage are complete (ADR-057).
+#    DELETES THIS BINDING ITSELF once bootstrap completes (ADR-027). Upgrades
+#    apply the release's upgrade.yaml, which is this file without that binding
+#    (deploy/upgrade-manifest.sh, ADR-057). Re-applying THIS file re-creates
+#    it; the running app deletes it again within a minute once bootstrap is
+#    complete.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

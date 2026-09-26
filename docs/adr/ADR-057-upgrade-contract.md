@@ -46,8 +46,6 @@ An upgrade is a rollout of a new VeloxSearch release. It may change:
   what `deploy/install.yaml` declares.
 - **The control-plane database, through migrations** (forward-only; see
   DEPLOY.md "Rolling back").
-- **Transiently, the `veloxsearch-bootstrap` ClusterRoleBinding**, which the
-  manifest re-creates and the running app deletes again (below).
 - **The ADR-055 fields** of an operator-owned Dashboards Deployment
   (`spec.strategy.type`, the Dashboards container's `startupProbe`, and
   `spec.replicas` during the one-shot `.kibana_1` remediation), under their
@@ -60,6 +58,9 @@ An upgrade is a rollout of a new VeloxSearch release. It may change:
 - Any **`OpenSearchCluster` `.spec`**, except through a user-requested OpenSearch
   version upgrade (ADR-048), which is its own explicit action, not a side effect
   of a VeloxSearch rollout.
+- **The `veloxsearch-bootstrap` cluster-admin binding.** An upgrade never
+  creates it: the first bootstrap is not repeated, so nothing an upgrade does
+  needs cluster-admin.
 
 ### How the code holds it
 
@@ -78,15 +79,22 @@ An upgrade is a rollout of a new VeloxSearch release. It may change:
    is requirement **R9, warn-only**, with remediation text on the conformity
    screen and a notice in the main shell. Upgrading the operator is a separate,
    explicit step (DEPLOY.md "Operator version drift").
-3. **The bootstrap binding is revoked again after every re-apply.** The app runs
-   a background watch: once a minute, if `veloxsearch-bootstrap` exists, names
-   this app's own ServiceAccount in its own namespace, no install job is running,
-   and cert-manager, the operator and Longhorn are ready (the ADR-027/031
-   condition), it deletes the binding.
-4. **The upgrade instruction is the versioned release artifact.** DEPLOY.md
-   points at `releases/download/v<version>/install.yaml` (digest-pinned) and
-   says how to confirm the binding is gone. The whole manifest is applied, not
-   only the image, because a release may need RBAC the previous one lacked.
+3. **Upgrades apply a manifest without the bootstrap binding.** Each release
+   ships `upgrade.yaml` next to `install.yaml`: the same digest-pinned manifest
+   minus the one `veloxsearch-bootstrap` ClusterRoleBinding, derived by
+   `deploy/upgrade-manifest.sh` in `release.yml` (and checked on every PR in
+   `ci.yml`, so a manifest it cannot split fails before a release). DEPLOY.md's
+   upgrade applies `releases/download/v<version>/upgrade.yaml`. The whole
+   manifest is applied, not only the image, because a release may need RBAC the
+   previous one lacked. `kubectl apply` without `--prune` deletes nothing, so an
+   install whose bootstrap is still owed keeps the binding it already has.
+4. **A re-applied `install.yaml` is revoked again.** Re-applying the install
+   manifest by mistake, or upgrading to a release that predates `upgrade.yaml`,
+   re-creates the binding. The app runs a background watch: once a minute, if
+   `veloxsearch-bootstrap` exists, names this app's own ServiceAccount in its
+   own namespace, no install job is running, cert-manager and the operator are
+   ready and no deferred Longhorn install is owed (the ADR-027/031 condition,
+   as amended by ADR-061), it deletes the binding.
 5. **`deploy/install.yaml` is kept in lockstep with `Cargo.toml`.** CI's
    `manifest-version` job fails any tree whose manifest image tag is not the crate
    version, so applying the file from a checkout cannot roll an install back. The
@@ -97,9 +105,13 @@ An upgrade is a rollout of a new VeloxSearch release. It may change:
    previous release on minikube, brings a deployment to green, rolls the
    candidate out over it, and asserts the operator Deployment spec and image,
    the CRDs and the `OpenSearchCluster` spec are unchanged, the deployment is
-   still green, and the binding is gone. A variant scales the operator to 0
-   before the rollout and asserts bootstrap applied nothing to operator-owned
-   objects.
+   still green, and no binding was granted. A variant scales the operator to 0
+   and re-applies the full `install.yaml` — bootstrap holding cluster-admin
+   while the operator is not Ready — and asserts bootstrap applied nothing to
+   operator-owned objects and the watch revoked the binding afterwards.
+7. **Release versions only move forward.** `release.yml`'s gate refuses a
+   `Cargo.toml` version lower than the previous one, so a release's
+   `install.yaml` can never pin an older image than the release before it.
 
 ### The vendored operator bundle (item 5 of #54)
 
@@ -134,14 +146,18 @@ maintainers (see Consequences).
   reference unchanged — R9 cannot see that. Digest-pinning the vendored image
   would close it, and is a maintainer decision because it changes what fresh
   installs run.
-- **The binding is cluster-admin for up to about a minute after each
-  re-apply**, longer if a component is not ready, and indefinitely on a
-  cluster where Longhorn was never installed (unchanged from ADR-031). The
-  watch costs one GET per minute in the steady state.
+- **Two manifests per release.** `install.yaml` for a first install,
+  `upgrade.yaml` for everything after. Applying the wrong one is survivable in
+  both directions: `upgrade.yaml` on an empty cluster starts an app whose
+  bootstrap fails with a permission error on the conformity screen; `install.yaml` over an
+  existing install re-grants cluster-admin until the watch revokes it, about a
+  minute once bootstrap is complete, indefinitely on a cluster that still owes
+  the Longhorn install (unchanged from ADR-031). The watch costs one GET per
+  minute in the steady state.
 - **The watch deletes a ClusterRoleBinding without a human in the loop.** It is
   scoped by name *and* by subject to this app's ServiceAccount and namespace.
-- **The upgrade lane is slow** (minikube, Longhorn, cert-manager, the operator
-  and a three-node OpenSearch on one runner), so it runs on pull requests that
+- **The upgrade lane is slow** (minikube, cert-manager, the operator and a
+  three-node OpenSearch on one runner), so it runs on pull requests that
   touch the upgrade surface — `Cargo.toml` (every release PR), `deploy/`,
   `src/bootstrap.rs`, the lane itself — and on demand, not on every push.
 - Operator upgrades are not exercised by CI; they are an explicit, documented
@@ -163,9 +179,14 @@ maintainers (see Consequences).
   out.
 - **Split the bootstrap binding out of `install.yaml`** (a separate
   `bootstrap.yaml` applied only on first install). Removes the re-grant at the
-  source, but makes the first install two commands and breaks `velox init` and
-  every existing one-command instruction. Worth revisiting; the watch works
-  either way.
+  source too, but makes the first install two commands and breaks `velox init`
+  and every existing one-command instruction. Deriving `upgrade.yaml` instead
+  keeps the first install one command.
+- **Re-apply `install.yaml` and rely on the watch alone.** What this ADR first
+  proposed. It still grants cluster-admin on every upgrade, for about a minute
+  in the good case and indefinitely when a component is not ready — exactly
+  when bootstrap is running. Kept only as the safety net for a mistaken
+  re-apply.
 - **Gate on readiness with a longer wait, then install.** Any timeout is a race
   against a slow node; the failure mode is still "rewrote the operator".
   Presence, not readiness, is the fact that decides whether something is ours to

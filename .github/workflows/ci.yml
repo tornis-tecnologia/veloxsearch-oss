@@ -57,6 +57,23 @@ jobs:
           done
           echo "install.yaml pins veloxsearch-oss:$version"
 
+      # release.yml derives the upgrade asset with this script (ADR-057); a
+      # manifest it cannot split must fail on the PR, not on the release.
+      - name: The upgrade manifest drops only the bootstrap binding
+        run: |
+          set -euo pipefail
+          deploy/upgrade-manifest.sh deploy/install.yaml > upgrade.yaml
+          python3 - <<'PY'
+          import yaml
+          docs = lambda p: [d for d in yaml.safe_load_all(open(p)) if d]
+          key = lambda d: (d["kind"], d["metadata"]["name"])
+          full, upgrade = docs("deploy/install.yaml"), docs("upgrade.yaml")
+          expected = [d for d in full if key(d) != ("ClusterRoleBinding", "veloxsearch-bootstrap")]
+          assert len(expected) == len(full) - 1, "install.yaml has no bootstrap binding"
+          assert upgrade == expected, "upgrade.yaml differs from install.yaml beyond the binding"
+          print(f"upgrade.yaml = install.yaml minus the bootstrap binding ({len(upgrade)} documents)")
+          PY
+
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest

@@ -330,8 +330,8 @@ the create wizard — is at [`.github/assets/demo.gif`](../.github/assets/demo.g
    Bootstrap installs only what is **absent**: a component that is installed
    but not Ready is waited on, never re-installed, and an operator that differs
    from the one this release vendors is reported as R9, never changed
-   (ADR-057). Upgrading VeloxSearch later re-creates the binding; the running
-   app revokes it again — see
+   (ADR-057). Upgrades apply the release's `upgrade.yaml`, which carries no
+   bootstrap binding — see
    [DEPLOY.md, "Rolling out an upgrade"](DEPLOY.md#rolling-out-an-upgrade).
 5. **Create your first deployment** — a four-step wizard (ADR-053):
    - **Purpose** — the name, the OpenSearch version, and what the deployment is
@@ -404,6 +404,11 @@ Three places serve an install manifest. They are not equivalent:
 | `releases/download/v0.10.5/install.yaml` | The same, pinned to one version instead of following the newest |
 | `deploy/install.yaml` on `main` | The source the release is built from. The image is a version **tag**, not a digest, and `main` moves. CI keeps the tag equal to `Cargo.toml`'s version, so it never names an older release than the tree (#54) — but it is still right for development, wrong for a cluster you care about |
 | `https://get.veloxsearch.ai/install.yml` | A convenience redirect to `releases/latest/download/install.yaml`. The daily `Mirror watch` workflow fails if it stops redirecting there or its bytes differ from the release asset (#37) |
+
+Each release also ships `upgrade.yaml`: the same manifest without the one-time
+`veloxsearch-bootstrap` cluster-admin binding. It is for upgrading an existing
+install, never for a first install (bootstrap needs the binding) — see
+[DEPLOY.md, "Rolling out an upgrade"](DEPLOY.md#rolling-out-an-upgrade).
 
 ### Verifying the image
 

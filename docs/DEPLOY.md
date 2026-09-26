@@ -46,10 +46,10 @@ rolled out over it under the contract in [ADR-057](adr/ADR-057-upgrade-contract.
 
 | Step | |
 | --- | --- |
-| `gate` | Confirms the version actually changed, and refuses if a tag for it already exists |
+| `gate` | Confirms the version actually changed and moved forward, and refuses if a tag for it already exists |
 | `verify` | Re-runs every CI gate **on the release commit**. `main` having been green earlier is a different claim from this tree being green |
 | `publish` | Builds and pushes `<image>:<version>`, then signs it with cosign **keyless** — an OIDC identity and a ten-minute certificate, so there is no signing key to leak or rotate |
-| `release` | Rewrites the manifest's image to the published **digest**, tags `v<version>`, and publishes the release with `install.yaml`, `velox-linux-amd64` and `SHA256SUMS` attached |
+| `release` | Rewrites the manifest's image to the published **digest**, tags `v<version>`, and publishes the release with `install.yaml`, `upgrade.yaml` (the same manifest without the bootstrap binding, ADR-057), `velox-linux-amd64` and `SHA256SUMS` attached |
 
 ### Why the digest lives in the release, not in `main`
 
@@ -99,14 +99,24 @@ and, through migrations, its database. It does not change the OpenSearch
 operator, its CRDs, cert-manager, or your `OpenSearchCluster`s
 ([ADR-057](adr/ADR-057-upgrade-contract.md)).
 
-Apply the **release artifact of the version you are moving to** — never
-`deploy/install.yaml` from a checkout, and never an older release than the one
-running:
+Apply the **upgrade manifest of the version you are moving to** — never
+`install.yaml`, never `deploy/install.yaml` from a checkout, and never an older
+release than the one running:
 
 ```sh
-VERSION=0.9.0   # the release you are upgrading TO
-kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/v$VERSION/install.yaml
+VERSION=0.10.5   # the release you are upgrading TO
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/v$VERSION/upgrade.yaml
 kubectl -n veloxsearch-system rollout status deploy/veloxsearch
+```
+
+`upgrade.yaml` is the release's `install.yaml` — the same digest-pinned image,
+the same runtime RBAC — minus one document: the `veloxsearch-bootstrap`
+ClusterRoleBinding to `cluster-admin`. That binding exists only for the first
+bootstrap, which an upgrade does not repeat, so **an upgrade never grants
+cluster-admin**. Confirm it:
+
+```sh
+kubectl get clusterrolebinding veloxsearch-bootstrap   # expect: NotFound
 ```
 
 To see what runs before you pick `VERSION`:
@@ -120,20 +130,11 @@ a release can need RBAC the previous one did not have — ADR-055 added `patch` 
 `apps/deployments`, for example — and an image-only upgrade would start the new
 binary without it.
 
-**The bootstrap binding comes back, and goes away again.** The manifest
-re-creates the `veloxsearch-bootstrap` cluster-admin ClusterRoleBinding. The new
-Pod deletes it again within about a minute, once cert-manager, the operator and
-Longhorn are all ready — the same condition the first bootstrap revokes on
-(ADR-027). Confirm it:
-
-```sh
-kubectl get clusterrolebinding veloxsearch-bootstrap   # expect: NotFound
-```
-
-If it is still there after a few minutes, the conformity report says which
-component is not ready. On a cluster where Longhorn is already installed you can
-also delete the binding by hand; the day-to-day `veloxsearch-runtime` role does
-not need it.
+**Releases published before `upgrade.yaml` existed** ship only `install.yaml`.
+Applying one of those re-creates the binding. From this release on, the running
+app deletes a re-created binding again within about a minute once bootstrap is
+complete (ADR-027, ADR-057); on older releases, delete it by hand after the
+rollout — the day-to-day `veloxsearch-runtime` role does not need it.
 
 **An operator that is restarting during the rollout is left alone.** Bootstrap
 installs only what is absent. A component that is installed but not Ready is
@@ -178,7 +179,7 @@ changed. What to do depends on why:
   namespace it was rendered into to the app namespace:
 
   ```sh
-  VERSION=0.9.0
+  VERSION=0.10.5
   curl -fsSL https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/v$VERSION/deploy/bootstrap/operator.yaml \
     | sed 's/veloxsearch-test/veloxsearch-system/g' \
     | kubectl apply --server-side --field-manager=veloxsearch-bootstrap --force-conflicts -f -
