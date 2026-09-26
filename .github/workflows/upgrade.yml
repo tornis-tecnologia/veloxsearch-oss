@@ -3,17 +3,25 @@ name: Upgrade (N-1 -> N)
 # The upgrade contract (ADR-057, #54): rolling out a new VeloxSearch changes the
 # VeloxSearch control plane and nothing it manages — not the operator
 # Deployment, not the operator or cert-manager CRDs, not an OpenSearchCluster
-# spec — and leaves no cluster-admin binding behind.
+# spec — and never re-grants cluster-admin.
 #
 # The lane installs the PREVIOUS release on minikube, drives a real first run to
-# a green deployment, rolls the candidate built from this commit out over it the
-# way DEPLOY.md says to (apply the manifest), and asserts the contract
-# (tests/upgrade_check.py). The `operator-down` variant scales the operator to 0
-# first, which is the state that used to make bootstrap force-apply its bundle.
+# a green deployment, rolls the candidate built from this commit out over it,
+# and asserts the contract (tests/upgrade_check.py). Two variants:
+#   operator-ready  the documented upgrade (DEPLOY.md): apply the UPGRADE
+#                   manifest (deploy/upgrade-manifest.sh), which carries no
+#                   bootstrap binding — the lane asserts none ever appears.
+#   operator-down   the worst case: the operator scaled to 0 AND the full
+#                   install.yaml re-applied, so bootstrap holds cluster-admin
+#                   while the operator is not Ready — the exact state that used
+#                   to make it force-apply its bundle. It must apply nothing,
+#                   and the running app must revoke the binding afterwards.
 #
-# Trigger: this is the slow lane (Longhorn, cert-manager, the operator and a
-# three-node OpenSearch on one runner, roughly an hour), so it does NOT run on
-# every push. It runs on pull requests that touch the upgrade surface —
+# Storage: minikube's default StorageClass is node-local, which deployments ride
+# with a warning (ADR-061), so the lane installs no Longhorn.
+#
+# Trigger: this is the slow lane (cert-manager, the operator and a three-node
+# OpenSearch on one runner), so it does NOT run on every push. It runs on pull requests that touch the upgrade surface —
 # Cargo.toml, which every release PR changes, the manifests, the bootstrap
 # code, and the lane itself — and on demand.
 on:
@@ -21,6 +29,7 @@ on:
     paths:
       - Cargo.toml
       - deploy/install.yaml
+      - deploy/upgrade-manifest.sh
       - deploy/bootstrap/**
       - src/bootstrap.rs
       - tests/upgrade_check.py
@@ -89,8 +98,8 @@ jobs:
           python-version: '3.x'
 
       - name: Free runner disk
-        # Longhorn, the operator, cert-manager and OpenSearch images plus three
-        # PVCs do not fit next to the preinstalled SDKs.
+        # The operator, cert-manager and OpenSearch images plus three PVCs do
+        # not fit next to the preinstalled SDKs.
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -108,10 +117,6 @@ jobs:
       - name: Start minikube
         # R4 needs >= 8Gi allocatable; the runner has 16Gi and 4 vCPU.
         run: minikube start --driver=docker --cpus=4 --memory=12g --disk-size=50g --wait=all
-
-      - name: Longhorn node prerequisite (open-iscsi)
-        # Same step INSTALL.md §3a documents for minikube.
-        run: minikube ssh -- 'sudo apt-get update && sudo apt-get install -y open-iscsi && sudo systemctl enable --now iscsid'
 
       - name: Side-load the candidate image
         run: minikube image load candidate.tar
@@ -161,14 +166,25 @@ jobs:
           [ -z "$(kubectl -n veloxsearch-system get pods -l app.kubernetes.io/name=opensearch-operator --no-headers 2>/dev/null)" ]
           python3 tests/upgrade_check.py snapshot "$RUNNER_TEMP/down.json"
 
-      - name: "N: roll out the candidate (DEPLOY.md: apply the manifest)"
+      - name: "N: roll out the candidate"
+        # operator-ready applies what DEPLOY.md says (the upgrade manifest);
+        # operator-down re-applies the full install manifest on purpose.
         run: |
           set -euo pipefail
           sed -E "s|^(\s*image: )docker\.io/tornistecnologia/veloxsearch-oss:.*$|\1$CANDIDATE_IMAGE|" \
             deploy/install.yaml > candidate-install.yaml
           grep -q "image: $CANDIDATE_IMAGE" candidate-install.yaml
-          kubectl apply -f candidate-install.yaml
+          if [ "${{ matrix.variant }}" = operator-ready ]; then
+            deploy/upgrade-manifest.sh candidate-install.yaml > candidate-upgrade.yaml
+            kubectl apply -f candidate-upgrade.yaml
+          else
+            kubectl apply -f candidate-install.yaml
+          fi
           kubectl -n veloxsearch-system rollout status deploy/veloxsearch --timeout=600s
+
+      - name: "operator-ready: the upgrade granted no cluster-admin"
+        if: matrix.variant == 'operator-ready'
+        run: python3 tests/upgrade_check.py binding gone --timeout 0
 
       - name: "operator-down: bootstrap waits and applies nothing"
         if: matrix.variant == 'operator-down'

@@ -260,8 +260,10 @@ def cmd_prepare(args):
             fail(f"bootstrap never became ready: {s}")
         time.sleep(10)
 
-    # Creation runs the Longhorn install synchronously on a node-local cluster
-    # (ensure_storage_ready), hence the long request timeout.
+    # Creation runs the storage gate synchronously (ensure_storage_ready): a
+    # cluster with no default StorageClass installs Longhorn inside this
+    # request, hence the long timeout. minikube's node-local default needs none
+    # (ADR-061).
     status, name = api("create_cluster", {
         "name": "upg", "size": "small", "purpose": "search",
         "nodes": "", "memory": "", "disk": "", "config": "", "monitors": None,
