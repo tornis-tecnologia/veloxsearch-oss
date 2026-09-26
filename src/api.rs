@@ -454,6 +454,28 @@ pub struct OtelComponentInfo {
     pub image: String,
 }
 
+/// Which build is serving (#55). `version`/`commit` are compiled into the
+/// binary; the image and operator fields are read back from the cluster and
+/// say `"unavailable"` (with a `*_note`) when they cannot be.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BuildInfo {
+    /// The crate version — the string `min_core_version` refusals quote.
+    pub version: String,
+    /// Git commit baked in at build time, or `"unknown"`.
+    pub commit: String,
+    /// `sha256:…` of the image the kubelet is running for this Pod.
+    pub image_digest: String,
+    /// The raw `imageID` the digest was taken from (empty when unavailable).
+    pub image_id: String,
+    pub image_note: String,
+    pub operator_image: String,
+    /// `namespace/name` of the operator Deployment the image came from.
+    pub operator_deployment: String,
+    pub operator_note: String,
+    /// Where integration packages are fetched from (credentials redacted).
+    pub catalog_source: String,
+}
+
 /// One OpenSearch node's live stats (`_nodes/stats`) for the Overview blocks.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NodeStat {
@@ -482,6 +504,18 @@ pub struct ClusterMetrics {
     pub nodes: Vec<NodeStat>,
     pub total_docs: u64,
     pub store_size_bytes: u64,
+    /// Actual OpenSearch data footprint — the sum of per-node
+    /// `indices.store.size_in_bytes`. This, not the `fs.data` figure, is the
+    /// honest "used" under a non-enforcing provisioner (#95).
+    #[serde(default)]
+    pub data_used_bytes: u64,
+    /// Whether the provisioner backing the data PVCs enforces the requested
+    /// capacity. Longhorn and foreign CSI defaults do; node-local ones
+    /// (local-path, hostpath, no-provisioner) never do — the request is
+    /// advisory. Unknown degrades to `true`, the long-standing reading, so
+    /// the UI hint never fires spuriously (#95).
+    #[serde(default = "default_true")]
+    pub capacity_enforced: bool,
 }
 
 /// One downsampled time-bucket of cluster-aggregate health (#9, the "second
@@ -610,21 +644,27 @@ pub struct BootstrapStatus {
     pub operator_drift: bool,
 }
 
-/// Read-only storage classification for the "auto-install + notify" Longhorn
-/// flow (ADR-031/043). The create flow polls this to learn whether creating a
-/// cluster will auto-install Longhorn (`needs_longhorn`) and, while one runs, to
-/// show progress (`installing`) / a completion notice. Reading it installs nothing.
+/// Read-only storage classification for the create flow (ADR-031/043, flexible
+/// per ADR-061). The create flow polls this to learn whether creating a cluster
+/// will auto-install Longhorn (`needs_longhorn` — only when the cluster has no
+/// default StorageClass at all) and, while one runs, to show progress
+/// (`installing`) / a completion notice. Reading it installs nothing.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StorageStatus {
+    /// Storage data survives a reschedule: Longhorn present, or a foreign CSI
+    /// default (ADR-061). False for a node-local default (usable, warned).
     pub durable: bool,
+    /// Only when there is no default StorageClass at all — creation
+    /// auto-installs Longhorn.
     pub needs_longhorn: bool,
     pub default_class: Option<String>,
     pub detail: String,
     pub installing: Option<String>,
     pub error: Option<String>,
-    /// Node packages Longhorn reports missing (`#15`, ADR-043) — the create
-    /// flow renders one panel per entry (package + per-distro commands) and
-    /// blocks creation while any remain.
+    /// Node packages Longhorn reports missing (`#15`) — only probed where the
+    /// install is actually owed (no default SC to ride). The create flow
+    /// renders one panel per entry (package + per-distro commands) and blocks
+    /// creation while any remain.
     pub missing_packages: Vec<MissingPackage>,
 }
 
@@ -701,6 +741,9 @@ mod server {
         }
         fn unauthorized(message: impl Into<String>) -> Self {
             Self::new(StatusCode::UNAUTHORIZED, message)
+        }
+        fn conflict(message: impl Into<String>) -> Self {
+            Self::new(StatusCode::CONFLICT, message)
         }
     }
 
@@ -1361,6 +1404,13 @@ mod server {
             .map_err(ApiError::internal)
     }
 
+    /// Build identity (#55). Installation-level: the image digest and operator
+    /// are facts about the host install, not about any tenant's deployment.
+    async fn build_info(scope: Scope) -> Result<Json<BuildInfo>, ApiError> {
+        scope.require_admin()?;
+        Ok(Json(crate::build_info::collect().await))
+    }
+
     async fn bootstrap_ensure(scope: Scope) -> Result<Json<BootstrapStatus>, ApiError> {
         scope.require_admin()?;
         crate::bootstrap::ensure()
@@ -1451,8 +1501,63 @@ mod server {
         Ok(StatusCode::OK)
     }
 
+    /// Creates whose request is still being handled, keyed by
+    /// [`create_key`]. See [`claim_create`].
+    static CREATES_IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+    /// One create of `<namespace>/<base name>` while its request is in flight.
+    /// Dropping it — success, `?` on any error, or the client hanging up and
+    /// axum dropping the handler future — releases the name.
+    struct CreateClaim<'a> {
+        set: &'a std::sync::Mutex<std::collections::BTreeSet<String>>,
+        key: String,
+    }
+
+    impl Drop for CreateClaim<'_> {
+        fn drop(&mut self) {
+            self.set
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&self.key);
+        }
+    }
+
+    /// The key a create is deduplicated on: the namespace it writes into and
+    /// the base name as `unique_name` will sanitize it, so `Logs` and `logs `
+    /// are the same request.
+    fn create_key(namespace: &str, base: &str) -> String {
+        format!("{namespace}/{}", crate::k8s::sanitize_label(base))
+    }
+
+    /// #56: `None` when a create for the same key is already being handled.
+    ///
+    /// Every create generates a fresh `<name>-<suffix>` (ADR-020), so a repeat
+    /// submit never re-applies onto the first deployment — it silently creates
+    /// a SECOND one, with its own deferred provisioning task. The double-click
+    /// window is the request itself (version check against the registry, the
+    /// storage gate — minutes when it installs Longhorn — then the apply), so
+    /// that is what is guarded. Once the first response is out, another create
+    /// of the same base name is a new intent and is allowed, as before.
+    ///
+    /// In-process only: the backend runs as one replica, and a restart drops
+    /// the in-flight requests this guards along with the set.
+    fn claim_create(
+        set: &std::sync::Mutex<std::collections::BTreeSet<String>>,
+        key: String,
+    ) -> Option<CreateClaim<'_>> {
+        let fresh = set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone());
+        fresh.then_some(CreateClaim { set, key })
+    }
+
     /// Create a NEW deployment. Generates a unique `<name>-<suffix>` (ADR-020)
     /// and returns the generated name (a bare JSON string) so the UI can link to it.
+    ///
+    /// A second create of the same base name while the first is still being
+    /// handled is a 409 (#56) — see [`claim_create`].
     async fn create_cluster(
         scope: Scope,
         Json(req): Json<ClusterReq>,
@@ -1481,6 +1586,18 @@ mod server {
         if let Some(s) = snapshot.as_ref() {
             crate::snapshot::validate(s).map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
         }
+        // Claimed before the first await, so two requests racing in on the
+        // same tick cannot both pass.
+        let _in_flight = claim_create(
+            &CREATES_IN_FLIGHT,
+            create_key(&scope.write_namespace(), &req.name),
+        )
+        .ok_or_else(|| {
+            ApiError::conflict(format!(
+                "a deployment named '{}' is already being created — wait for it to finish",
+                req.name.trim()
+            ))
+        })?;
         let final_name = crate::k8s::unique_name(&scope, &req.name)
             .await
             .map_err(ApiError::internal)?;
@@ -2075,7 +2192,12 @@ mod server {
         // cluster comes up. A deployment the caller does not own takes the
         // same branch, so "not yours" is indistinguishable from "not ready".
         let Some(dep) = scope.resolve(&req.name).await.unwrap_or(None) else {
-            return Json(ClusterMetrics::default());
+            // `capacity_enforced: true`: the empty stub has no PVCs behind it,
+            // and "not enforced" is a claim about a provisioner we never saw.
+            return Json(ClusterMetrics {
+                capacity_enforced: true,
+                ..Default::default()
+            });
         };
         Json(crate::metrics::node_stats(&dep).await.unwrap_or_default())
     }
@@ -2174,20 +2296,9 @@ mod server {
         crate::access::set(&cfg).await.map_err(ApiError::internal)?;
         // Switching to ingress mode must cover deployments that already exist —
         // their status URLs flip immediately, so the Ingress objects must too.
-        if cfg.ingress_enabled() {
-            let client = crate::k8s::client().await.map_err(ApiError::internal)?;
-            for dep in crate::k8s::scoped_deployments(&scope)
-                .await
-                .unwrap_or_default()
-            {
-                if let Err(e) = crate::k8s::ensure_opensearch_ingress(&client, &cfg, &dep).await {
-                    tracing::warn!("opensearch ingress for {dep}: {e:#}");
-                }
-                if let Err(e) = crate::k8s::ensure_dashboards_ingress(&client, &cfg, &dep).await {
-                    tracing::warn!("backfilling dashboards ingress for {dep}: {e:#}");
-                }
-            }
-        }
+        crate::access::backfill_ingresses(&cfg, &scope)
+            .await
+            .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
     }
 
@@ -2391,6 +2502,7 @@ mod server {
         RoutePolicy { path: "/request_password_reset", policy: Public, note: "#79; answers 202 whether or not the account exists." },
         RoutePolicy { path: "/reset_password", policy: Public, note: "#79; single-use token IS the authorization." },
         // -- installation-level --------------------------------------------
+        RoutePolicy { path: "/build_info", policy: AdminOnly, note: "version + commit, this Pod's image digest and the operator image (#55) — install-level facts a tenant has no use for." },
         RoutePolicy { path: "/bootstrap_status", policy: AdminOnly, note: "operator/cert-manager/Longhorn state of the HOST cluster." },
         RoutePolicy { path: "/bootstrap_ensure", policy: AdminOnly, note: "installs cluster-wide components; never a tenant action." },
         RoutePolicy { path: "/storage_status", policy: AdminOnly, note: "host StorageClass classification (ADR-043)." },
@@ -2471,6 +2583,7 @@ mod server {
             .route(p("/request_password_reset"), post(request_password_reset))
             .route(p("/reset_password"), post(reset_password))
             // -- end tenant auth routes (#79)
+            .route(p("/build_info"), get(build_info))
             .route(p("/bootstrap_status"), get(bootstrap_status))
             .route(p("/bootstrap_ensure"), post(bootstrap_ensure))
             .route(p("/storage_status"), get(storage_status))
@@ -2579,6 +2692,33 @@ mod server {
                 String::new(),
                 None,
             )
+        }
+
+        /// #56: a double-submitted create is refused while the first is in
+        /// flight, only for the same namespace and base name, and the name is
+        /// free again the moment the first request finishes — on any path.
+        #[test]
+        fn a_create_in_flight_refuses_its_duplicate_until_it_finishes() {
+            let set = std::sync::Mutex::new(std::collections::BTreeSet::new());
+            let first = claim_create(&set, create_key("legacy", "logs"));
+            assert!(first.is_some(), "the first create goes through");
+            assert!(
+                claim_create(&set, create_key("legacy", " Logs ")).is_none(),
+                "the same base name, as sanitized, is the same create"
+            );
+            assert!(
+                claim_create(&set, create_key("legacy", "metrics")).is_some(),
+                "another name is another create"
+            );
+            assert!(
+                claim_create(&set, create_key("tenant-a", "logs")).is_some(),
+                "another namespace is another create"
+            );
+            drop(first);
+            assert!(
+                claim_create(&set, create_key("legacy", "logs")).is_some(),
+                "a finished (or failed) create frees its name"
+            );
         }
 
         /// #52: an empty node count means "keep the preset"; a number is used;

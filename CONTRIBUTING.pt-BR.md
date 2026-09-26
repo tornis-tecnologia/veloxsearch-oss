@@ -23,6 +23,8 @@ Ao participar você concorda com o [Código de Conduta](CODE_OF_CONDUCT.md).
 - **Reproduções.** Um relato preciso de bug contra uma distribuição e versão
   nomeadas vale muito: o envelope suportado está escrito em
   [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md), e furos nele são achados.
+- **Teste de primeira instalação.** Instale partindo só do README e relate onde
+  tropeçou: [docs/EXTERNAL-VALIDATION.pt-BR.md](docs/EXTERNAL-VALIDATION.pt-BR.md).
 
 ## Preparando o ambiente
 
@@ -137,7 +139,7 @@ aplicá-la.
 1. **Abra uma issue primeiro** para qualquer coisa além de correção de bug ou de
    documentação. É mais barato discordar sobre a abordagem numa issue do que num
    PR pronto.
-2. **Crie o branch a partir de `main`.** Nomeie pelo que ele faz:
+2. **Crie o branch a partir de `develop`.** Nomeie pelo que ele faz:
    `fix/mensagem-pvc-pending`, `feat/receita-kafka`.
 3. **Mantenha o PR em um assunto só.** Um refactor e uma mudança de
    comportamento no mesmo diff levam três vezes mais tempo para revisar.
@@ -146,7 +148,16 @@ aplicá-la.
    `tests/*_check.py` — os testes ponta a ponta dirigem widgets renderizados, não
    URLs, então uma renomeação de interface pode quebrá-los.
 5. **Assine seus commits** (veja abaixo).
-6. **Abra o PR** contra `main` e preencha o template.
+6. **Abra o PR** contra `develop` e preencha o template.
+
+### Modelo de branches
+
+`develop` é o branch de integração: PRs de funcionalidade o têm como alvo e
+rodam o conjunto rápido de CI. Todo push para `develop` roda o conjunto
+completo, incluindo o job de Smoke (minikube), que só roda em push. `main` é
+somente para releases — ele é alcançado por um PR de promoção vindo de
+`develop`, e uma promoção que muda a `version` no `Cargo.toml` publica o
+release (veja [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
 ### Mensagens de commit
 
@@ -173,7 +184,7 @@ submetê-lo sob a licença AGPL-3.0-only. Use nome real e email real.
 Para assinar commits que você já fez:
 
 ```sh
-git rebase --signoff main
+git rebase --signoff develop
 ```
 
 ## O que o CI verifica

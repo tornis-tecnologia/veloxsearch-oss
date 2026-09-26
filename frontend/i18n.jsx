@@ -26,6 +26,7 @@ const STR = {
     // overview summary tiles
     ov_ingestion: "Ingestão",
     ov_storage: "Armazenamento",
+    ov_storage_not_enforced: "dados — capacidade do disco do nó não é garantida (local-path)",
     ov_receiving: "recebendo",
     ov_no_monitors: "nenhum monitor instalado",
     ov_no_data: "sem dados chegando",
@@ -119,6 +120,7 @@ const STR = {
     review_h: "Revise e crie",
     review_p: "Confira as escolhas. Você pode redimensionar depois; o propósito é fixo.",
     create_btn: "Criar cluster",
+    create_submitting: "Enviando…",
     back: "Voltar", next: "Continuar",
     keeps_data: "Retém dados", collects: "Coleta", sets_up: "Configura", best_for: "Ideal para",
     // purposes
@@ -357,6 +359,11 @@ const STR = {
     act_stall_remediated: "O nó travado ({0}) foi reiniciado automaticamente para liberar a recuperação.",
     act_stall_dashboards: "O Dashboards está em {0} ({1} reinícios) — a primeira migração pode ter sido interrompida.",
     act_stall_dashboards_remediated: "O índice .kibana_1 travado foi excluído e o Dashboards reiniciado automaticamente.",
+    // #97: o que o próprio pod do nó relata — o kubelet mata o contêiner
+    // (SIGTERM) quando o startup probe falha; o vocabulário do cluster
+    // (Error, CrashLoopBackOff) cruza a rede verbatim.
+    act_stall_probe_kill: "Startup probe falhando — contêiner reiniciado {0}x (último: {1}, código de saída {2}).",
+    act_stall_pod_restarts: "O pod do nó foi reiniciado {0} vezes (último: {1}).",
     single_copy_h: "1 cópia dos dados",
     single_copy_p: "este cluster tem {0} nó(s) — cada volume terá uma única cópia no Longhorn. Perder o nó perde os dados; configure snapshots (aba Backup) antes de confiar neste deployment.",
     kernel_bad_h: "OpenSearch 3.8.0 × kernel 6.1.0-52: incompatível",
@@ -531,6 +538,12 @@ const STR = {
     // settings
     settings_h: "Ajustes",
     settings_lead: "Como os dashboards são acessados. Port-forward não exige nada; ingress publica cada cluster sob seu domínio.",
+    about_h: "Sobre esta instalação",
+    about_lead: "Versão e commit são compilados no binário — nenhuma variável de ambiente os altera. Digest da imagem e operador são lidos do cluster.",
+    about_version: "Versão", about_commit: "Commit", about_commit_unknown: "commit desconhecido",
+    about_image: "Digest da imagem", about_operator: "Imagem do operador", about_catalog: "Catálogo de integrações",
+    about_unavailable: "indisponível",
+    about_chip_tip: "Build em execução — detalhes em Ajustes",
     dash_access: "Acesso ao dashboard",
     portfwd: "Port-forward", portfwd_d: "sem pré-requisitos — um comando kubectl por cluster",
     ingress: "Ingress", ingress_d: "URLs públicas via seu ingress controller",
@@ -603,6 +616,7 @@ const STR = {
     // overview summary tiles
     ov_ingestion: "Ingestion",
     ov_storage: "Storage",
+    ov_storage_not_enforced: "data — node disk capacity not enforced (local-path)",
     ov_receiving: "receiving",
     ov_no_monitors: "no monitors installed",
     ov_no_data: "no data arriving",
@@ -693,6 +707,7 @@ const STR = {
     review_h: "Review & create",
     review_p: "Check your choices. You can resize later; purpose is fixed.",
     create_btn: "Create cluster",
+    create_submitting: "Submitting…",
     back: "Back", next: "Continue",
     keeps_data: "Keeps data", collects: "Collects", sets_up: "Sets up", best_for: "Best for",
     p_obs_t: "Observability", p_sec_t: "Security", p_search_t: "Search",
@@ -932,6 +947,11 @@ const STR = {
     act_stall_remediated: "The wedged node ({0}) was restarted automatically to release the recovery.",
     act_stall_dashboards: "Dashboards is in {0} ({1} restarts) — its first migration may have been interrupted.",
     act_stall_dashboards_remediated: "The wedged .kibana_1 index was deleted and Dashboards restarted automatically.",
+    // #97: what the node pod itself reports — the kubelet kills the container
+    // (SIGTERM) when its startup probe keeps failing; the cluster's vocabulary
+    // (Error, CrashLoopBackOff) crosses the wire verbatim.
+    act_stall_probe_kill: "Startup probe failing — container restarted {0}x (last: {1}, exit code {2}).",
+    act_stall_pod_restarts: "The node pod was restarted {0} times (last: {1}).",
     act_stall_component: "The operator has not finished {0} ({1}).",
     act_stall_unknown: "The cluster gave no reason. Open Details below: the Events and pod state are what is left.",
     act_stall_serving: "This is not an outage: primaries are up, the cluster is serving and still indexing. What has not finished is converging.",
@@ -1101,6 +1121,12 @@ const STR = {
     cancel: "Cancel", delete: "Delete", close: "Close",
     settings_h: "Settings",
     settings_lead: "How dashboards are reached. Port-forward needs nothing; ingress publishes each cluster under your domain.",
+    about_h: "About this installation",
+    about_lead: "Version and commit are compiled into the binary — no environment variable can change them. Image digest and operator are read from the cluster.",
+    about_version: "Version", about_commit: "Commit", about_commit_unknown: "commit unknown",
+    about_image: "Image digest", about_operator: "Operator image", about_catalog: "Integration catalog",
+    about_unavailable: "unavailable",
+    about_chip_tip: "Running build — details in Settings",
     dash_access: "Dashboard access",
     portfwd: "Port-forward", portfwd_d: "no prerequisites — a kubectl command per deployment",
     ingress: "Ingress", ingress_d: "public URLs via your ingress controller",
@@ -1172,6 +1198,7 @@ const STR = {
     // tiles del resumen del overview
     ov_ingestion: "Ingesta",
     ov_storage: "Almacenamiento",
+    ov_storage_not_enforced: "datos — capacidad del disco del nodo no garantizada (local-path)",
     ov_receiving: "recibiendo",
     ov_no_monitors: "ningún monitor instalado",
     ov_no_data: "no llegan datos",
@@ -1262,6 +1289,7 @@ const STR = {
     review_h: "Revisa y crea",
     review_p: "Comprueba tus elecciones. Puedes redimensionar después; el propósito es fijo.",
     create_btn: "Crear clúster",
+    create_submitting: "Enviando…",
     back: "Atrás", next: "Continuar",
     keeps_data: "Conserva datos", collects: "Recopila", sets_up: "Configura", best_for: "Ideal para",
     // propósitos
@@ -1504,6 +1532,11 @@ const STR = {
     act_stall_remediated: "El nodo bloqueado ({0}) se reinició automáticamente para liberar la recuperación.",
     act_stall_dashboards: "Dashboards está en {0} ({1} reinicios) — su primera migración pudo haber sido interrumpida.",
     act_stall_dashboards_remediated: "El índice .kibana_1 bloqueado fue eliminado y Dashboards se reinició automáticamente.",
+    // #97: lo que el propio pod del nodo reporta — el kubelet mata el
+    // contenedor (SIGTERM) cuando su startup probe sigue fallando; el
+    // vocabulario del clúster (Error, CrashLoopBackOff) cruza la red verbatim.
+    act_stall_probe_kill: "Startup probe fallando — contenedor reiniciado {0}x (último: {1}, código de salida {2}).",
+    act_stall_pod_restarts: "El pod del nodo se reinició {0} veces (último: {1}).",
     act_stall_component: "El operator no ha terminado {0} ({1}).",
     act_stall_unknown: "El clúster no dio un motivo. Abre los Detalles de abajo: los Events y el estado de los pods es lo que queda.",
     act_stall_serving: "Esto no es una caída: las primarias están en marcha, el clúster atiende y sigue indexando. Lo que no ha terminado es la convergencia.",
@@ -1673,6 +1706,12 @@ const STR = {
     cancel: "Cancelar", delete: "Eliminar", close: "Cerrar",
     settings_h: "Ajustes",
     settings_lead: "Cómo se accede a los dashboards. Port-forward no exige nada; ingress publica cada clúster bajo su dominio.",
+    about_h: "Acerca de esta instalación",
+    about_lead: "La versión y el commit se compilan en el binario — ninguna variable de entorno puede cambiarlos. El digest de la imagen y el operador se leen del clúster.",
+    about_version: "Versión", about_commit: "Commit", about_commit_unknown: "commit desconocido",
+    about_image: "Digest de la imagen", about_operator: "Imagen del operador", about_catalog: "Catálogo de integraciones",
+    about_unavailable: "no disponible",
+    about_chip_tip: "Build en ejecución — detalles en Ajustes",
     dash_access: "Acceso al dashboard",
     portfwd: "Port-forward", portfwd_d: "sin prerrequisitos — un comando kubectl por deployment",
     ingress: "Ingress", ingress_d: "URLs públicas vía tu ingress controller",

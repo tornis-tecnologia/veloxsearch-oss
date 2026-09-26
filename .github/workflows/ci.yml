@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # develop is the integration branch: every push runs the full set,
+    # including the push-only Smoke (minikube) job. main is release-only
+    # (see release.yml) and is reached by promotion PRs from develop.
+    branches: [develop]
   pull_request:
   workflow_dispatch:
 
@@ -177,13 +180,25 @@ jobs:
       - name: Start minikube
         run: minikube start --driver=docker --cpus=2 --memory=6144 --wait=all
 
+      # The lane runs the latest RELEASE, not this tree, so build_info is held to
+      # that release's version. Holding it to Cargo.toml failed every develop
+      # push between a version bump and its release (0.10.0 would be checked
+      # against the 0.9.0 image). The tag is read from the `latest` redirect,
+      # and the manifest is fetched from that tag, so both name one release
+      # even if another is published mid-job.
       - name: Apply the latest released install manifest
+        id: released
         run: |
-          curl -fsSL \
-            https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml \
-            -o released-install.yaml
+          set -euo pipefail
+          repo=https://github.com/tornis-tecnologia/veloxsearch-oss
+          tag=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$repo/releases/latest/download/install.yaml" \
+            | sed -n 's|.*/releases/download/\(v[^/]*\)/install\.yaml$|\1|p')
+          [ -n "$tag" ] || { echo "::error::could not resolve the latest release tag"; exit 1; }
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          curl -fsSL "$repo/releases/download/$tag/install.yaml" -o released-install.yaml
           grep -E 'image: docker\.io/tornistecnologia' released-install.yaml \
             || { echo "::error::manifest does not reference the published image"; exit 1; }
+          echo "applying $tag"
           kubectl apply -f released-install.yaml
 
       - name: Wait for the control plane
@@ -194,7 +209,8 @@ jobs:
         run: |
           kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80 &
           trap 'kill %1 2>/dev/null || true' EXIT
-          python3 tests/smoke_check.py http://127.0.0.1:3000 --retries 40 --delay 5
+          python3 tests/smoke_check.py http://127.0.0.1:3000 --retries 40 --delay 5 \
+            --expect-version "${{ steps.released.outputs.version }}"
 
   image:
     name: Container image

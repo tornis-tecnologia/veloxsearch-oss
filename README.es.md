@@ -7,9 +7,6 @@
 **Convierte un clúster Kubernetes vacío en una plataforma OpenSearch
 gestionada.**
 
-Un plano de control en Rust y una interfaz React que instalan OpenSearch, lo
-mantienen en marcha y te dan un asistente en lugar de una carpeta llena de YAML.
-
 [![CI](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/tornis-tecnologia/veloxsearch-oss/actions/workflows/ci.yml)
 [![Licencia: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
 [![Descargas en Docker](https://img.shields.io/docker/pulls/tornistecnologia/veloxsearch-oss?logo=docker&label=pulls)](https://hub.docker.com/r/tornistecnologia/veloxsearch-oss)
@@ -21,20 +18,89 @@ mantienen en marcha y te dan un asistente en lugar de una carpeta llena de YAML.
 
 </div>
 
-<img src=".github/assets/demo.gif" width="880" alt="Demo de VeloxSearch: creación de la cuenta de administrador en el primer acceso, la pantalla de conformidad del clúster, la visión general y el catálogo de integraciones de un despliegue verde, la capacidad del clúster y el asistente de creación detenido en la revisión" />
+VeloxSearch es un plano de control con interfaz web que se ejecuta dentro de tu
+propio clúster Kubernetes. Lo apuntas al clúster y abres el navegador: comprueba
+que el clúster da la talla, instala lo que falta (cert-manager, el operador de
+OpenSearch, Longhorn), crea despliegues de OpenSearch con un asistente de cuatro
+pasos, conecta la recolección de registros y después se ocupa del trabajo del
+día 2 — actualizaciones de versión, snapshots, rotación de credenciales.
 
-*Del primer acceso al primer clúster: setup → conformidad → despliegues →
-integraciones → el asistente de creación (detenido en la revisión — nada se
-aprovisiona en esta grabación).*
+**Código abierto bajo la [GNU AGPL-3.0-only](LICENSE).** Alojarlo por tu cuenta
+— para tu equipo o tu empresa, también con fines comerciales — es gratis y no
+depende de nada por nuestra parte. La única obligación: si modificas VeloxSearch
+y dejas que otras personas usen tu versión a través de la red, debes ofrecerles
+el código fuente de esa versión. [Detalles más abajo](#licencia).
 
----
+## Instalación
 
-Lo apuntas a un clúster, abres el navegador y él hace el resto: comprueba que el
-clúster es capaz, instala lo que falta (Longhorn, cert-manager, el operador de
-OpenSearch), aprovisiona un despliegue dimensionado a partir de presets, conecta
-la recolección de registros y después se ocupa del trabajo del día 2 —
-actualizaciones de versión, snapshots, rotación de credenciales, aislamiento por
-inquilino.
+```bash
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
+```
+
+Después, `kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80`,
+abre <http://localhost:3000> y crea la cuenta de administrador — la app sigue
+sola desde ahí. En un clúster con IngressClass por defecto (un k3s recién
+instalado, por ejemplo) también responde en `http://<ip-del-nodo>/`, sin
+port-forward.
+
+> **¿Empiezas de cero, sin un clúster Kubernetes?** Sigue
+> [`docs/INSTALL.md`](docs/INSTALL.md#0-no-kubernetes-cluster-yet) — de una
+> máquina Linux o un portátil a la interfaz en marcha — o la
+> [guía de usuario en el sitio](https://get.veloxsearch.ai/docs/es).
+
+## Pantallas
+
+<table>
+  <tr>
+    <td width="50%"><a href=".github/assets/screens/conformity.png"><img src=".github/assets/screens/conformity.png" alt="Pantalla de conformidad: los requisitos R1 a R8 superados en un clúster k3s de tres nodos, con cert-manager y el operador de OpenSearch en cola para el bootstrap" /></a></td>
+    <td width="50%"><a href=".github/assets/screens/deployment-overview.png"><img src=".github/assets/screens/deployment-overview.png" alt="Visión general de un despliegue verde llamado prod-logs: OpenSearch 3.8.0, tres de tres nodos listos, y las direcciones de Dashboards y de la API" /></a></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>El clúster se comprueba antes de instalar nada</sub></td>
+    <td align="center"><sub>Un despliegue verde y sus direcciones</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><a href=".github/assets/screens/create-purpose.png"><img src=".github/assets/screens/create-purpose.png" alt="Asistente de creación, paso 1 de 4: el nombre del despliegue y la elección de su propósito — Observability, Security o Search — con lo que cada uno conserva, recolecta y configura" /></a></td>
+    <td width="50%"><a href=".github/assets/screens/create-review.png"><img src=".github/assets/screens/create-review.png" alt="Asistente de creación, paso de revisión: nombre, propósito, tamaño (medium, tres nodos, 10 GiB) y copia de seguridad, con el botón Create cluster" /></a></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Crear, paso 1: el propósito fija la retención y los valores por defecto</sub></td>
+    <td align="center"><sub>Crear, paso 4: revisión antes de aprovisionar nada</sub></td>
+  </tr>
+</table>
+
+<sub>Las capturas muestran la interfaz en inglés; también está disponible en español y portugués.</sub>
+
+## Por qué VeloxSearch
+
+- **Un asistente en lugar de una carpeta de YAML.** Propósito → tamaño →
+  snapshot → revisión. Los presets de dimensionamiento vienen del backend; el
+  propósito que eliges fija por ti la retención, los detectores y los valores por
+  defecto de los índices.
+- **Comprueba antes de tocar.** Ocho requisitos numerados se verifican de
+  entrada. Un clúster fuera del perímetro recibe un rechazo claro que dice qué
+  falló — nunca una instalación a medias.
+- **Instala sus propios requisitos previos y luego devuelve las llaves.**
+  cert-manager, el operador de OpenSearch y Longhorn llegan solos, y la app
+  **revoca su propio binding de cluster-admin** al terminar.
+- **Registros fluyendo sin escribir canalizaciones.** Integraciones de un clic
+  para nginx, postgres, redis, mysql, traefik, mongo, rabbitmq, kafka y
+  Kubernetes entregan juntos la canalización de ingesta, la plantilla de índice,
+  la política de retención y el agente de recolección.
+- **El día 2 viene incluido.** Actualizaciones de versión nodo a nodo (esperando
+  el verde entre uno y otro y rechazando los downgrades que el operador no sabe
+  deshacer), programaciones de snapshot en S3, rotación de la contraseña de
+  administrador y una pila OpenTelemetry opcional.
+- **Un estado que se explica solo.** Una operación atascada se explica con hechos
+  del clúster — qué shard, qué nodo, cuánto tiempo — en lugar de un spinner.
+- **Tu clúster, tus datos.** Nada se ejecuta fuera de tu infraestructura, y el
+  estado de los despliegues vive en objetos Kubernetes que puedes inspeccionar
+  con `kubectl`.
+
+**Hacia dónde va:** [`docs/ROADMAP.md`](docs/ROADMAP.md) recoge en qué se está
+trabajando, qué viene después y qué deliberadamente no está previsto.
+
+**¿Quieres verlo en tu propio clúster?** [Solicita una demo](https://get.veloxsearch.ai/es#demo).
 
 ---
 
@@ -43,13 +109,9 @@ inquilino.
 **Probablemente encaja si…**
 
 - quieres OpenSearch en tu propio Kubernetes, no un servicio de búsqueda alojado
+- ejecutas k3s / k0s / kubeadm / minikube sobre hardware que tú controlas
 - prefieres avanzar por un asistente antes que mantener a mano CRs del operador,
   políticas ISM, plantillas de índice y configuraciones de Fluent Bit
-- ejecutas k3s / k0s / kubeadm / minikube sobre hardware que tú controlas
-- quieres recolección de registros para servicios comunes (nginx, postgres,
-  kafka, eventos de Kubernetes, …) sin escribir las canalizaciones
-- la multi-tenencia importa: cada despliegue recibe su propio namespace, cuota,
-  NetworkPolicy y comprobaciones de propiedad
 
 **Probablemente no encaja si…**
 
@@ -59,83 +121,18 @@ inquilino.
   rehúsa en lugar de pelearse con él
 - estás en **arm64**, Kubernetes **< 1.30**, OpenShift o nodos Windows
 - necesitas elegir tu propia StorageClass — los despliegues están fijados a
-  Longhorn a propósito (ver abajo)
+  Longhorn a propósito
 - necesitas instalaciones air-gapped — el bootstrap descarga imágenes de
   docker.io, quay.io y cr.fluentbit.io
 
-Lee [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) antes que nada, y
-[`docs/adr/README.md`](docs/adr/README.md) si quieres saber si esa estrechez es
-deliberada o accidental. El primero es el contrato honesto: ocho requisitos
-numerados, qué comprueba cada sonda y exactamente qué dice la aplicación cuando
-tu clúster falla en uno. Un clúster fuera del perímetro recibe un rechazo claro
-en la pantalla de conformidad — nunca una instalación a medias.
-
----
-
-## Qué obtienes en concreto
-
-| | |
-|---|---|
-| **Aprovisionamiento guiado** | Asistente de 4 pasos: propósito → tamaño → copia de seguridad → revisión. Los presets de dimensionamiento vienen del backend, no de una caja de texto |
-| **Auto-bootstrap** | Instala cert-manager, el operador de OpenSearch y Longhorn por su cuenta, y después **revoca su propio binding de cluster-admin** al terminar |
-| **Operaciones del día 2** | Actualizaciones de versión (un nodo cada vez, esperando el verde entre ellos; rechaza los downgrades porque el operador no sabe volver atrás), repositorios y programaciones de snapshot en S3, rotación de la contraseña de administrador |
-| **Integraciones de registros** | Recetas de un clic para nginx, postgres, redis, mysql, traefik, mongo, rabbitmq, kafka, además de registros de clúster/pod y de auditoría de Kubernetes. Canalización de ingesta, plantilla de índice, política ISM de retención y el agente de recolección, juntos |
-| **Pila de observabilidad** | Pila OpenTelemetry opcional por despliegue — collector, Data Prepper, Cortex, Alertmanager — alimentando las pantallas de Observability |
-| **Multi-tenencia** | Namespace, ResourceQuota, LimitRange y NetworkPolicy por inquilino; toda ruta de la API comprueba la propiedad, y un nombre que no es tuyo se lee como "no existe" |
-| **Estado honesto** | Las pantallas de actividad explican una operación atascada con hechos del clúster — qué shard, qué nodo, cuánto tiempo — en lugar de un spinner |
-
----
-
-## Requisitos, en una frase
-
-Kubernetes **≥ 1.30**, **amd64**, **≥ 8 GiB** de RAM asignable y **2 vCPU**
-libres (12 GiB / 4 vCPU / 60 GB recomendados para un nodo único cómodo), salida
-hacia registries, cluster-admin **solo en el momento de la instalación**, y
-ningún operador de OpenSearch ya en marcha.
-
-El almacenamiento es deliberadamente estrecho: **Longhorn es el único
-almacenamiento soportado para los despliegues.** Si falta, VeloxSearch lo
-instala. Los aprovisionadores locales al nodo (`local-path`, hostpath) se
-rechazan porque un pod de OpenSearch reprogramado pierde sus datos con ellos — y
-un CSI por defecto ajeno tampoco se acepta en silencio. Si a un nodo le falta
-`open-iscsi`, un cliente NFS o `dmsetup`, la interfaz nombra el nodo y te da el
-comando de instalación para su distribución.
-
-Tabla completa, con sondas y mensajes de fallo: [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
-
----
-
-## Pruébalo
-
-```bash
-kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
-kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
-# abre http://localhost:3000 — crea la cuenta de administrador, y la app sigue sola
-```
-
-Esa URL es un **artefacto de release**, no una rama: la imagen que contiene está
-fijada por digest, así que lo que aplicas hoy es lo que recibes si lo aplicas de
-nuevo el mes que viene. `releases/latest/` sigue el release más reciente; para
-fijar una versión usa `releases/download/v0.7.1/install.yaml`. Aplicar el
-`deploy/install.yaml` de `main` te da lo que haya en HEAD en ese instante — vale
-para desarrollo, no para un clúster que te importe.
-
-Un archivo, sin credenciales de registry — la imagen es
-[`tornistecnologia/veloxsearch-oss`](https://hub.docker.com/r/tornistecnologia/veloxsearch-oss),
-pública y descargada de forma anónima — sin paso previo de `velox init`. En un
-clúster con IngressClass por defecto — un k3s recién instalado, por ejemplo — se
-crea además un Ingress catch-all, así que responde en `http://<ip-del-nodo>/`
-sin ningún port-forward.
-
-Lo que viene después es automático: la pantalla de conformidad comprueba los
-ocho requisitos y luego instala cert-manager y el operador sin preguntar.
-Longhorn llega cuando creas tu primer despliegue. Lo único que puede detenerte
-es un nodo al que le falten los paquetes de Longhorn, y la interfaz te dice qué
-comando ejecutar.
-
-Guías paso a paso por plataforma — minikube, k0s, k3s, kubeadm — más el
-side-load air-gapped y el camino de desinstalación:
-[`docs/INSTALL.md`](docs/INSTALL.md).
+**Requisitos, en una frase:** Kubernetes **≥ 1.30**, **amd64**, **≥ 8 GiB** de
+RAM asignable y **2 vCPU** libres (12 GiB / 4 vCPU / 60 GB recomendados para un
+nodo único cómodo), salida hacia registries, cluster-admin **solo en el momento
+de la instalación**, y ningún operador de OpenSearch ya en marcha. Longhorn es el
+único almacenamiento soportado para los despliegues; si a un nodo le faltan sus
+paquetes, la interfaz nombra el nodo y te da el comando. El contrato completo —
+cada requisito, su sonda y su mensaje de rechazo — está en
+[`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md).
 
 ---
 
@@ -160,16 +157,13 @@ side-load air-gapped y el camino de desinstalación:
     └────────────────────────────────────────────────────────┘
 ```
 
-El plano de control es un único binario con la SPA embebida — no hay frontend
-aparte que desplegar. Habla con la API de Kubernetes y con las APIs HTTP de
-OpenSearch y Dashboards de cada despliegue. El estado del despliegue vive en el
-CR `OpenSearchCluster`, no en una base de datos, de modo que el clúster sigue
-siendo la fuente de verdad.
-
-Los tres comportamientos autogestionados — cuándo se instala Longhorn, cómo se
-controla el bootstrap y el modelo de namespaces — están especificados en
-[`docs/PREMISES.md`](docs/PREMISES.md), con cada afirmación citada como
-`archivo:línea`.
+El plano de control es un único binario con la SPA embebida. Habla con la API de
+Kubernetes y con las APIs HTTP de OpenSearch y Dashboards de cada despliegue. El
+estado del despliegue vive en el CR `OpenSearchCluster`, no en una base de datos,
+de modo que el clúster sigue siendo la fuente de verdad. Los comportamientos
+autogestionados y los permisos que cada uno exige están en
+[`docs/PREMISES.md`](docs/PREMISES.md); los detalles internos, en
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -177,21 +171,23 @@ controla el bootstrap y el modelo de namespaces — están especificados en
 
 | | |
 |---|---|
-| [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) | El contrato de plataforma: R1–R8, sondas, mensajes de rechazo, plataformas probadas. **Empieza aquí.** |
-| [`docs/INSTALL.md`](docs/INSTALL.md) | Instalación por plataforma, modos de acceso, desinstalación |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | De cero a la interfaz en marcha: instalación por plataforma, mirrors privados, side-load, primer arranque, dominio y TLS propios |
+| [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) | El contrato de plataforma: R1–R8, sondas, mensajes de rechazo, plataformas probadas |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Cómo está montado el plano de control, y las dos convenciones que lo sostienen |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | El ciclo local, y cómo ejecutar las pruebas que necesitan Postgres o un checkout del registry |
 | [`docs/DEPLOY.md`](docs/DEPLOY.md) | Construir y publicar un release; side-load air-gapped |
+| [`docs/INSTALLER.md`](docs/INSTALLER.md) | La CLI `velox`, para instalaciones desde un mirror privado |
 | [`docs/SECRETS.md`](docs/SECRETS.md) | Cada secreto que el plano de control lee o crea, y cómo rotarlo |
 | [`docs/PREMISES.md`](docs/PREMISES.md) | Los comportamientos autogestionados y los permisos que cada uno exige |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Qué está planificado, qué está abierto y qué deliberadamente no se hará |
 | [`docs/adr/README.md`](docs/adr/README.md) | Qué decidió cada número de ADR citado en el código |
 | [`docs/integrations/`](docs/integrations/) | Formato de los paquetes de integración: esquema del manifiesto, interpolación, firma |
-| `tests/*_check.py` | Comprobaciones de aceptación ejecutables — smoke, primer arranque, día 2, recorrido completo y una verificación de navegador con Playwright |
+| [`CHANGELOG.md`](CHANGELOG.md) | Qué cambió en cada release |
 
 Estructura: `src/` plano de control y la CLI `velox` · `frontend/` SPA React ·
 `deploy/` manifiesto de instalación, Dockerfile, bundles de bootstrap,
-plantillas de inquilino · `migrations/` esquema.
+plantillas de inquilino · `migrations/` esquema · `tests/*_check.py`
+comprobaciones de aceptación ejecutables.
 
 ---
 
@@ -202,13 +198,18 @@ ampliamente compatible: el perímetro de requisitos se mantiene pequeño para qu
 todo lo que hay dentro funcione, en vez de degradarse de formas interesantes
 fuera de él.
 
-Ten en cuenta dos cosas antes de depender de esto. La flota de conformidad — k3s
-greenfield, k0s desnudo y un clúster infradimensionado que debe ser *rechazado* —
-tiene ejecuciones pendientes de reverificación contra el camino de
-almacenamiento actual; `docs/REQUIREMENTS.md` marca cada fila con cuándo se
-verificó realmente, no con cuándo se esperaba que funcionara. Y la pila de
-observabilidad OpenTelemetry está publicada pero ha tenido poca ejercitación en
-el mundo real.
+La última ejecución registrada de la flota de conformidad fue contra la v0.8.0,
+el 2026-08-25 (evidencia fila a fila en [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md)):
+instalación → conformidad → rechazo verificados en vivo en k3s, k0s y un clúster
+real de 3 nodos con Longhorn. Los dos fallos que encontró — despliegues de un
+solo nodo atascados en el número de réplicas de Longhorn
+([#26](https://github.com/tornis-tecnologia/veloxsearch-oss/issues/26)) y el
+rolling restart posterior al verde bloqueado en la recuperación de shards
+([#27](https://github.com/tornis-tecnologia/veloxsearch-oss/issues/27)) — se
+corrigieron en la 0.8.1. Un lane de CI en trunk arranca la última imagen
+publicada en minikube en cada push. La multi-tenencia está lo bastante completa
+para funcionar, pero viene desactivada por defecto, y la pila de observabilidad
+OpenTelemetry está publicada pero ha tenido poca ejercitación en el mundo real.
 
 ---
 
@@ -226,11 +227,8 @@ Tres puntos de partida que no requieren Rust:
 - **Nuevas integraciones de registros** — una integración es un paquete de
   *datos* firmado, no código. Viven en
   [`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry)
-- **Traducciones** — toda cadena de la interfaz está en `frontend/i18n.jsx`.
-  Vale decirlo con claridad: **la interfaz todavía no habla español.** Hoy son
-  portugués e inglés, aunque el catálogo de integraciones ya trae títulos y
-  descripciones en español. Añadir el juego de claves `_es` en ese archivo es
-  una contribución autocontenida y no toca ninguna pantalla
+- **Traducciones** — toda cadena de la interfaz está en `frontend/i18n.jsx`,
+  en español, portugués e inglés
 
 Lee el [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) antes de participar, y el
 [`SECURITY.md`](SECURITY.md) antes de reportar cualquier cosa relacionada con la

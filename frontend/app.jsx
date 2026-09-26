@@ -78,6 +78,10 @@ function App() {
   // The conformity probe the boot gate took. Kept for the operator-drift
   // notice (ADR-057), which matters most on clusters that PASS the gate.
   const [bootStatus, setBootStatus] = useState(null);
+  // Which build is serving (#55). Installation-level and admin-only, so a
+  // tenant session never asks (the route would 404 for it).
+  const [isTenant, setIsTenant] = useState(false);
+  const [buildInfo, setBuildInfo] = useState(null);
   const [toast, setToast] = useState({ msg: "", show: false });
   const toastTimer = useRef(null);
 
@@ -105,6 +109,7 @@ function App() {
       const a = await API.authState();
       if (a && a.first_run) { setBoot("setup"); return; }
       if (!a || !a.authenticated) { setBoot("login"); return; }
+      setIsTenant(!!a.tenant);
       // Authenticated → conformity gate (ADR-014). Probe errors fall through
       // to the main UI, which surfaces its own problems.
       try {
@@ -156,6 +161,16 @@ function App() {
     return () => { alive = false; if (es) es.close(); };
   }, [boot]);
 
+  // ── build identity: fixed for the life of this pod, so fetch once ──
+  useEffect(() => {
+    if (boot !== "ready" || isTenant) return;
+    let alive = true;
+    API.buildInfo()
+      .then(b => { if (alive && b) setBuildInfo(b); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [boot, isTenant]);
+
   // ── fallback poll: advances only while the SSE stream is dead ──
   useEffect(() => {
     if (boot !== "ready" || !sseDead) return;
@@ -178,6 +193,8 @@ function App() {
   function go(r) { setRoute(r); window.scrollTo({ top: 0 }); }
 
   // ── API-backed handlers ────────────────────────────────────────
+  // Toast AND rethrow (same contract as toggleOtelStack): the wizard keeps its
+  // submit button disabled until this settles and must re-arm it on failure.
   async function createCluster({ name, purpose, size, sources, extra, memory, disk, version, snapshot }) {
     const monitors = Object.keys(sources || {}).filter(k => sources[k]).join(",");
     try {
@@ -206,6 +223,7 @@ function App() {
       go({ name: "deployment", id: finalName, tab: "overview" });
     } catch (e) {
       showToast(e.message);
+      throw e;
     }
   }
 
@@ -250,6 +268,7 @@ function App() {
     try { await API.logout(); } catch (e) {}
     setDeployments([]);
     setLoaded(false);
+    setBuildInfo(null); // the next session may be a tenant's
     probeBoot();
   }
 
@@ -296,6 +315,13 @@ function App() {
           </div>
         )}
         <span className="spacer" />
+        {buildInfo && (
+          <button className="badge" data-testid="version-chip" title={tr.about_chip_tip}
+            style={{ textTransform: "none", cursor: "pointer" }}
+            onClick={() => go({ name: "settings" })}>
+            v{buildInfo.version}{buildInfo.commit !== "unknown" && <> · {buildInfo.commit.slice(0, 7)}</>}
+          </button>
+        )}
         {/* The live stream is down and the app is on its 5s fallback poll. The
             user was never told; the list just went quiet. */}
         {sseDead && (
@@ -343,7 +369,7 @@ function App() {
           <CapacityView lang={lang} />
         )}
         {route.name === "settings" && (
-          <SettingsView lang={lang} onToast={showToast} />
+          <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} />
         )}
         {route.name === "deployment" && (current
           ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}

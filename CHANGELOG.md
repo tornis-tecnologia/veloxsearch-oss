@@ -17,9 +17,9 @@ are called out explicitly.
   is not Ready is waited on and reported, never re-applied. The
   `veloxsearch-bootstrap` cluster-admin binding that every `install.yaml`
   re-apply re-creates is revoked again by the running app once bootstrap and
-  storage are complete. `deploy/install.yaml` on `main` pinned 0.8.1 while the
-  crate was 0.9.0 (so did the 0.9.0 `velox` CLI, which embeds it); it now pins
-  0.9.0 and CI fails when the two differ. DEPLOY.md's upgrade applies the
+  storage are complete. `deploy/install.yaml` once pinned 0.8.1 while the
+  crate was 0.9.0 (so did the 0.9.0 `velox` CLI, which embeds it); CI now fails
+  when its tag is not `Cargo.toml`'s version. DEPLOY.md's upgrade applies the
   versioned release artifact.
 
 ### Added
@@ -32,6 +32,120 @@ are called out explicitly.
   are unchanged and no bootstrap binding is left — plus a variant with the
   operator scaled to 0 during the rollout.
 
+## [0.10.5] - 2026-09-24
+
+### Changed
+- `velox init --pull-token` is deprecated and now prints a deprecation
+  warning (the pull Secret it creates has no effect on the default catalog);
+  every doc that taught the flag now leads with the manual `velox-pull`
+  Secret procedure, canonical in SECRETS.md (#74).
+
+### Fixed
+- A rolling restart wedged on a recovery stuck in `init` now actually gets
+  remediated on fresh installs. The #27/#96 remediation armed, but its pod
+  bounce was forbidden: the runtime RBAC had no pod `delete`, and only
+  installs still holding the bootstrap cluster-admin binding could bounce.
+  The grant is namespaced to `veloxsearch-system`, never cluster-wide.
+- The Dashboards survivability patch (#46) lands again. Setting `Recreate`
+  by server-side apply collided with the API server's defaulted
+  `rollingUpdate`, and the whole patch was rejected, including the
+  30-minute startup-probe budget. The strategy now goes through a merge
+  patch that removes `rollingUpdate`.
+- `tests/journey_check.py` addresses detail tabs inside the deployment's own
+  `nav.tabs`, and `tests/day2_check.py` expects the #80 anti-enumeration
+  refusal (`deployment not found`).
+
+## [0.10.4] - 2026-09-21
+
+### Added
+- Stalled deployments now show the real blocker on the stalled view: a
+  probe-kill loop (the kubelet restarting the container on failed startup
+  probes) surfaces as a first-class fact with per-pod restart counts, the
+  last terminated reason and exit code — read from the pod object the app
+  already lists, no new RBAC and no logs (#97).
+
+### Fixed
+- Rolling restarts no longer wedge on security-index peer recovery stuck in
+  `init` — the #27 remediation now covers restart waves (#96). While the
+  operator's `RollingRestart` is in progress, a recovery sitting in `init` at
+  0 bytes past 10 minutes arms the same proven remediation (transient
+  `node_concurrent_recoveries` raise + bounce of the one node holding the
+  wedged shard), and the raised setting is handed back once the recoveries
+  drain. The stalled banner already names the recovery and the bounced pod.
+- Storage usage on the deployment Overview shows the actual OpenSearch data
+  size and marks capacity as not enforced under node-local provisioners
+  (local-path), instead of summing each node's whole root disk against the
+  PVC requests and printing figures like 164% (#95).
+
+## [0.10.3] - 2026-09-20
+
+### Changed
+- **Deployment storage is now flexible: Longhorn when present, otherwise the
+  cluster's default StorageClass** — node-local defaults create with a
+  durability warning instead of refusing; only a fully StorageClass-less
+  cluster triggers the Longhorn bootstrap (ADR-043 amended, #88).
+- install.yaml ships `service/veloxsearch` as NodePort 30080 — the UI answers
+  at `http://<node-ip>:30080` on any cluster, with or without an Ingress
+  controller (#87).
+
+### Fixed
+- Bundled postgres PVC uses the cluster default StorageClass instead of
+  pinning `longhorn` — postgres-0 no longer sits Pending on fresh clusters
+  before bootstrap (#86).
+
+## [0.10.2] - 2026-09-16
+
+### Fixed
+- **Deployment routes follow the stored access config on startup:** existing
+  deployments only got their Ingresses when Settings → Access was saved, so a
+  `veloxsearch-config` ConfigMap restored after a cluster rebuild, applied by
+  GitOps or edited with kubectl left every deployment on port-forward until
+  someone pressed Save on an unchanged form. The app now runs the same
+  backfill once at startup (best-effort, never blocks serving), and the
+  Settings save path shares that code.
+
+## [0.10.1] - 2026-09-16
+
+### Fixed
+- **Cluster-health series keep the newest samples (#65):** the raw-sample
+  query sorted ascending under a 10,000-hit cap, so a window holding more
+  samples than that returned the oldest page and dropped the newest — a full
+  7-day window at the default 60s cadence lost its last ~80 minutes. The query
+  now pages newest-first; the charted series is unchanged below the cap.
+- **Release tags are created on the released commit:** the release job did
+  not name a target commit, so GitHub created the tag on the default branch
+  (`develop` since #72) and `v0.10.0` points at `541844f` instead of the
+  `main` commit `c7495d0` it was built from. The two trees are identical, so
+  the released content is unaffected; the tag cannot be moved because release
+  tags are protected. The job now tags `github.sha`.
+
+## [0.10.0] - 2026-09-15
+
+### Added
+- **Which build is serving, in the app (#55):** a new admin-only
+  `GET /api/build_info` returns the version and git commit compiled into the
+  binary. No env var on the Deployment can change them, and a local build
+  without a commit reports "commit unknown". It also returns the image digest
+  the kubelet reports for the app's own Pod, the operator image, and the
+  integration catalog source. Settings has an "About this installation"
+  block, with a short digest and a copy button, and the top bar shows a
+  `v<version> · <commit>` chip. Release images get the commit through
+  `VELOX_BUILD_COMMIT`. `install.yaml` now passes `POD_NAME` through the
+  downward API, used only to locate the Pod. `min_core_version` refusals
+  quote the same version string, and the smoke lane asserts that
+  `build_info.version` matches the release it installed (#76).
+- **An install report form and an external validation brief (#60):** a new
+  "Install report" issue form captures distribution, Kubernetes version,
+  resources, the commands run, time to a first green deployment and every
+  point of friction. `docs/EXTERNAL-VALIDATION.md` (and `.pt-BR.md`) is the
+  brief for first-time installers working from the README alone, with a
+  separate section for security review of the published surfaces.
+- **Three proposed ADRs, documentation only (#57, #58, #59):** ADR-058
+  (multiple integration catalog sources with per-source pinned keys), ADR-059
+  (collector configuration for sources outside the cluster) and ADR-060
+  (a bounded, pseudonymised cluster profile export). Nothing in this release
+  implements them.
+
 ### Changed
 - **K3S monitoring is a choice, not a baseline (#52):** every non-search
   deployment used to ship the `kubernetes` monitor unconditionally — the
@@ -42,6 +156,54 @@ are called out explicitly.
   respected verbatim: the deployment comes up with no collector, the
   Integrations tab remains the enable path, and the overview says
   "no monitors installed" honestly (#47).
+- **The READMEs lead with the install command (#61):** what VeloxSearch is,
+  the AGPL in plain words, the single `kubectl apply`, a "starting from zero"
+  path (new `docs/INSTALL.md` §0), four static screenshots in place of the
+  demo GIF (now referenced from INSTALL.md), benefits, the roadmap and the
+  demo-request link — in all three languages.
+- **`develop` is the integration branch (#72):** feature PRs now target
+  `develop`, and every push there runs the full CI set including the Smoke
+  (minikube) job; `main` is release-only and a promotion that changes
+  `version` in `Cargo.toml` publishes. Contributor-facing only — see
+  `CONTRIBUTING.md`.
+
+### Fixed
+- **A double-clicked "Create cluster" could create two deployments (#56):**
+  the wizard only disabled its submit button when the create was going to
+  install Longhorn, so on the common path the button stayed live while the
+  request was out. Every create generates a fresh `<name>-<suffix>`, so a
+  second click was not a re-apply — it was a second deployment with its own
+  deferred provisioning. The button now disables from the first click and
+  shows "Submitting…" with a spinner, re-arming if the create fails, and the
+  backend refuses a create of the same name in the same namespace with 409
+  while an earlier one is still being handled. `tests/create_submit_check.py`
+  proves the button half without a cluster; `tests/journey_check.py` now
+  submits with a double click and asserts one deployment.
+- **Install docs described pre-0.9.0 behaviour (#61):** `docs/INSTALL.md`
+  still said a foreign CSI default StorageClass is used as-is (ADR-043 made
+  Longhorn the only deployment storage), that the manifest creates no
+  Ingress, and that its ServiceAccount carries `imagePullSecrets` — it does
+  not, so the documented private-mirror steps never used the pull Secret;
+  they now patch the ServiceAccount. The side-load tag matches the manifest's
+  image reference, the create wizard is described as its four steps with the
+  optional K3S monitoring toggle, and `docs/INSTALLER.md` covers the released
+  `velox-linux-amd64` binary and what `--dry-run` really prints.
+- **`deploy/install.yaml` in the source tree still pinned 0.8.1:** the
+  published release asset was always digest-pinned to the right image, but
+  applying the manifest from a checkout installed 0.8.1. The tag now matches
+  the crate version (part of #54).
+
+### Security
+- **rustls 0.23.45 for RUSTSEC-2026-0285 (#71):** rustls before 0.23.45
+  accepted TLS 1.3 handshake messages across encryption-level boundaries.
+  Lock-only bump (with `rustls-webpki` 0.103.15); no code change.
+- **Registry credentials no longer follow cross-origin redirects (#75):** the
+  catalog client sends the registry token in a custom `PRIVATE-TOKEN` header,
+  which reqwest does not strip when a redirect changes host. Credential-bearing
+  catalog fetches now follow redirects only within the same origin (host and
+  effective port, no scheme downgrade) and refuse anything else with an
+  explicit error. The default public registry does not redirect, so nothing
+  changes there.
 
 ## [0.9.0] - 2026-09-10
 

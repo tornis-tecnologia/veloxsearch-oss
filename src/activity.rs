@@ -197,6 +197,95 @@ impl Default for DashboardsBlock {
     }
 }
 
+/// How many restarts it takes before a dying container is a *loop* and not a
+/// slow boot. Not a new number: it is the same budget
+/// `DASHBOARDS_REMEDIATE_AFTER_RESTARTS` already chose for the same judgment
+/// on the Dashboards half — three full crash cycles is a boot that
+/// deterministically dies.
+pub const PROBE_KILL_AFTER_RESTARTS: i32 = 3;
+
+/// The node-pool pods' half of a stall (#97): what the worst node-pod
+/// container's own status says about why the cluster keeps dying, gathered by
+/// `k8s.rs` only for a deployment that is ALREADY stalled.
+///
+/// Exists because of one observed failure. On 2026-09-21 a fresh `small`
+/// cluster crash-looped for 26 minutes — every node killed by its failing
+/// startup probe (SIGTERM, exit 143) — while the UI showed the stalled banner
+/// with generic common causes. The actual blocker was right there in the pod
+/// object the app already lists: `restartCount` climbing, `lastState.
+/// terminated` reading `Error`/143. Reading it needs no new grant and no
+/// logs — the same `pods` read `node_pool_age_secs` already makes.
+///
+/// Deliberately NOT the crash logs, for the same reason
+/// [`DashboardsBlock`] refuses them: previous-container logs need `pods/log`,
+/// which the runtime grant refuses as a tenant-boundary widening (ADR-044).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodesBlock {
+    /// The pod carrying the worst container (`demo0-hupb-nodes-0`), empty =
+    /// unknown (no pod answered).
+    pub pod: String,
+    /// That pod's worst container — most-restarted, the one whose death is
+    /// the story. Empty = unknown.
+    pub container: String,
+    /// `restartCount` of the worst container. `-1` = unknown (no pod
+    /// answered), which is not the same as "no restarts".
+    pub restarts: i32,
+    /// `lastState.terminated.reason`, verbatim (`Error`) — the cluster's own
+    /// vocabulary, same treatment as `recovery_stage`.
+    pub last_reason: String,
+    /// `lastState.terminated.exitCode` (143 = the kubelet's SIGTERM). `-1` =
+    /// unknown or the container was never terminated.
+    pub last_exit_code: i32,
+    /// The waiting reason, verbatim (`CrashLoopBackOff`).
+    pub waiting_reason: String,
+    /// The first-class fact: this is a probe-kill loop, not an ordinary
+    /// crash-loop. Set by [`is_probe_kill_loop`] — the kubelet restarting a
+    /// container whose startup probe keeps failing, the exact shape of the
+    /// 2026-09-21 incident.
+    pub probe_kill: bool,
+}
+
+impl Default for NodesBlock {
+    /// Same rule as [`ClusterBlock::default`]: unknown is `-1`/empty, never a
+    /// confident zero.
+    fn default() -> Self {
+        Self {
+            pod: String::new(),
+            container: String::new(),
+            restarts: -1,
+            last_reason: String::new(),
+            last_exit_code: -1,
+            waiting_reason: String::new(),
+            probe_kill: false,
+        }
+    }
+}
+
+/// Is this container caught in a probe-kill loop — the kubelet killing a boot
+/// that keeps failing its startup probe — rather than an ordinary crash?
+///
+/// Three signals, all from the pod object: a restart BUDGET (one restart is a
+/// slow boot; [`PROBE_KILL_AFTER_RESTARTS`] is a deterministically dying one),
+/// the terminated REASON (`Error` is what a killed container leaves behind —
+/// `OOMKilled` and friends name their own causes and are not this), and the
+/// kill's signature: exit 143 is SIGTERM, which is what the kubelet sends —
+/// a container dying on its own rarely exits 143. `probe_named` is the
+/// "probe" spelling found in the waiting/terminated reason-message chain,
+/// when the cluster says it outright.
+///
+/// Pure so the rule is testable without a cluster, exactly like
+/// [`component_is_terminal`].
+pub fn is_probe_kill_loop(
+    restarts: i32,
+    last_reason: &str,
+    last_exit_code: i32,
+    probe_named: bool,
+) -> bool {
+    restarts >= PROBE_KILL_AFTER_RESTARTS
+        && last_reason == "Error"
+        && (last_exit_code == 143 || probe_named)
+}
+
 /// Why a stalled deployment is stuck — structured facts, never a sentence.
 ///
 /// The SPA turns these into words in the user's language; the wire carries no
@@ -234,11 +323,31 @@ pub struct Blocked {
     /// A previous pass already deleted the dead `.kibana_1` and restarted
     /// the Deployment (#46).
     pub dashboards_remediated: bool,
+    /// The node-pool pod carrying the worst container (#97). Empty = unknown
+    /// or not fetched (the gather is stall-gated).
+    pub nodes_pod: String,
+    /// The worst node-pod container — most-restarted (#97). Empty = unknown.
+    pub nodes_container: String,
+    /// Node-pod container restarts (#97). `-1` = unknown or not fetched.
+    pub nodes_restarts: i32,
+    /// `lastState.terminated.reason` of the worst node-pod container,
+    /// verbatim (`Error`) (#97).
+    pub nodes_last_reason: String,
+    /// Its `lastState.terminated.exitCode` (143 = SIGTERM) (#97). `-1` =
+    /// unknown or never terminated.
+    pub nodes_last_exit_code: i32,
+    /// Waiting reason of the worst node-pod container, verbatim
+    /// (`CrashLoopBackOff`) (#97).
+    pub nodes_waiting: String,
+    /// The first-class fact: a probe-kill loop is the blocker (#97) —
+    /// the kubelet restarting the container on failing startup probes.
+    pub nodes_probe_kill: bool,
 }
 
 impl Default for Blocked {
     fn default() -> Self {
         let c = ClusterBlock::default();
+        let n = NodesBlock::default();
         Self {
             health: String::new(),
             unassigned_shards: c.unassigned_shards,
@@ -251,6 +360,13 @@ impl Default for Blocked {
             dashboards_restarts: -1,
             dashboards_waiting: String::new(),
             dashboards_remediated: false,
+            nodes_pod: n.pod,
+            nodes_container: n.container,
+            nodes_restarts: n.restarts,
+            nodes_last_reason: n.last_reason,
+            nodes_last_exit_code: n.last_exit_code,
+            nodes_waiting: n.waiting_reason,
+            nodes_probe_kill: n.probe_kill,
         }
     }
 }
@@ -315,6 +431,12 @@ pub struct ActivityInput {
     /// only when the first-pass verdict landed exactly on the `dashboards`
     /// rung, so a nodes-side stall still costs what it always did.
     pub dashboards: Option<DashboardsBlock>,
+    /// What the node-pool pods say about a stall (#97) — the worst
+    /// container's restart count, last terminated reason and exit code.
+    /// Fetched only for a deployment the first pass already called stalled
+    /// (one `pods` list per cache window), so an unstalled
+    /// deployment pays nothing; see `node_pod_block_in` in `k8s.rs`.
+    pub nodes: Option<NodesBlock>,
 }
 
 /// `componentsStatus` values that mean "this reconciler is done". Anything else
@@ -485,6 +607,7 @@ fn blocked_of(i: &ActivityInput) -> Blocked {
         .unwrap_or_default();
     let c = i.cluster.clone().unwrap_or_default();
     let d = i.dashboards.clone().unwrap_or_default();
+    let n = i.nodes.clone().unwrap_or_default();
     Blocked {
         health: i.health.clone(),
         unassigned_shards: c.unassigned_shards,
@@ -497,6 +620,13 @@ fn blocked_of(i: &ActivityInput) -> Blocked {
         dashboards_restarts: d.restarts,
         dashboards_waiting: d.waiting_reason,
         dashboards_remediated: d.remediated,
+        nodes_pod: n.pod,
+        nodes_container: n.container,
+        nodes_restarts: n.restarts,
+        nodes_last_reason: n.last_reason,
+        nodes_last_exit_code: n.last_exit_code,
+        nodes_waiting: n.waiting_reason,
+        nodes_probe_kill: n.probe_kill,
     }
 }
 
@@ -641,6 +771,7 @@ mod tests {
             since_secs: 30,
             cluster: None,
             dashboards: None,
+            nodes: None,
         }
     }
 
@@ -1048,6 +1179,99 @@ mod tests {
         let a = evaluate(&input);
         assert!(a.stalled, "the remediation is a fact, not a cure claim");
         assert!(a.blocked.dashboards_remediated);
+    }
+
+    // ── issue #97: the probe-kill loop must name itself ─────────────────────
+
+    /// The incident, frozen as data: a fresh `small` cluster crash-looping at
+    /// the `nodes` rung for 26 minutes — every node killed by its failing
+    /// startup probe (SIGTERM, exit 143), 5 restarts on the single pod. The
+    /// pod object alone says enough; the logs it dies with are out of scope
+    /// (ADR-044 refuses `pods/log`).
+    fn probe_killed_create() -> ActivityInput {
+        ActivityInput {
+            health: "red".into(),
+            initialized: false,
+            nodes_ready: 0,
+            nodes_updated: 0,
+            since_secs: 1_560,
+            nodes: Some(NodesBlock {
+                pod: "demo0-hupb-nodes-0".into(),
+                container: "opensearch".into(),
+                restarts: 5,
+                last_reason: "Error".into(),
+                last_exit_code: 143,
+                waiting_reason: "CrashLoopBackOff".into(),
+                probe_kill: true,
+            }),
+            ..steady()
+        }
+    }
+
+    /// The done-when: a cluster stalled by a probe-kill loop shows the loop
+    /// itself — pod, container, restarts, last terminated reason and exit
+    /// code — as first-class facts on the wire, for the SPA to word.
+    #[test]
+    fn a_probe_kill_loop_is_a_first_class_fact() {
+        let a = evaluate(&probe_killed_create());
+        assert!(!a.settled);
+        assert_eq!(a.stage, "nodes");
+        assert!(a.stalled, "26 minutes of crash-looping is a stall");
+        assert_eq!(a.blocked.nodes_pod, "demo0-hupb-nodes-0");
+        assert_eq!(a.blocked.nodes_container, "opensearch");
+        assert_eq!(a.blocked.nodes_restarts, 5);
+        assert_eq!(a.blocked.nodes_last_reason, "Error");
+        assert_eq!(a.blocked.nodes_last_exit_code, 143);
+        assert_eq!(a.blocked.nodes_waiting, "CrashLoopBackOff");
+        assert!(
+            a.blocked.nodes_probe_kill,
+            "the loop is named, not just counted"
+        );
+    }
+
+    /// The gather is stall-gated: every other stall keeps the unknown
+    /// defaults, so the panel never says something it did not ask. The #131
+    /// roll never reads the node pods' termination state, and it must show.
+    #[test]
+    fn node_pod_facts_do_not_leak_into_stalls_that_never_asked() {
+        let a = evaluate(&stuck_roll());
+        assert!(a.stalled);
+        assert_eq!(
+            a.blocked.nodes_restarts, -1,
+            "not asked is not zero restarts"
+        );
+        assert_eq!(a.blocked.nodes_last_exit_code, -1);
+        assert!(!a.blocked.nodes_probe_kill);
+        assert!(a.blocked.nodes_pod.is_empty());
+        assert!(a.blocked.nodes_container.is_empty());
+        assert!(a.blocked.nodes_last_reason.is_empty());
+    }
+
+    /// The pure rule behind `nodes_probe_kill`: a restart budget (one or two
+    /// is a slow boot, three is a deterministically dying one), the `Error`
+    /// termination a killed container leaves behind, and the kill's
+    /// signature — exit 143 is the kubelet's SIGTERM, or the cluster says
+    /// "probe" itself somewhere in the reason chain.
+    #[test]
+    fn the_probe_kill_rule_needs_budget_reason_and_signature() {
+        // Budget: under three full cycles is a slow boot, not a loop.
+        assert!(!is_probe_kill_loop(2, "Error", 143, false));
+        assert!(is_probe_kill_loop(
+            PROBE_KILL_AFTER_RESTARTS,
+            "Error",
+            143,
+            false
+        ));
+        // The signature case from the incident: `Error` + SIGTERM exit.
+        assert!(is_probe_kill_loop(5, "Error", 143, false));
+        // A container that named its own cause (`OOMKilled` and friends) is
+        // not a probe kill...
+        assert!(!is_probe_kill_loop(5, "OOMKilled", 137, false));
+        // ...unless the cluster says "probe" outright in the reason chain.
+        assert!(is_probe_kill_loop(5, "Error", 1, true));
+        // An `Error` exit that is neither 143 nor probe-named is an ordinary
+        // crash-loop — real, but not this fact.
+        assert!(!is_probe_kill_loop(5, "Error", 1, false));
     }
 
     /// Below the threshold a deployment is just starting, and saying otherwise

@@ -3,7 +3,7 @@
 /* ============================================================
    Create view — guided 5-step wizard (the Backup step is optional)
    ============================================================ */
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { STR, SIZES, sizeMeta } from "./i18n.jsx";
 import { Icon, Field, Btn, Copyable } from "./ui.jsx";
 import { SnapshotStep } from "./views_snapshot.jsx";
@@ -97,11 +97,19 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   const [customMem, setCustomMem] = useState("");
   const [customDisk, setCustomDisk] = useState("");
   const [customHeap, setCustomHeap] = useState("");
-  // Storage classification (ADR-031): a node-local/absent default means creating
-  // a cluster auto-installs Longhorn. We don't ASK — we inform: a heads-up on the
-  // review step before, and a live progress notice while it installs.
+  // Storage classification (ADR-031, flexible per ADR-061): only a cluster
+  // with NO default StorageClass at all means creating auto-installs Longhorn
+  // (needs_longhorn). We don't ASK — we inform: a heads-up on the review step
+  // before, and a live progress notice while it installs.
   const [storage, setStorage] = useState(null);
-  const [creating, setCreating] = useState(false);
+  // True while the create that auto-installs Longhorn is in flight — drives
+  // the live install notice. Distinct from `submitting`, which is every create.
+  const [installingStorage, setInstallingStorage] = useState(false);
+  // #56: the create request is out. Disables the button and says so from the
+  // first click; the ref is the synchronous half, because a second click can
+  // land before React re-renders the button disabled.
+  const [submitting, setSubmitting] = useState(false);
+  const submitted = useRef(false);
   // Snapshot repository (ADR-049). `null` = the step was skipped, which is the
   // default and costs nothing: the Backup tab configures it later just as well.
   const [snapshot, setSnapshot] = useState(null);
@@ -169,14 +177,14 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   // existing install-job snapshot, not a new channel. Stops on unmount (the
   // parent navigates to the new deployment once create resolves).
   useEffect(() => {
-    if (!creating) return undefined;
+    if (!installingStorage) return undefined;
     let live = true;
     const tick = () =>
       API.storageStatus().then((s) => { if (live && s) setStorage(s); }).catch(() => {});
     tick();
     const h = setInterval(tick, 3000);
     return () => { live = false; clearInterval(h); };
-  }, [creating]);
+  }, [installingStorage]);
 
   // "" means "let the backend decide" — an empty manual box must not be sent
   // as a version, it must fall back to the default.
@@ -185,28 +193,42 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   const valid = name.trim().length > 0 && !nameErr
     && (version !== OTHER_VERSION || !!chosenVersion);
 
-  // Longhorn not in place yet → creating this cluster auto-installs it
-  // (ADR-031/043). We inform, never ask: show a live install notice while
-  // the (blocking) create runs.
+  // Only when the cluster has NO default StorageClass at all does creating
+  // auto-install Longhorn (ADR-061; needs_longhorn is false for a usable
+  // default, durable or warned-node-local). We inform, never ask: show a live
+  // install notice while the (blocking) create runs.
   const willInstallStorage = !!(storage && storage.needs_longhorn && !storage.durable);
   // Nodes missing Longhorn prerequisites (`#15`, ADR-043): the backend maps
   // each `MissingDependency` to a package + per-distro install commands.
   // Creation is blocked until the list is empty.
   const missingPkgs = (storage && storage.missing_packages) || [];
 
-  function finish() {
-    if (willInstallStorage) setCreating(true);
-    onCreate({
-      name: name.trim() || "logs", purpose, size, sources, version: chosenVersion,
-      extra: advanced ? extra : "",
-      // Custom-size overrides (ADR-016) only when Advanced is open; node count
-      // is never sent — it stays the fixed 3 the backend enforces.
-      memory: advanced ? customMem.trim() : "",
-      disk: advanced ? customDisk.trim() : "",
-      // Optional (ADR-049). The backend registers the repository only after the
-      // cluster goes green — the operator's reconciler needs it running.
-      snapshot,
-    });
+  async function finish() {
+    if (submitted.current) return;
+    submitted.current = true;
+    setSubmitting(true);
+    if (willInstallStorage) setInstallingStorage(true);
+    try {
+      // Resolves once the backend accepted the create; the parent navigates to
+      // the new deployment then, unmounting this view.
+      await onCreate({
+        name: name.trim() || "logs", purpose, size, sources, version: chosenVersion,
+        extra: advanced ? extra : "",
+        // Custom-size overrides (ADR-016) only when Advanced is open; node count
+        // is never sent — it stays the fixed 3 the backend enforces.
+        memory: advanced ? customMem.trim() : "",
+        disk: advanced ? customDisk.trim() : "",
+        // Optional (ADR-049). The backend registers the repository only after the
+        // cluster goes green — the operator's reconciler needs it running.
+        snapshot,
+      });
+    } catch (e) {
+      // The parent already toasted the reason. Re-arm so the user can fix it
+      // and submit again.
+      submitted.current = false;
+      setSubmitting(false);
+      setInstallingStorage(false);
+    }
   }
 
   return (
@@ -400,7 +422,7 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
             )}
             {/* Storage heads-up (ADR-031): no durable default SC → creating
                 auto-installs Longhorn. Inform before, not ask. */}
-            {willInstallStorage && !creating && (
+            {willInstallStorage && !installingStorage && (
               <div style={{
                 display: "flex", gap: 12, padding: 16, marginTop: 14, borderRadius: "var(--radius)",
                 background: "var(--info-soft)", border: "1px solid var(--border)", color: "var(--text-2)",
@@ -414,7 +436,7 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
             )}
             {/* Live install notice while the create-triggered Longhorn install
                 runs (progress from the shared install-job snapshot). */}
-            {creating && (
+            {installingStorage && (
               <div style={{
                 display: "flex", gap: 12, padding: 16, marginTop: 14, borderRadius: "var(--radius)",
                 background: "var(--info-soft)", border: "1px solid var(--border)", color: "var(--text-2)",
@@ -496,7 +518,11 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
           </Btn>
           {step < lastStep
             ? <Btn variant="primary" iconR="chevR" data-testid="wizard-next" disabled={step === 0 && !valid} onClick={() => setStep(s => s + 1)}>{t.next}</Btn>
-            : <Btn variant="primary" icon="spark" data-testid="create-submit" disabled={!valid || creating || missingPkgs.length > 0} onClick={finish}>{t.create_btn}</Btn>}
+            : <Btn variant="primary" icon={submitting ? undefined : "spark"} data-testid="create-submit"
+                aria-busy={submitting} disabled={!valid || submitting || missingPkgs.length > 0} onClick={finish}>
+                {submitting && <span className="btn-spinner" aria-hidden="true" />}
+                {submitting ? t.create_submitting : t.create_btn}
+              </Btn>}
         </div>
       </div>
     </div>

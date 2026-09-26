@@ -114,7 +114,8 @@ Do not "fix" this by defaulting to a namespace that exists.
   field names match the DTO.
 - Success returns the DTO as JSON (200), or an empty 200 for unit results.
 - Errors return `{"error": "<message>"}` with 400 (validation), 401
-  (credentials) or 500 (Kubernetes / OpenSearch layer).
+  (credentials), 409 (a create of the same name is still in flight, #56) or
+  500 (Kubernetes / OpenSearch layer).
 - `login`, `logout` and `setup_admin` set the session cookie on the response.
 - The deployment list streams over SSE at `GET /api/events`, every 3 seconds.
 

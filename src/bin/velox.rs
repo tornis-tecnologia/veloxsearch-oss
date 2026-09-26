@@ -16,7 +16,8 @@
 //!
 //! Authenticated-pull flow: by default `init` stays inside the side-loaded-image
 //! model (ADR-025) — it does NOT pull from or depend on a registry. When the
-//! cluster must pull the image from a registry instead, pass `--pull-token`
+//! cluster must pull the image from a registry instead, use --pull-token
+//! (deprecated — see docs/SECRETS.md for the manual Secret procedure)
 //! (with `--registry` / `--pull-user`): `init` then creates a
 //! `kubernetes.io/dockerconfigjson` image-pull Secret in `veloxsearch-system`
 //! *before* applying the manifest, so the `veloxsearch` ServiceAccount's
@@ -262,6 +263,15 @@ OPTIONS (init):
                 return 2;
             }
         };
+
+        // #74: the flag still builds the Secret, but the Secret has no effect
+        // on the default public catalog — say so instead of staying silent.
+        if opts.pull_token.is_some() {
+            eprintln!(
+                "warning: --pull-token is deprecated and the pull Secret it                  creates has no effect on the default catalog; create the                  Secret manually only when pulling from a private mirror \
+                 (see docs/SECRETS.md, 'Private registry pull credentials')"
+            );
+        }
 
         let manifest = match Manifest::parse(INSTALL_YAML) {
             Ok(m) => m,

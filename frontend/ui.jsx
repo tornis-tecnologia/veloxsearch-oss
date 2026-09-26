@@ -169,10 +169,12 @@ function Gauge({ label, pct, sub, size = 116 }) {
 }
 
 /* --- Copyable --- */
-function Copyable({ text, onCopy }) {
+// `display` shows a shortened form (a digest, a commit) while the button still
+// copies the full `text`.
+function Copyable({ text, onCopy, display }) {
   return (
     <span className="copyfield">
-      <code>{text}</code>
+      <code title={display ? text : undefined}>{display || text}</code>
       <button onClick={() => { navigator.clipboard?.writeText(text); onCopy && onCopy(); }} title="copy">
         <Icon name="copy" size={13} />
       </button>

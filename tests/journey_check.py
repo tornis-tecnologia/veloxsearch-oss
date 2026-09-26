@@ -5,7 +5,8 @@ Drive the full UI flow against a live cluster and assert the redesigned
 deployment panel:
 
   login -> Create (4-step wizard: name+purpose / size / data / review)
-        -> deployment appears -> open detail
+        -> DOUBLE-click create -> exactly one deployment appears (#56)
+        -> open detail
         -> Overview / Edit / Integrations / Security tabs
         -> Edit shows the automatic JVM field + no purpose cards
         -> Security shows the password-reset form (2 password fields)
@@ -24,6 +25,11 @@ from playwright.sync_api import sync_playwright
 
 base, user, pw = sys.argv[1], sys.argv[2], sys.argv[3]
 errors, console = [], []
+
+
+def detail_tab(n_from_end):
+    """The Nth-from-last button of the deployment-detail nav (the last nav.tabs)."""
+    return page.locator("nav.tabs").last.locator(f"button:nth-last-child({n_from_end})")
 
 
 def fail(msg):
@@ -66,7 +72,17 @@ with sync_playwright() as p:
     page.wait_for_timeout(300)
     page.locator('[data-testid="wizard-next"]').click()  # -> review
     page.wait_for_selector(".kvrow", timeout=10000)        # review summary rendered
-    page.locator('[data-testid="create-submit"]').click()  # -> create_cluster
+    def journey_deployments():
+        items = page.evaluate(
+            "() => fetch('/api/list_deployments', {credentials: 'same-origin'})"
+            ".then(r => r.json())")
+        return {d["name"] for d in items if d["name"].startswith("journeytest-")}
+
+    # Leftovers of an earlier, aborted run are not this run's duplicates.
+    before = journey_deployments()
+    # #56: DOUBLE-click. The second click must be a no-op (button disabled from
+    # the first); asserted below as exactly one journeytest-* deployment.
+    page.locator('[data-testid="create-submit"]').dblclick()  # -> create_cluster
 
     # 3. success: the SPA navigates to the new deployment's detail. The topbar
     #    crumb (.crumb .cur) only renders once the deployment shows up in the
@@ -80,22 +96,38 @@ with sync_playwright() as p:
         fail(f"unexpected generated name: {dep_name!r}")
     print(f"  created {dep_name}")
 
+    # 3a. #56: the double click made ONE deployment. Each create request gets a
+    # fresh suffix and spawns its own deferred provisioning task, so one
+    # deployment is one task. Give a racing second create time to land.
+    page.wait_for_timeout(10000)
+    created = sorted(journey_deployments() - before)
+    if created != [dep_name]:
+        for extra in created:
+            if extra != dep_name:  # never leave a duplicate running on a failed run
+                page.evaluate(
+                    "n => fetch('/api/delete_cluster', {method: 'POST', credentials: 'same-origin',"
+                    " headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name: n})})",
+                    extra)
+        fail(f"double-clicking create made {created}, expected only [{dep_name!r}]")
+    print("  double click -> exactly one deployment")
+
     # 3b. provisioning settle: a fresh deployment is BUSY (nodes booting, PVCs
     # binding) and LOCKS its editing controls (activity.locks_edits). The tab
     # assertions below are about a MANAGED deployment, so wait for the lock to
     # lift. The sentinel (reset-pass) only RENDERS on the Security tab — go
     # there first, then wait for it enabled (it stays disabled while busy).
     page.wait_for_selector("nav.tabs", timeout=20000)
-    page.click("nav.tabs button:nth-last-child(2)")
+    detail_tab(2).click()
     page.wait_for_selector('[data-testid="reset-pass"]:not([disabled])', timeout=1800000)
     print(f"  {dep_name} settled (edits unlocked)")
 
     # 4. detail tabs: the global nav STAYS inside a deployment (app.jsx:
     #    "Global navigation stays put inside a deployment too") — the single
-    #    nav.tabs holds the 4 top tabs followed by the 6 detail tabs
+    #    page holds TWO nav.tabs: the 4 top tabs, then the 6 detail tabs
     #    (Overview / Edit / Integrations / Snapshot / Security / Auth).
-    #    Address detail tabs positionally from the END so the global tab
-    #    count can change without breaking this.
+    #    Detail tabs are addressed inside the LAST nav, positionally from the
+    #    end — a bare `nav.tabs button:nth-last-child(N)` resolves in the FIRST
+    #    nav (top tabs) and navigates away from the deployment.
     page.wait_for_selector("nav.tabs", timeout=20000)
     page.wait_for_timeout(1000)
     n_tabs = page.locator("nav.tabs button").count()
@@ -103,7 +135,7 @@ with sync_playwright() as p:
         fail(f"expected 6 detail tabs after the 4 global ones, got {n_tabs - 4}")
 
     # 5. Edit tab: size <select>, automatic (disabled) JVM field, NO purpose cards.
-    page.click("nav.tabs button:nth-last-child(5)")
+    detail_tab(5).click()
     page.wait_for_selector("select.select", timeout=10000)
     jvm = [page.locator("input[disabled]").nth(i).input_value()
            for i in range(page.locator("input[disabled]").count())]
@@ -119,7 +151,7 @@ with sync_playwright() as p:
     #    password inputs. Assert the reset action + its confirm modal exist
     #    (and cancel out: this journey must not rotate credentials).
     import re as _re
-    page.click("nav.tabs button:nth-last-child(2)")
+    detail_tab(2).click()
     page.wait_for_timeout(800)
     n_pw = page.locator('input[type="password"]').count()
     if n_pw != 0:
@@ -132,10 +164,13 @@ with sync_playwright() as p:
 
     # 7. cleanup — delete via the stable hooks (#33): the danger-zone
     #    delete-deployment button arms the modal, delete-confirm commits it.
-    page.click("nav.tabs button:nth-last-child(6)")  # overview
+    detail_tab(6).click()  # overview
     page.wait_for_timeout(500)
     page.click('[data-testid="delete-deployment"]')        # arm: opens the Confirm modal
     page.wait_for_selector('[data-testid="delete-confirm"]', timeout=5000)
+    # type-to-confirm: the delete stays disabled until the deployment's name is
+    # typed (the Confirm modal's requireText) — an irreversible action names its target
+    page.fill('[data-testid="confirm-text"]', dep_name)
     page.click('[data-testid="delete-confirm"]')           # confirm delete -> go(status)
 
     # Success = we left the detail: onDelete navigates home, so the crumb
