@@ -1478,6 +1478,28 @@ async fn schedulable_node_count(client: &Client) -> Result<usize> {
 /// path for clusters that faulted before this reconcile existed. Clusters
 /// that fit the bundle default are left untouched, which is every ≥3-node
 /// deployment's steady state.
+/// `numberOfReplicas` on a Longhorn StorageClass, when it carries a number.
+fn sc_replicas(sc: &k8s_openapi::api::storage::v1::StorageClass) -> Option<u32> {
+    sc.parameters
+        .as_ref()
+        .and_then(|p| p.get("numberOfReplicas"))
+        .and_then(|v| v.parse::<u32>().ok())
+}
+
+/// How many copies of each volume the `longhorn` StorageClass asks for — the
+/// read `reconcile_longhorn_sizing` waits on, for the ADR-060 cluster profile.
+/// `None` when there is no Longhorn class or it names no count.
+pub async fn longhorn_replicas(client: &Client) -> Option<u32> {
+    use k8s_openapi::api::storage::v1::StorageClass;
+    let sc: Api<StorageClass> = Api::all(client.clone());
+    sc.get_opt(LONGHORN_SC)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(sc_replicas)
+}
+
 pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
     let replicas = replicas_for_nodes(schedulable_node_count(client).await?);
     if replicas == LONGHORN_DEFAULT_REPLICAS {
@@ -1525,13 +1547,7 @@ pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
     let mut rebuilt = false;
     for _ in 0..60 {
         if let Ok(sc_now) = sc.get(LONGHORN_SC).await {
-            let n = sc_now
-                .parameters
-                .as_ref()
-                .and_then(|p| p.get("numberOfReplicas"))
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(0);
-            if n == replicas {
+            if sc_replicas(&sc_now) == Some(replicas) {
                 rebuilt = true;
                 break;
             }

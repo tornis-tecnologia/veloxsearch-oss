@@ -8,6 +8,22 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- `GET /api/cluster_profile[?names=true]`: a read-only cluster profile
+  (ADR-060, #59). It is one bounded JSON document covering size, shape, load
+  and health: host nodes and storage for the admin, per-deployment indices,
+  shards, disk-watermark headroom and restarts, live rates, and p50/p95 over
+  the sampler's retained window. Tenants get their own deployments plus
+  their quota. Node, deployment and tenant identities are keyed pseudonyms,
+  and real names are added only on opt-in. The fields come from a single
+  allowlist (`profile::FIELDS`) that tests enforce in both directions, and a
+  canary test asserts that no credential, host, address, URL, document body
+  or free text can appear. The profile is only ever sent as that response;
+  nothing is pushed. Schema: `docs/cluster-profile.md`.
+- The metrics sampler also records `query_total`, `gc_old_millis` and
+  `gc_young_millis`. These fields are additive, and older samples simply
+  lack them.
+
 ## [0.10.5] - 2026-09-24
 
 ### Changed

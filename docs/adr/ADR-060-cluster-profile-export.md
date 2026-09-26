@@ -1,6 +1,6 @@
 # ADR-060 — A bounded cluster profile, exported only by download
 
-**Status:** proposed
+**Status:** accepted (2026-09-26)
 **Date:** 2026-09-14
 
 ## Context
@@ -163,6 +163,10 @@ Four facts make this a decision rather than a new screen:
    heading are i18n keys; `tests/*_check.py` cover the dialog.
 
 ### Draft schema (version 1)
+
+The draft below is the proposal as written. What shipped differs where the
+*Implementation notes* at the end say so; the authoritative field list is
+`profile::FIELDS`, documented in [`docs/cluster-profile.md`](../cluster-profile.md).
 
 Where each field comes from is listed after the example; *new* marks facts
 not collected today.
@@ -333,3 +337,83 @@ Each step is one PR, merged in order; none is user-visible before step 5.
 5. **UI:** Download cluster profile with preview and names toggle on the
    Capacity view, i18n keys, browser checks; and a leakage review of a real
    profile from a demo cluster, recorded on the PR.
+
+## Implementation notes (2026-09-26)
+
+Implemented in `src/profile.rs` (#59). The code had moved since this ADR was
+written (build identity #55, stall diagnosis #96/#97, storage honesty #95),
+and each place where the implementation departs from the text above is
+listed here.
+
+1. **`build` is not `/api/build_info` verbatim.** #55 settled on fields that
+   are excluded classes here: `catalog_source` is a URL, `operator_deployment`
+   is a namespace/name and `image_id` carries the registry host. The profile
+   emits `version`, `commit`, `image_digest` (a `sha256:` content hash) and
+   `operator_version` (the operator image *tag* only). The last two are
+   admin-only, as `/api/build_info` is; a tenant document has them `null`.
+2. **Pseudonym identities.** A deployment's pseudonym is keyed on
+   `<namespace>/<name>`, not the bare name: the admin sees every namespace,
+   and two tenants' `logs` are two deployments. A tenant's pseudonym is keyed
+   on `tenants.id` (the owner-label value), not the slug. Ids are
+   `n-`/`d-`/`t-` plus 12 hex characters of the HMAC.
+3. **Opt-in names are added keys.** With `?names=true`, `id` and `tenant`
+   stay pseudonyms (so profiles taken in both modes still line up) and the
+   names arrive beside them: `deployments[].name`,
+   `deployments[].indices.family_names`, and `deployments[].tenant_slug` for
+   the installation admin only. Node names are never added: they are
+   hostnames, an excluded class.
+4. **`quota.max_total_disk_bytes`**, not `max_total_disk_gb`: decision 1's
+   fixed units.
+5. **`storage.class` is the ADR-061 classification code** (`longhorn`,
+   `foreign_default`, `node_local`, `absent`), never the StorageClass name,
+   which is operator-chosen text.
+6. **`now` rates** come from the counters of the same live `_nodes/stats`
+   call against the newest recorded sample (at most 15 minutes old), not from
+   the two newest samples. That keeps every `now` value on the one live call.
+   A sample recorded before the new counters existed yields `null`, not a
+   rate against zero.
+7. **Window percentiles are over 5-minute buckets:** bucket means for
+   utilisation, bucket-to-bucket deltas for rates, nearest-rank. The indexing
+   rate goes through `metrics::downsample`, and the query and GC rates go
+   through the same reset clamp, now extracted as `metrics::counter_rate`.
+   The first bucket has no predecessor and yields no rate.
+8. **`gc_young_millis_per_min`** is exposed in `now` and `window` beside the
+   old-generation figure. Decision 7 already collects it. This is additive.
+9. **Shard counts come from `_cat/shards`** alone. `_cluster/health` is not
+   needed for them. `_cat/indices` is requested with `h=index`, and only
+   three watermark keys are read from `_cluster/settings`.
+10. **Restarts use a new side-effect-free pods read** (`k8s::pod_restarts`),
+    summed across containers. The #46 and #97 scans cannot be reused: they arm
+    remediations, and a read-only export must not.
+11. **Warnings.** The codes are `stalled`, `provisioning_failed` and
+    `metrics_unavailable`. Admin documents also carry the host-derived
+    `storage_single_copy` (#26), `kernel_incompatible` (#32), `node_pressure`
+    and `storage_node_local` (ADR-061, which stands in for the R3 warn).
+    Other R-checks are not evaluated: `bootstrap::status()` probes RBAC and
+    would dominate the cost of a profile. `profile::host_warnings` and
+    `profile::kernel_incompatible` are the pure backend rules, but the wizard
+    still computes #26 and #32 in the browser. Moving it onto them
+    (implementation step 3) is left for a follow-up.
+12. **Stall episodes are read, not yet written.** The document shape, the
+    template mappings, the reader and the `series()` exclusion (samples and
+    episodes share the alias) have landed. The sampler does not write
+    episodes yet. The verdict comes from `k8s::status_from`, and its
+    stall-gated diagnosis arms the #27 and #46 remediations. Calling it every
+    tick would make those remediations fire with nobody watching, a
+    behaviour change that needs its own decision. Until then, `stalls[]`
+    carries the current stall (`Status.activity.blocked`) plus any recorded
+    episode.
+13. **Per-deployment status** is read with `k8s::get_deployment` for each
+    handle `scoped_deployments` returns, rather than `list_deployments`, so a
+    status can never be paired with the wrong namespace. As with the list
+    route, reading a stalled deployment runs the existing ADR-050 diagnosis.
+14. **The canary covers more** than the seven sentinels: namespace, tenant id,
+    StorageClass name, node-role label, remediated pod name and the
+    pseudonym key are all seeded and asserted absent in every mode.
+15. **Rule 8, precisely:** besides the Kubernetes API and each deployment's
+    own OpenSearch, the handler reads the installation's own control-plane
+    datastore (the tenant's quota row, and tenant slugs for an admin with
+    `names=true`). Every tenant-scoped request already reads it to resolve
+    the scope. Nothing leaves the installation.
+16. Still open, as the ADR left it: whether a tenant session also needs the
+    `owner` role.
