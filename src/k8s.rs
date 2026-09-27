@@ -4639,11 +4639,11 @@ pub async fn reset_admin_password(dep: &Deployment, new_password: &str) -> Resul
         .metadata
         .annotations
         .as_ref()
-        .is_some_and(|a| a.contains_key(admin_reset::PENDING_ANNOTATION));
+        .and_then(|a| a.get(admin_reset::PENDING_ANNOTATION));
     let settled = get_deployment(dep)
         .await?
         .is_some_and(|s| s.activity.settled);
-    admin_reset::gate(settled, pending).map_err(ResetError::Refused)?;
+    admin_reset::gate(settled, pending.map(String::as_str)).map_err(ResetError::Refused)?;
 
     // 1. Update the credentials Secret — the source of truth the operator seeds
     //    the admin hash from, and what `admin_creds` reads — keeping the
@@ -4780,14 +4780,14 @@ async fn securityconfig_run_in(
 /// on its own clock, so this runs with nobody watching the UI.
 ///
 /// Every step is idempotent: two readers acting on the same tick restore the
-/// same password and remove the same marker.
+/// same password and write the same marker.
 async fn reset_backstop_in(client: &Client, namespace: &str, name: &str, pending: &str) {
     use crate::admin_reset::{self, Backstop};
 
     let decision = match admin_reset::parse_pending(pending) {
         None => Backstop::Forget,
-        Some(since) => match securityconfig_run_in(client, namespace, name).await {
-            Ok(run) => admin_reset::backstop(since, run.as_ref(), now_secs()),
+        Some(p) => match securityconfig_run_in(client, namespace, name).await {
+            Ok(run) => admin_reset::backstop(&p, run.as_ref(), now_secs()),
             Err(e) => {
                 tracing::debug!("#115 backstop for {namespace}/{name}: {e:#}");
                 return;
@@ -4797,40 +4797,71 @@ async fn reset_backstop_in(client: &Client, namespace: &str, name: &str, pending
     let result = match decision {
         Backstop::Wait => return,
         Backstop::Forget => forget_reset_in(client, namespace, name).await,
-        Backstop::Restore => restore_reset_in(client, namespace, name).await,
+        Backstop::Restore { next } => restore_reset_in(client, namespace, name, &next).await,
+        Backstop::Stall { next } => stall_reset_in(client, namespace, name, &next).await,
     };
-    match result {
-        Ok(()) if decision == Backstop::Restore => tracing::warn!(
+    match (decision, result) {
+        (Backstop::Restore { next }, Ok(())) => tracing::warn!(
             "#115 the securityconfig Job for {namespace}/{name} failed after an admin-password \
-             reset; the previous password was restored so the nodes can pass their probes again"
+             reset; the previous password was restored (attempt {:?}) so the nodes can pass \
+             their probes again — watching the restore's own Job",
+            next.stage
         ),
-        Ok(()) => {}
-        Err(e) => tracing::warn!("#115 backstop ({decision:?}) for {namespace}/{name}: {e:#}"),
+        (Backstop::Stall { .. }, Ok(())) => tracing::error!(
+            "#115 restoring the previous admin password of {namespace}/{name} failed {} times; \
+             the backstop has stopped and marked the reset stalled on the CR. Check the \
+             {name}-securityconfig-update Job and the node probes by hand",
+            crate::admin_reset::MAX_RESTORES
+        ),
+        (_, Ok(())) => {}
+        (_, Err(e)) => tracing::warn!("#115 backstop ({decision:?}) for {namespace}/{name}: {e:#}"),
     }
 }
 
-/// Drop the pending marker, then the kept password. In that order: a marker
-/// without a password is harmless (the backstop forgets it), a password
-/// without a marker is only stale.
-async fn forget_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
-    let nudge = cluster_api_in(client, namespace)
+/// The nudge annotation as the CR carries it now. The reset annotations are
+/// written by server-side apply under their own field manager, so every
+/// write of the marker has to restate the nudge or the apply removes it.
+async fn current_nudge_in(client: &Client, namespace: &str, name: &str) -> Result<String> {
+    Ok(cluster_api_in(client, namespace)
         .get(name)
         .await
         .context("reading the deployment")?
         .metadata
         .annotations
         .and_then(|a| a.get(crate::admin_reset::NUDGE_ANNOTATION).cloned())
-        .unwrap_or_default();
+        .unwrap_or_default())
+}
+
+/// Drop the pending marker, then the kept password. In that order: a marker
+/// without a password is harmless (the backstop forgets it), a password
+/// without a marker is only stale.
+async fn forget_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+    let nudge = current_nudge_in(client, namespace, name).await?;
     apply_reset_annotations(client, namespace, name, &nudge, None).await?;
     drop_previous_password_in(client, namespace, name).await
 }
 
 /// Put the previous password back and nudge the operator, which copies it into
 /// the probe Secret and re-runs its Job with the old hash — the one the cluster
-/// still has. The marker is removed by the same apply as the nudge, and the
-/// kept password only after both landed, so a failure midway is retried whole
-/// on the next read.
-async fn restore_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+/// still has. The nudge's apply rewrites the marker to `next` (a restore
+/// stage), and the kept password STAYS: the restore is only done when its own
+/// Job succeeds, which the backstop keeps watching for. A failure midway is
+/// retried whole on the next read.
+///
+/// A retry (attempt 2+) restores a password the credentials Secret already
+/// holds, so the operator would compute the same securityconfig checksum and
+/// treat its failed Job as applied. The retry therefore deletes that Job
+/// first; with no Job to compare against, the operator's reconcile starts a
+/// new one. If the delete is refused (an install whose Role predates the
+/// grant), there is no way to retry, and the reset is marked stalled.
+async fn restore_reset_in(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    next: &crate::admin_reset::Pending,
+) -> Result<()> {
+    use crate::admin_reset::Stage;
+
     let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
     let secret_name = admin_secret_name(name);
     let previous = secrets
@@ -4853,9 +4884,49 @@ async fn restore_reset_in(client: &Client, namespace: &str, name: &str) -> Resul
         .patch(&secret_name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .context("restoring the previous admin password")?;
+    if matches!(next.stage, Stage::Restore(n) if n > 1) {
+        use k8s_openapi::api::batch::v1::Job;
+        let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+        let dp = DeleteParams {
+            propagation_policy: Some(kube::api::PropagationPolicy::Background),
+            ..DeleteParams::default()
+        };
+        // Already gone is fine: a previous pass deleted it and failed later.
+        match jobs
+            .delete(&format!("{name}-securityconfig-update"), &dp)
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => {
+                let stalled = crate::admin_reset::Pending {
+                    since: now_secs(),
+                    stage: Stage::Stalled,
+                };
+                stall_reset_in(client, namespace, name, &stalled).await?;
+                bail!(
+                    "cannot delete the failed securityconfig Job to retry the restore ({e:#}); \
+                 the reset is marked stalled"
+                );
+            }
+        }
+    }
     let ts = now_secs().to_string();
-    apply_reset_annotations(client, namespace, name, &ts, None).await?;
-    drop_previous_password_in(client, namespace, name).await
+    apply_reset_annotations(client, namespace, name, &ts, Some(&next.value())).await
+}
+
+/// Mark the reset stalled on the CR — the fact the gate refuses with, and
+/// what a person reading the CR finds — without nudging: the nudge value is
+/// restated unchanged, so the operator is not asked to do anything. The kept
+/// password stays until the window from the stall has passed.
+async fn stall_reset_in(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    next: &crate::admin_reset::Pending,
+) -> Result<()> {
+    let nudge = current_nudge_in(client, namespace, name).await?;
+    apply_reset_annotations(client, namespace, name, &nudge, Some(&next.value())).await
 }
 
 async fn drop_previous_password_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
@@ -7130,6 +7201,43 @@ mod tests {
         assert!(
             !grants_pod_delete(cluster),
             "pod delete must never be cluster-wide"
+        );
+    }
+
+    #[test]
+    fn runtime_role_can_delete_jobs_in_the_app_namespace_only() {
+        // #115 / ADR-064: the backstop's one restore retry deletes the
+        // operator's failed securityconfig Job. Namespaced, like the bounce.
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let docs: Vec<serde_yaml::Value> = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .filter(|v| !v.is_null())
+            .collect();
+        let grants_job_delete = |v: &serde_yaml::Value| {
+            v["rules"].as_sequence().into_iter().flatten().any(|r| {
+                let has = |k: &str, x: &str| {
+                    r[k].as_sequence()
+                        .into_iter()
+                        .flatten()
+                        .any(|e| e.as_str() == Some(x))
+                };
+                has("apiGroups", "batch") && has("resources", "jobs") && has("verbs", "delete")
+            })
+        };
+        let named = |kind: &str, ns: Option<&str>| {
+            docs.iter()
+                .find(|v| {
+                    v["kind"].as_str() == Some(kind)
+                        && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+                        && v["metadata"]["namespace"].as_str() == ns
+                })
+                .expect("runtime role")
+        };
+        assert!(grants_job_delete(named("Role", Some("veloxsearch-system"))));
+        assert!(
+            !grants_job_delete(named("ClusterRole", None)),
+            "job delete must never be cluster-wide"
         );
     }
 

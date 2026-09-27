@@ -164,6 +164,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["delete"]
+  # Admin-reset backstop (#115, ADR-064): the one retry of a failed restore
+  # deletes the operator's failed `<name>-securityconfig-update` Job so the
+  # operator runs it again (it never re-runs a Job whose checksum it has
+  # seen). Delete only, namespaced; without it the retry marks the reset
+  # stalled instead.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]

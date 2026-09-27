@@ -16,6 +16,16 @@ are called out explicitly.
   every node is ready on the current revision and no node pod has been
   created for two minutes. A cluster that stays yellow for good (for
   example on single-copy storage) still gets its Dashboards at 20 minutes.
+- **The admin-reset backstop stopped watching after its restore (#115,
+  ADR-064):** it dropped the pending marker and the kept previous password
+  as soon as it restored, before the restore's own securityconfig Job had
+  run, so a failure of that Job went unseen. The backstop now watches the
+  restore until its Job succeeds and retries once (deleting the failed Job
+  so the operator runs it again, which needs a new namespaced `delete` on
+  `batch/jobs`). After that it marks the reset stalled on the CR, and a
+  new reset is refused with a 409 whose message says so (the SPA still
+  shows its generic "busy" text for every 409). The kept password is
+  dropped only on a confirmed success or an hour after the latest nudge.
 - **An admin-password reset during a rolling restart could take a deployment
   down for good (#115, ADR-064):** the operator's one-shot securityconfig Job
   failed against a cluster that was still rolling. The node probes had already
