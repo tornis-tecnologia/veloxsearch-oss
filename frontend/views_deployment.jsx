@@ -601,6 +601,75 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
   );
 }
 
+// Retention (ADR-062): what this deployment keeps, and whether its user has
+// customized the policy inside OpenSearch — in which case velox leaves it
+// alone until someone asks for the default back.
+function RetentionPanel({ d, lang, locked }) {
+  const t = STR[lang];
+  const [st, setSt] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    let live = true;
+    API.retentionStatus(d.id)
+      .then(s => { if (live) setSt(s); })
+      .catch(e => { if (live) setErr(e.message); });
+    return () => { live = false; };
+  }, [d.id]);
+
+  async function reset() {
+    setConfirm(false);
+    setBusy(true);
+    setErr("");
+    try { setSt(await API.resetRetention(d.id)); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  const days = n => t.ret_days_value.replaceAll("{0}", String(n));
+  return (
+    <div data-testid="retention-panel">
+      <div className="hr" />
+      <h3 className="section-title" style={{ marginTop: 0 }}>{t.ret_label}</h3>
+      {!st && !err && <p className="hint">{t.ret_loading}</p>}
+      {st && (
+        <>
+          <div className="kvrow"><span className="k">{t.ret_label}</span>
+            <span className="v" data-testid="retention-days">{st.days ? days(st.days) : t.ret_forever}</span>
+          </div>
+          {st.state !== "none" && (
+            <div className="kvrow"><span className="k">{t.ret_state}</span>
+              <span className="v" data-testid="retention-state" title={st.detail || undefined}>
+                {t["ret_state_" + st.state] || st.state}
+              </span>
+            </div>
+          )}
+          {st.source && (
+            <div className="kvrow"><span className="k">{t.ret_source}</span>
+              <span className="v" data-testid="retention-source">{t["ret_source_" + st.source] || st.source}</span>
+            </div>
+          )}
+          {st.state === "customized" && <p className="hint">{t.ret_customized_p}</p>}
+          {st.days && <p className="hint" data-testid="retention-when">{t.ret_when_p}</p>}
+          {st.default_days && (
+            <Btn variant="outline" disabled={busy || !!locked} style={{ marginTop: 10 }}
+              data-testid="retention-reset" onClick={() => setConfirm(true)}>
+              {busy ? t.saving : `${t.ret_reset} · ${days(st.default_days)}`}
+            </Btn>
+          )}
+        </>
+      )}
+      {err && <p className="field-err">{err}</p>}
+      <Confirm open={confirm} title={t.ret_reset} body={t.ret_reset_confirm}
+        confirmLabel={t.ret_reset} cancelLabel={t.cancel} icon="check" variant="primary"
+        confirmTestid="retention-reset-confirm"
+        onCancel={() => setConfirm(false)} onConfirm={reset} />
+    </div>
+  );
+}
+
 function EditTab({ d, lang, onSave, locked }) {
   const t = STR[lang];
   const preset = sizeMeta(d.size);
@@ -712,6 +781,8 @@ function EditTab({ d, lang, onSave, locked }) {
         confirmLabel={t.save} cancelLabel={t.cancel} icon="check" variant="primary"
         onCancel={() => setConfirm(false)}
         onConfirm={() => { setConfirm(false); save(); }} />
+
+      <RetentionPanel d={d} lang={lang} locked={locked} />
     </div>
   );
 }

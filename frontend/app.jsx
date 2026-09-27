@@ -195,7 +195,7 @@ function App() {
   // ── API-backed handlers ────────────────────────────────────────
   // Toast AND rethrow (same contract as toggleOtelStack): the wizard keeps its
   // submit button disabled until this settles and must re-arm it on failure.
-  async function createCluster({ name, purpose, size, sources, extra, memory, disk, version, snapshot }) {
+  async function createCluster({ name, purpose, size, sources, extra, memory, disk, version, snapshot, retentionDays }) {
     const monitors = Object.keys(sources || {}).filter(k => sources[k]).join(",");
     try {
       // Heads-up signal (ADR-031): a node-local/absent default means this create
@@ -218,6 +218,8 @@ function App() {
         // skipped. Same rule as `version`: create-only, because the slice has
         // its own write path and a save must never touch it.
         snapshot: snapshot || null,
+        // ADR-062: null = the installation default for the purpose.
+        retention_days: retentionDays || null,
       });
       showToast(installedLonghorn ? tr.storage_installed_toast : (tr.created_h + " ✓"));
       go({ name: "deployment", id: finalName, tab: "overview" });
@@ -370,7 +372,7 @@ function App() {
           <CapacityView lang={lang} />
         )}
         {route.name === "settings" && (
-          <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} />
+          <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} isTenant={isTenant} />
         )}
         {route.name === "deployment" && (current
           ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}

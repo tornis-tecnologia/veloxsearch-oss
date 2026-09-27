@@ -9,7 +9,7 @@
 import { useState, useEffect } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Field, Btn, Icon, Copyable } from "./ui.jsx";
+import { Field, Btn, Icon, Copyable, Confirm } from "./ui.jsx";
 
 // Local, tiny: this view had no formatter and needs exactly one.
 function fmtS(s, ...args) {
@@ -64,7 +64,95 @@ function AboutBlock({ info, t, onToast }) {
   );
 }
 
-function SettingsView({ lang, onToast, buildInfo }) {
+// Default retention per purpose (ADR-062). Admin-only: saving changes what NEW
+// deployments get; existing ones move only through the explicit apply button,
+// which skips any deployment whose user customized the policy in OpenSearch.
+function RetentionBlock({ t, onToast }) {
+  const [obs, setObs] = useState("");
+  const [sec, setSec] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirmApply, setConfirmApply] = useState(false);
+  const [report, setReport] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    API.retentionDefaults()
+      .then(d => {
+        if (!alive || !d) return;
+        setObs(String(d.observability_days));
+        setSec(String(d.security_days));
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const valid = v => /^\d+$/.test(v.trim()) && +v >= 1 && +v <= 3650;
+  const blocked = !valid(obs) || !valid(sec);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await API.saveRetentionDefaults(+obs, +sec);
+      onToast(t.saved);
+    } catch (e) {
+      onToast(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyAll() {
+    setConfirmApply(false);
+    setBusy(true);
+    try {
+      setReport(await API.applyDefaultRetention());
+    } catch (e) {
+      onToast(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const outcomeLabel = o => t["ret_outcome_" + o] || o;
+  return (
+    <div className="card pad" style={{ maxWidth: 560, marginTop: 18 }} data-testid="retention-defaults">
+      <h3 className="section-title" style={{ marginTop: 0 }}>{t.ret_defaults_h}</h3>
+      <p style={{ fontSize: 12.5, color: "var(--text-3)" }}>{t.ret_defaults_lead}</p>
+      <Field label={t.ret_obs_days} hint={t.ret_days_hint} error={valid(obs) || !obs ? "" : t.ret_days_err}>
+        <input className="input" inputMode="numeric" value={obs} onChange={e => setObs(e.target.value)} />
+      </Field>
+      <Field label={t.ret_sec_days} error={valid(sec) || !sec ? "" : t.ret_days_err}>
+        <input className="input" inputMode="numeric" value={sec} onChange={e => setSec(e.target.value)} />
+      </Field>
+      <p className="hint">{t.ret_search_none}</p>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <Btn variant="primary" icon="check" disabled={busy || blocked} onClick={save}>{t.save}</Btn>
+        <Btn variant="outline" disabled={busy} onClick={() => setConfirmApply(true)}
+          data-testid="retention-apply-all">{t.ret_apply_all}</Btn>
+      </div>
+      {report && (
+        <div style={{ marginTop: 14 }} data-testid="retention-apply-report">
+          {report.length === 0 && <p className="hint">{t.ret_apply_none}</p>}
+          {report.map(r => (
+            <div className="kvrow" key={`${r.namespace}/${r.name}`}>
+              <span className="k">{r.name}</span>
+              <span className="v" title={r.detail || undefined}>
+                {outcomeLabel(r.outcome)}{r.days ? ` · ${r.days}d` : ""}
+                {r.detail && <span style={{ color: "var(--danger)" }}> — {r.detail}</span>}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <Confirm open={confirmApply} title={t.ret_apply_all} body={t.ret_apply_confirm}
+        confirmLabel={t.ret_apply_all} cancelLabel={t.cancel} icon="check" variant="primary"
+        confirmTestid="retention-apply-confirm"
+        onCancel={() => setConfirmApply(false)} onConfirm={applyAll} />
+    </div>
+  );
+}
+
+function SettingsView({ lang, onToast, buildInfo, isTenant }) {
   const t = STR[lang];
   const [access, setAccess] = useState("portforward");
   const [domain, setDomain] = useState("");
@@ -217,6 +305,8 @@ function SettingsView({ lang, onToast, buildInfo }) {
 
         <Btn variant="primary" icon="check" disabled={busy || blocked} onClick={save} style={{ marginTop: 6 }}>{t.save}</Btn>
       </div>
+
+      {!isTenant && <RetentionBlock t={t} onToast={onToast} />}
 
       {buildInfo && <AboutBlock info={buildInfo} t={t} onToast={onToast} />}
     </div>
