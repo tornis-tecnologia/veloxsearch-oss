@@ -104,6 +104,7 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-059 | *Proposed.* Collector configuration for sources outside the cluster — optional `collectors` manifest section (schema 1.1), a write-only `_bulk` ingest route per deployment, one ingest-only OpenSearch principal per integration, never admin credentials |
 | ADR-060 | *(proposed)* A bounded cluster profile (`GET /api/cluster_profile`): derived facts only, one field allowlist enforced by test, tenant-scoped, workload percentiles over the sampler's retained window, exported only by admin download — never pushed |
 | ADR-061 | Flexible default storage — Longhorn when present; otherwise the cluster's default StorageClass (foreign CSI durable, node-local warned); Longhorn auto-bootstrap only when no default exists (amends ADR-043, #88) |
+| ADR-062 | Default retention per purpose — installation default in `veloxsearch-config` (admin), stamped per deployment on the CR at create, apply-once: a `velox-retention` policy the user edited in OpenSearch is never rewritten except by an explicit reset; existing deployments move only through an explicit admin action |
 
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and

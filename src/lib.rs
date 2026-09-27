@@ -62,6 +62,11 @@ pub mod access;
 #[cfg(feature = "ssr")]
 pub mod profiles;
 
+// ADR-062: the installation's default retention per purpose, and the
+// per-deployment value stamped on the CR.
+#[cfg(feature = "ssr")]
+pub mod retention;
+
 #[cfg(feature = "ssr")]
 pub mod metrics;
 

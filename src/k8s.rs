@@ -877,6 +877,9 @@ pub struct CreateOverrides {
     /// version is preserved and moves solely through `upgrade_cluster`
     /// (ADR-048 invariant 1). `None` = `DEFAULT_VERSION`.
     pub version: Option<String>,
+    /// Retention days to stamp on the CR (ADR-062). `None` keeps whatever the
+    /// CR already carries, so an unrelated save never moves it.
+    pub retention_days: Option<u32>,
 }
 
 /// The versions to write for a deployment: whatever the CR already carries, or
@@ -1041,6 +1044,26 @@ pub async fn create_cluster(
         annotations.insert(
             LABEL_MONITORS.to_string(),
             serde_json::Value::String(ov.monitors.join(",")),
+        );
+    }
+    // ADR-062: carried through every apply. This manifest is server-side
+    // applied by one field manager, so omitting the key would prune it — the
+    // same trap the additionalConfig round-trip avoids. A save that does not
+    // name a value re-applies what the CR already says.
+    let retention = ov
+        .retention_days
+        .map(crate::retention::render_age)
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|o| o.metadata.annotations.as_ref())
+                .and_then(|a| a.get(crate::retention::ANNOTATION))
+                .cloned()
+        });
+    if let Some(r) = retention {
+        annotations.insert(
+            crate::retention::ANNOTATION.to_string(),
+            serde_json::Value::String(r),
         );
     }
 
@@ -4380,6 +4403,67 @@ struct Deferred {
     purpose: String,
     monitors: Vec<String>,
     record: crate::provisioning::Record,
+    /// The deployment's retention and velox's last policy stamp (ADR-062).
+    retention: RetentionOnCr,
+}
+
+/// The ADR-062 annotations, as the CR carries them.
+#[derive(Debug, Clone, Default)]
+pub struct RetentionOnCr {
+    pub purpose: String,
+    /// `retention::ANNOTATION`, raw (e.g. `30d`); `None` on legacy CRs.
+    pub value: Option<String>,
+    /// `retention::STAMP_ANNOTATION`.
+    pub stamp: Option<String>,
+}
+
+fn retention_from(
+    labels: &BTreeMap<String, String>,
+    annotations: &BTreeMap<String, String>,
+) -> RetentionOnCr {
+    RetentionOnCr {
+        purpose: labels.get(LABEL_PURPOSE).cloned().unwrap_or_default(),
+        value: annotations.get(crate::retention::ANNOTATION).cloned(),
+        stamp: annotations.get(crate::retention::STAMP_ANNOTATION).cloned(),
+    }
+}
+
+/// Read a deployment's retention annotations and purpose off its CR.
+pub async fn retention_of(dep: &Deployment) -> Result<RetentionOnCr> {
+    let client = client().await?;
+    let obj = os_api(&client, dep)
+        .get(dep.name())
+        .await
+        .context("reading the deployment's retention")?;
+    Ok(retention_from(
+        &obj.metadata.labels.unwrap_or_default(),
+        &obj.metadata.annotations.unwrap_or_default(),
+    ))
+}
+
+/// Write the ADR-062 annotations — `Some` values only, as a JSON merge patch
+/// on those keys, like the provisioning record: it cannot touch the spec.
+pub async fn set_retention(dep: &Deployment, days: Option<u32>, stamp: Option<&str>) -> Result<()> {
+    let mut annotations = serde_json::Map::new();
+    if let Some(d) = days {
+        annotations.insert(
+            crate::retention::ANNOTATION.to_string(),
+            crate::retention::render_age(d).into(),
+        );
+    }
+    if let Some(s) = stamp {
+        annotations.insert(crate::retention::STAMP_ANNOTATION.to_string(), s.into());
+    }
+    if annotations.is_empty() {
+        return Ok(());
+    }
+    let client = client().await?;
+    let patch = serde_json::json!({ "metadata": { "annotations": annotations } });
+    os_api(&client, dep)
+        .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("patching the retention annotations")?;
+    Ok(())
 }
 
 /// Read the deferred-provisioning inputs. `None` means the CR is gone — a
@@ -4393,6 +4477,7 @@ async fn read_deferred(client: &Client, dep: &Deployment) -> Result<Option<Defer
     let annotations = obj.metadata.annotations.clone().unwrap_or_default();
     Ok(Some(Deferred {
         purpose: labels.get(LABEL_PURPOSE).cloned().unwrap_or_default(),
+        retention: retention_from(&labels, &annotations),
         monitors: monitors_from(Some(&annotations)),
         record: crate::provisioning::parse(
             annotations
@@ -4594,7 +4679,15 @@ async fn run_deferred_provisioning(dep: Deployment, mut snapshot: Option<Snapsho
         let mut failure: Option<String> = None;
         for item in record.pending(&state.purpose, &state.monitors) {
             let outcome = match &item {
-                Item::Profile(purpose) => crate::profiles::apply(&dep, purpose).await,
+                Item::Profile(purpose) => {
+                    crate::profiles::apply(
+                        &dep,
+                        purpose,
+                        state.retention.value.as_deref(),
+                        state.retention.stamp.as_deref(),
+                    )
+                    .await
+                }
                 // A selected monitor is either a built-in recipe or a catalog
                 // package (ADR-039): the wizard's data step offers both, so
                 // route by which one it is rather than failing the id as
@@ -4892,7 +4985,11 @@ pub async fn upgrade_cluster(
                     }
                     // The upgrade must not change what the deployment IS:
                     // re-assert the purpose profile rather than regenerate it.
-                    if let Err(e) = crate::profiles::apply(&n, &purpose).await {
+                    let r = retention_of(&n).await.unwrap_or_default();
+                    if let Err(e) =
+                        crate::profiles::apply(&n, &purpose, r.value.as_deref(), r.stamp.as_deref())
+                            .await
+                    {
                         tracing::error!("re-asserting profile '{purpose}' on {n}: {e:#}");
                     }
                 }

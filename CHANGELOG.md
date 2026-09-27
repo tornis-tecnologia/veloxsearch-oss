@@ -8,6 +8,20 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- Default retention per purpose (ADR-062). Settings has an admin-only
+  "Default retention" block (observability and security days; out-of-box 30
+  and 90, the previous fixed values). The create wizard shows the effective
+  default for the chosen purpose and accepts a per-deployment override, stamped
+  on the CR. An admin action applies the default to existing deployments and
+  reports per deployment what happened. Each deployment's Edit tab shows its
+  retention, whether the policy was customized, and a "restore default" button.
+
+### Changed
+- velox no longer overwrites a `velox-retention` ISM policy that the user
+  edited inside OpenSearch. Saves, retries and upgrades leave a customized
+  policy alone (ADR-062). Only "restore default" replaces it.
+
 ## [0.10.5] - 2026-09-24
 
 ### Changed
