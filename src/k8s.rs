@@ -4192,11 +4192,13 @@ const LABEL_DASHBOARDS_HOLD: &str = "veloxsearch.ai/dashboards-hold";
 const DASHBOARDS_HOLD_FIRST_BOOT: &str = "first-boot";
 const DASHBOARDS_HOLD_REMEDIATION: &str = "remediation";
 
-/// Past this CR age an initialized cluster gets its Dashboards even if it is
-/// not green. The hold exists to wait out settling, and a cluster that stays
-/// yellow (a replica that cannot be placed) must not be left without
-/// Dashboards forever — booting on a yellow cluster is what happened before
-/// the hold, with the remediation as the backstop.
+/// Past this CR age an initialized cluster whose nodes have stopped moving
+/// gets its Dashboards even if it is not green. The hold exists to wait out
+/// settling, and a cluster that stays yellow (a replica that cannot be
+/// placed, e.g. single-copy storage) must not be left without Dashboards
+/// forever — booting on a yellow cluster is what happened before the hold,
+/// with the remediation as the backstop. It is NOT an escape from a roll:
+/// see [`should_release_dashboards`].
 const DASHBOARDS_HOLD_MAX_SECS: i64 = 20 * 60;
 
 /// The finalizer the operator adds in its first full update of a new CR —
@@ -4265,17 +4267,33 @@ const DASHBOARDS_RELEASE_QUIET_SECS: i64 = 120;
 /// The release decision. Normally: velox's own verdict says everything but
 /// Dashboards has settled (`activity::nodes_settled_of` — nodes ready and on
 /// their revision, security initialized, green, nothing rolling) AND the node
-/// pool has been still for [`DASHBOARDS_RELEASE_QUIET_SECS`]. As a ceiling:
-/// an initialized cluster past [`DASHBOARDS_HOLD_MAX_SECS`] gets Dashboards
-/// even if it never settles.
+/// pool has been still for [`DASHBOARDS_RELEASE_QUIET_SECS`].
+///
+/// As a ceiling: an initialized cluster past [`DASHBOARDS_HOLD_MAX_SECS`]
+/// gets Dashboards even if it never turns green — but only once its nodes
+/// have stopped moving (`nodes_steady`: every node ready and on the current
+/// revision) and have been still for the same quiet period. The ceiling is
+/// the escape for a cluster that is up and stays yellow, not for one that is
+/// still rolling: observed live 2026-09-27, a post-bootstrap rolling restart
+/// ran past 20 minutes and the age-only ceiling released 19s after a node
+/// pod was re-created, so Dashboards migrated on a red cluster (2/3 nodes).
 fn should_release_dashboards(
     nodes_settled: bool,
+    nodes_steady: bool,
     nodes_quiet_secs: i64,
     initialized: bool,
     cr_age_secs: i64,
 ) -> bool {
-    (nodes_settled && nodes_quiet_secs >= DASHBOARDS_RELEASE_QUIET_SECS)
-        || (initialized && cr_age_secs >= DASHBOARDS_HOLD_MAX_SECS)
+    let quiet = nodes_quiet_secs >= DASHBOARDS_RELEASE_QUIET_SECS;
+    (nodes_settled && quiet)
+        || (initialized && nodes_steady && quiet && cr_age_secs >= DASHBOARDS_HOLD_MAX_SECS)
+}
+
+/// No node is rolling: every node the CR asks for is ready and on the
+/// StatefulSet's current revision — [`should_release_dashboards`]'s ceiling
+/// precondition, read off the same `Status` the settled verdict comes from.
+fn nodes_steady(ready: i32, updated: i32, desired: i32) -> bool {
+    desired > 0 && ready == desired && updated == desired
 }
 
 /// One step of the hold, decided from what the cluster says now.
@@ -4454,10 +4472,15 @@ pub async fn reconcile_dashboards_hold(dep: &Deployment) {
     }
     // Only a held deployment pays for the full evaluation: the release waits
     // on velox's own verdict, not the CR's lagging `health`.
-    let nodes_settled = matches!(
-        get_deployment(dep).await,
-        Ok(Some(ref st)) if st.activity.nodes_settled
-    );
+    // An unreadable status is neither settled nor steady: the hold stays,
+    // and the next tick asks again.
+    let (nodes_settled, nodes_steady) = match get_deployment(dep).await {
+        Ok(Some(st)) => (
+            st.activity.nodes_settled,
+            nodes_steady(st.nodes_ready, st.nodes_updated, st.nodes_desired),
+        ),
+        _ => (false, false),
+    };
     let created = obj.metadata.creation_timestamp.as_ref();
     let quiet = node_pool_age_secs(&client, dep.namespace(), dep.name(), created).await;
     let initialized = obj
@@ -4468,7 +4491,8 @@ pub async fn reconcile_dashboards_hold(dep: &Deployment) {
     let age = created
         .map(|t| (k8s_openapi::chrono::Utc::now() - t.0).num_seconds())
         .unwrap_or(0);
-    let release_due = should_release_dashboards(nodes_settled, quiet, initialized, age);
+    let release_due =
+        should_release_dashboards(nodes_settled, nodes_steady, quiet, initialized, age);
     // Re-read so the write is pinned to a fresh resourceVersion: the
     // evaluation above takes long enough for an operator status write to
     // land, which would otherwise turn every release into a conflict.
@@ -4615,11 +4639,11 @@ pub async fn reset_admin_password(dep: &Deployment, new_password: &str) -> Resul
         .metadata
         .annotations
         .as_ref()
-        .is_some_and(|a| a.contains_key(admin_reset::PENDING_ANNOTATION));
+        .and_then(|a| a.get(admin_reset::PENDING_ANNOTATION));
     let settled = get_deployment(dep)
         .await?
         .is_some_and(|s| s.activity.settled);
-    admin_reset::gate(settled, pending).map_err(ResetError::Refused)?;
+    admin_reset::gate(settled, pending.map(String::as_str)).map_err(ResetError::Refused)?;
 
     // 1. Update the credentials Secret — the source of truth the operator seeds
     //    the admin hash from, and what `admin_creds` reads — keeping the
@@ -4756,14 +4780,14 @@ async fn securityconfig_run_in(
 /// on its own clock, so this runs with nobody watching the UI.
 ///
 /// Every step is idempotent: two readers acting on the same tick restore the
-/// same password and remove the same marker.
+/// same password and write the same marker.
 async fn reset_backstop_in(client: &Client, namespace: &str, name: &str, pending: &str) {
     use crate::admin_reset::{self, Backstop};
 
     let decision = match admin_reset::parse_pending(pending) {
         None => Backstop::Forget,
-        Some(since) => match securityconfig_run_in(client, namespace, name).await {
-            Ok(run) => admin_reset::backstop(since, run.as_ref(), now_secs()),
+        Some(p) => match securityconfig_run_in(client, namespace, name).await {
+            Ok(run) => admin_reset::backstop(&p, run.as_ref(), now_secs()),
             Err(e) => {
                 tracing::debug!("#115 backstop for {namespace}/{name}: {e:#}");
                 return;
@@ -4773,40 +4797,71 @@ async fn reset_backstop_in(client: &Client, namespace: &str, name: &str, pending
     let result = match decision {
         Backstop::Wait => return,
         Backstop::Forget => forget_reset_in(client, namespace, name).await,
-        Backstop::Restore => restore_reset_in(client, namespace, name).await,
+        Backstop::Restore { next } => restore_reset_in(client, namespace, name, &next).await,
+        Backstop::Stall { next } => stall_reset_in(client, namespace, name, &next).await,
     };
-    match result {
-        Ok(()) if decision == Backstop::Restore => tracing::warn!(
+    match (decision, result) {
+        (Backstop::Restore { next }, Ok(())) => tracing::warn!(
             "#115 the securityconfig Job for {namespace}/{name} failed after an admin-password \
-             reset; the previous password was restored so the nodes can pass their probes again"
+             reset; the previous password was restored (attempt {:?}) so the nodes can pass \
+             their probes again — watching the restore's own Job",
+            next.stage
         ),
-        Ok(()) => {}
-        Err(e) => tracing::warn!("#115 backstop ({decision:?}) for {namespace}/{name}: {e:#}"),
+        (Backstop::Stall { .. }, Ok(())) => tracing::error!(
+            "#115 restoring the previous admin password of {namespace}/{name} failed {} times; \
+             the backstop has stopped and marked the reset stalled on the CR. Check the \
+             {name}-securityconfig-update Job and the node probes by hand",
+            crate::admin_reset::MAX_RESTORES
+        ),
+        (_, Ok(())) => {}
+        (_, Err(e)) => tracing::warn!("#115 backstop ({decision:?}) for {namespace}/{name}: {e:#}"),
     }
 }
 
-/// Drop the pending marker, then the kept password. In that order: a marker
-/// without a password is harmless (the backstop forgets it), a password
-/// without a marker is only stale.
-async fn forget_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
-    let nudge = cluster_api_in(client, namespace)
+/// The nudge annotation as the CR carries it now. The reset annotations are
+/// written by server-side apply under their own field manager, so every
+/// write of the marker has to restate the nudge or the apply removes it.
+async fn current_nudge_in(client: &Client, namespace: &str, name: &str) -> Result<String> {
+    Ok(cluster_api_in(client, namespace)
         .get(name)
         .await
         .context("reading the deployment")?
         .metadata
         .annotations
         .and_then(|a| a.get(crate::admin_reset::NUDGE_ANNOTATION).cloned())
-        .unwrap_or_default();
+        .unwrap_or_default())
+}
+
+/// Drop the pending marker, then the kept password. In that order: a marker
+/// without a password is harmless (the backstop forgets it), a password
+/// without a marker is only stale.
+async fn forget_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+    let nudge = current_nudge_in(client, namespace, name).await?;
     apply_reset_annotations(client, namespace, name, &nudge, None).await?;
     drop_previous_password_in(client, namespace, name).await
 }
 
 /// Put the previous password back and nudge the operator, which copies it into
 /// the probe Secret and re-runs its Job with the old hash — the one the cluster
-/// still has. The marker is removed by the same apply as the nudge, and the
-/// kept password only after both landed, so a failure midway is retried whole
-/// on the next read.
-async fn restore_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+/// still has. The nudge's apply rewrites the marker to `next` (a restore
+/// stage), and the kept password STAYS: the restore is only done when its own
+/// Job succeeds, which the backstop keeps watching for. A failure midway is
+/// retried whole on the next read.
+///
+/// A retry (attempt 2+) restores a password the credentials Secret already
+/// holds, so the operator would compute the same securityconfig checksum and
+/// treat its failed Job as applied. The retry therefore deletes that Job
+/// first; with no Job to compare against, the operator's reconcile starts a
+/// new one. If the delete is refused (an install whose Role predates the
+/// grant), there is no way to retry, and the reset is marked stalled.
+async fn restore_reset_in(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    next: &crate::admin_reset::Pending,
+) -> Result<()> {
+    use crate::admin_reset::Stage;
+
     let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
     let secret_name = admin_secret_name(name);
     let previous = secrets
@@ -4829,9 +4884,49 @@ async fn restore_reset_in(client: &Client, namespace: &str, name: &str) -> Resul
         .patch(&secret_name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .context("restoring the previous admin password")?;
+    if matches!(next.stage, Stage::Restore(n) if n > 1) {
+        use k8s_openapi::api::batch::v1::Job;
+        let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+        let dp = DeleteParams {
+            propagation_policy: Some(kube::api::PropagationPolicy::Background),
+            ..DeleteParams::default()
+        };
+        // Already gone is fine: a previous pass deleted it and failed later.
+        match jobs
+            .delete(&format!("{name}-securityconfig-update"), &dp)
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => {
+                let stalled = crate::admin_reset::Pending {
+                    since: now_secs(),
+                    stage: Stage::Stalled,
+                };
+                stall_reset_in(client, namespace, name, &stalled).await?;
+                bail!(
+                    "cannot delete the failed securityconfig Job to retry the restore ({e:#}); \
+                 the reset is marked stalled"
+                );
+            }
+        }
+    }
     let ts = now_secs().to_string();
-    apply_reset_annotations(client, namespace, name, &ts, None).await?;
-    drop_previous_password_in(client, namespace, name).await
+    apply_reset_annotations(client, namespace, name, &ts, Some(&next.value())).await
+}
+
+/// Mark the reset stalled on the CR — the fact the gate refuses with, and
+/// what a person reading the CR finds — without nudging: the nudge value is
+/// restated unchanged, so the operator is not asked to do anything. The kept
+/// password stays until the window from the stall has passed.
+async fn stall_reset_in(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    next: &crate::admin_reset::Pending,
+) -> Result<()> {
+    let nudge = current_nudge_in(client, namespace, name).await?;
+    apply_reset_annotations(client, namespace, name, &nudge, Some(&next.value())).await
 }
 
 async fn drop_previous_password_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
@@ -6933,37 +7028,98 @@ mod tests {
     #[test]
     fn the_hold_releases_on_velox_settled_and_quiet_or_after_its_ceiling() {
         let q = DASHBOARDS_RELEASE_QUIET_SECS;
+        let max = DASHBOARDS_HOLD_MAX_SECS;
         // velox's own verdict, and the node pool has been still long enough
-        assert!(should_release_dashboards(true, q, true, 300));
+        assert!(should_release_dashboards(true, true, q, true, 300));
         // settled per the evaluation, but a node pod was just re-created —
         // the live 2026-09-27 case: the operator's post-bootstrap restart,
         // CR still saying green (18s after nodes-0 came back)
-        assert!(!should_release_dashboards(true, 18, true, 300));
-        assert!(!should_release_dashboards(true, q - 1, true, 300));
+        assert!(!should_release_dashboards(true, true, 18, true, 300));
+        assert!(!should_release_dashboards(true, true, q - 1, true, 300));
         // unmeasured stillness is never trusted
-        assert!(!should_release_dashboards(true, 0, true, 300));
+        assert!(!should_release_dashboards(true, true, 0, true, 300));
         // not settled (yellow, a node not ready, rolling…), however quiet
-        assert!(!should_release_dashboards(false, 10 * q, true, 300));
-        // the ceiling: an initialized cluster that never settles still gets
-        // its Dashboards; an uninitialized one could not authenticate anyway
+        assert!(!should_release_dashboards(false, false, 10 * q, true, 300));
+        // the ceiling: an initialized cluster that stays yellow with its
+        // nodes steady and still gets its Dashboards; an uninitialized one
+        // could not authenticate anyway
+        assert!(should_release_dashboards(false, true, q, true, max));
+        assert!(!should_release_dashboards(false, true, q, true, max - 1));
+        assert!(!should_release_dashboards(false, true, q, false, max));
+    }
+
+    #[test]
+    fn the_ceiling_never_fires_while_nodes_are_rolling() {
+        let q = DASHBOARDS_RELEASE_QUIET_SECS;
+        // The exact c1 shape (kind, 2026-09-27): +1229s, initialized, the
+        // post-bootstrap roll still going — 2/3 nodes ready, a node pod
+        // created 19s earlier, health red. The age-only ceiling released here.
+        let steady = nodes_steady(2, 2, 3);
+        assert!(!steady);
+        assert!(!should_release_dashboards(false, steady, 19, true, 1229));
+        // any one of the three rolling signals holds it on its own:
+        // a node pod not ready…
+        assert!(!should_release_dashboards(
+            false,
+            nodes_steady(2, 3, 3),
+            10 * q,
+            true,
+            1229
+        ));
+        // …a node not yet on the current revision…
+        assert!(!should_release_dashboards(
+            false,
+            nodes_steady(3, 2, 3),
+            10 * q,
+            true,
+            1229
+        ));
+        // …or a node pod created inside the quiet period
+        assert!(!should_release_dashboards(
+            false,
+            nodes_steady(3, 3, 3),
+            q - 1,
+            true,
+            1229
+        ));
+        // and the roll's end is when the ceiling may act
         assert!(should_release_dashboards(
             false,
-            0,
+            nodes_steady(3, 3, 3),
+            q,
             true,
-            DASHBOARDS_HOLD_MAX_SECS
+            1229
         ));
-        assert!(!should_release_dashboards(
+    }
+
+    #[test]
+    fn the_yellow_forever_escape_still_works() {
+        // Single-copy storage: every node ready on its revision, nothing
+        // moving for an hour, replicas that can never be assigned — yellow
+        // forever, never settled. The ceiling must still hand it Dashboards.
+        assert!(should_release_dashboards(
             false,
-            0,
+            nodes_steady(1, 1, 1),
+            3600,
             true,
-            DASHBOARDS_HOLD_MAX_SECS - 1
+            DASHBOARDS_HOLD_MAX_SECS + 1
         ));
-        assert!(!should_release_dashboards(
+        assert!(should_release_dashboards(
             false,
-            0,
-            false,
-            DASHBOARDS_HOLD_MAX_SECS
+            nodes_steady(3, 3, 3),
+            600,
+            true,
+            3 * DASHBOARDS_HOLD_MAX_SECS
         ));
+    }
+
+    #[test]
+    fn nodes_are_steady_only_all_ready_on_the_current_revision() {
+        assert!(nodes_steady(3, 3, 3));
+        assert!(!nodes_steady(2, 3, 3));
+        assert!(!nodes_steady(3, 2, 3));
+        // nothing asked for, or nothing read, is not a steady pool
+        assert!(!nodes_steady(0, 0, 0));
     }
 
     #[test]
@@ -7045,6 +7201,43 @@ mod tests {
         assert!(
             !grants_pod_delete(cluster),
             "pod delete must never be cluster-wide"
+        );
+    }
+
+    #[test]
+    fn runtime_role_can_delete_jobs_in_the_app_namespace_only() {
+        // #115 / ADR-064: the backstop's one restore retry deletes the
+        // operator's failed securityconfig Job. Namespaced, like the bounce.
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let docs: Vec<serde_yaml::Value> = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .filter(|v| !v.is_null())
+            .collect();
+        let grants_job_delete = |v: &serde_yaml::Value| {
+            v["rules"].as_sequence().into_iter().flatten().any(|r| {
+                let has = |k: &str, x: &str| {
+                    r[k].as_sequence()
+                        .into_iter()
+                        .flatten()
+                        .any(|e| e.as_str() == Some(x))
+                };
+                has("apiGroups", "batch") && has("resources", "jobs") && has("verbs", "delete")
+            })
+        };
+        let named = |kind: &str, ns: Option<&str>| {
+            docs.iter()
+                .find(|v| {
+                    v["kind"].as_str() == Some(kind)
+                        && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+                        && v["metadata"]["namespace"].as_str() == ns
+                })
+                .expect("runtime role")
+        };
+        assert!(grants_job_delete(named("Role", Some("veloxsearch-system"))));
+        assert!(
+            !grants_job_delete(named("ClusterRole", None)),
+            "job delete must never be cluster-wide"
         );
     }
 

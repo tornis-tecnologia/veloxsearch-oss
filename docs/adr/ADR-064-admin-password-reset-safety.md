@@ -69,6 +69,44 @@ Three rules, in `src/admin_reset.rs` (pure) with the writes in `k8s.rs`:
      within minutes or exhausts its attempts. An hour with neither means the
      operator never ran it, and keeping the old password longer does not help.
 
+   **Amended 2026-09-27: a restore is watched until its own Job succeeds.**
+   The first cut dropped the marker and `previous-password` in the same pass
+   that restored, before the restore's Job had run. If that Job failed too,
+   nothing watched it any more. Now the restore's nudge rewrites the marker
+   instead of removing it, and the marker carries a stage:
+   `<epoch>` (the reset), `<epoch> restore <n>`, `<epoch> stalled`. The
+   epoch is always the latest nudge, so a run created before it is never
+   read as its verdict. A restore stamps its epoch past the failed run's
+   creation plus the clock-skew tolerance, so a failed pod that has not been
+   collected yet cannot pass for the restore's own.
+   - **Succeeded,** at any stage: forget. This is the only point where
+     `previous-password` is dropped, apart from the one-hour bound.
+   - **The restore's Job failed:** retry once. The retry restores a password
+     the Secret already holds, so the operator would compute the same
+     checksum and treat its failed Job as applied. The retry therefore
+     deletes `<name>-securityconfig-update` first, and the operator starts a
+     new Job on the nudge. The runtime Role gains `delete` on `batch/jobs`
+     in the app namespace, and nothing else.
+   - **The retry failed too, or the Job could not be deleted:** stall. The
+     marker becomes `<epoch> stalled` without a nudge, the backend logs an
+     error, and a new reset is refused with a 409 whose message says
+     automatic recovery has stopped. The SPA still shows its generic
+     `sec_reset_busy` text for every 409. Nothing more is tried. `previous-password` stays
+     until an hour after the stall.
+   - **No verdict:** the hour is counted from the latest nudge, so a restore
+     made late in the reset's hour still gets its full hour.
+
+   The operator source (3.0.0-alpha) explains when this matters. It keeps an
+   existing bcrypt hash only while it still matches the password. So the
+   first restore gets a fresh hash, a new checksum and a new Job, and the
+   cluster keeps accepting the old password with the hash it already has.
+   In the one proven failure, the reset's Job never reached the cluster.
+   Once the probes are back on the old password the nodes recover whatever
+   the restore's Job does, so a restore Job failure there is a consistency
+   problem, not an outage. The stall exists for the case this ADR already
+   names as a known limitation: a cluster that no longer accepts the old
+   password. There, no automatic step can help, and a person has to be told.
+
 This is the ADR-050 stall-remediation pattern (#27, #46): a pure decision, an
 idempotent action, and state read from the cluster alone, so a backend restart
 changes nothing.
@@ -98,8 +136,10 @@ settled deployment.
 
 - A reset from the API or the SPA during a create, roll or upgrade gets a 409
   and changes nothing.
-- The previous password lives in `<name>-admin-credentials` for at most the
-  reset window (until the Job's verdict, or one hour).
+- The previous password lives in `<name>-admin-credentials` until a
+  securityconfig Job of the reset or its restore succeeds, or for one hour
+  after the latest nudge. With at most two restores and a stall, that is
+  bounded to a few hours in the worst case.
 - **Known limitation:** the backstop reads a failed Job as "the hash was never
   applied". The proven failure (`Failed to apply securityconfig after 20
   attempts`) matches that. A Job that applied the hash and then failed a later
