@@ -9,6 +9,60 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **The Dashboards hold's 20-minute ceiling could release in the middle of a
+  rolling restart (#46, ADR-063):** a post-bootstrap roll that ran past 20
+  minutes had its hold released 19s after a node pod was re-created, and
+  Dashboards migrated on a red cluster. The ceiling now fires only once
+  every node is ready on the current revision and no node pod has been
+  created for two minutes. A cluster that stays yellow for good (for
+  example on single-copy storage) still gets its Dashboards at 20 minutes.
+- **The admin-reset backstop stopped watching after its restore (#115,
+  ADR-064):** it dropped the pending marker and the kept previous password
+  as soon as it restored, before the restore's own securityconfig Job had
+  run, so a failure of that Job went unseen. The backstop now watches the
+  restore until its Job succeeds and retries once (deleting the failed Job
+  so the operator runs it again, which needs a new namespaced `delete` on
+  `batch/jobs`). After that it marks the reset stalled on the CR, and a
+  new reset is refused with a 409 whose message says so (the SPA still
+  shows its generic "busy" text for every 409). The kept password is
+  dropped only on a confirmed success or an hour after the latest nudge.
+- **An admin-password reset during a rolling restart could take a deployment
+  down for good (#115, ADR-064):** the operator's one-shot securityconfig Job
+  failed against a cluster that was still rolling. The node probes had already
+  switched to the new password, so every node went unready, and the operator
+  never retries that Job. A reset is now refused with 409 unless the deployment
+  has settled (ADR-050) and no earlier reset is pending. If the operator cannot
+  be nudged, the Secret is rolled back and the error says the password was not
+  changed; before, the API returned 500 with the password already changed. If
+  the securityconfig Job fails anyway, the previous password (kept in the
+  credentials Secret for the reset window) is restored and the nodes recover.
+  `tests/day2_check.py` now waits for `settled`, not just `green`, before the
+  password step, and asserts the 409 during a roll.
+- **The Dashboards first-boot fix now sticks (#46):** the 0.10.5 run showed
+  the operator reverts the `Recreate` strategy and startup budget on its
+  Deployment within a second, and it reverted the remediation's 0/1 scale the
+  same way. The operator's CR has no probe or strategy field, so the fix now
+  goes through `spec.dashboards.replicas`.
+  - **First boot:** a new deployment's Dashboards is held at zero replicas.
+    The hold is released once velox's own verdict says everything but
+    Dashboards has settled and the node pool has been still for two
+    minutes, or once the cluster is 20 minutes old and initialized with its
+    nodes no longer rolling. It no longer uses the operator's lagging
+    `health`. The first migration
+    therefore runs on a settled cluster.
+  - **Enforcement:** the operator's first update of a new CR drops a zero
+    `replicas` (`omitempty` plus the CRD default of 1), so a post-create
+    watch and the metrics sampler write it again. A Dashboards that is
+    already serving is never scaled down, and a save never changes
+    Dashboards replicas.
+  - **Remediation:** the `.kibana_1` remediation holds and releases through
+    the CR, and it now actually arms. A deadlocked Dashboards is killed by
+    its startup probe, exits 0 and restarts at once, so it never showed the
+    `CrashLoopBackOff` the trigger required. On an otherwise settled
+    cluster, the stall that arms it was also never measured. The trigger is
+    now three restarts with the last one within 15 minutes.
+  - **Removed:** the Deployment patch, and the runtime `patch` grant on
+    Deployments (ADR-063).
 - **Upgrading could re-install the OpenSearch operator, grant cluster-admin
   back, or downgrade (#54, ADR-057):** bootstrap applied its vendored operator
   bundle (CRDs included, force-applied) whenever the operator was not Ready at

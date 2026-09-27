@@ -310,6 +310,7 @@ const STR = {
     sec_lead: "Redefina a senha de admin do OpenSearch deste cluster.",
     new_pass: "Nova senha", confirm_pass: "Confirmar senha",
     reset_pass: "Redefinir senha", pass_reset: "Senha redefinida",
+    sec_reset_busy: "Este deployment ainda está mudando (criando, reiniciando nós ou atualizando), ou uma redefinição anterior ainda está sendo aplicada. Redefina a senha quando ele estiver estável.",
     // deployment activity: staged progress + control locks (ADR-050)
     act_h_creating: "Criando o cluster",
     act_h_upgrading: "Atualizando a versão",
@@ -925,6 +926,7 @@ const STR = {
     sec_lead: "Reset the OpenSearch admin password for this cluster.",
     new_pass: "New password", confirm_pass: "Confirm password",
     reset_pass: "Reset password", pass_reset: "Password reset",
+    sec_reset_busy: "This deployment is still changing (creating, restarting nodes or upgrading), or an earlier reset is still being applied. Reset the password once it has settled.",
     // deployment activity: staged progress + control locks (ADR-050)
     act_h_creating: "Creating the cluster",
     act_h_upgrading: "Upgrading the version",
@@ -1539,6 +1541,7 @@ const STR = {
     sec_lead: "Restablece la contraseña de admin de OpenSearch de este clúster.",
     new_pass: "Nueva contraseña", confirm_pass: "Confirmar contraseña",
     reset_pass: "Restablecer contraseña", pass_reset: "Contraseña restablecida",
+    sec_reset_busy: "Este deployment todavía está cambiando (creándose, reiniciando nodos o actualizándose), o un restablecimiento anterior aún se está aplicando. Restablece la contraseña cuando esté estable.",
     // actividad del deployment: progreso por etapas + bloqueos de controles (ADR-050)
     act_h_creating: "Creando el clúster",
     act_h_upgrading: "Actualizando la versión",

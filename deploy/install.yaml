@@ -65,13 +65,11 @@ rules:
     resources: ["opensearchsnapshotpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Workload discovery + operator/StatefulSet readiness (read-only, all ns).
-  # `patch` on deployments is the #46 exception, nothing wider: the Dashboards
-  # survivability fields (probe budget, Recreate) and the one-shot .kibana_1
-  # remediation's 0/1 scale — both claimed under our own field manager or a
-  # scalar merge, never a write to anything the operator owns wholesale.
+  # No write: the #46 Dashboards hold goes through the OpenSearchCluster CR
+  # (ADR-063); the operator reverts any direct edit of its Deployments.
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets"]
-    verbs: ["get", "list", "watch", "patch"]
+    verbs: ["get", "list", "watch"]
   # Pod/namespace reads: discovery + parity with the velox-agent ClusterRole
   # we grant Fluent Bit (RBAC forbids granting perms we don't hold).
   - apiGroups: [""]
@@ -165,6 +163,14 @@ rules:
   # rolling restart stays yellow forever.
   - apiGroups: [""]
     resources: ["pods"]
+    verbs: ["delete"]
+  # Admin-reset backstop (#115, ADR-064): the one retry of a failed restore
+  # deletes the operator's failed `<name>-securityconfig-update` Job so the
+  # operator runs it again (it never re-runs a Job whose checksum it has
+  # seen). Delete only, namespaced; without it the retry marks the reset
+  # stalled instead.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
     verbs: ["delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
