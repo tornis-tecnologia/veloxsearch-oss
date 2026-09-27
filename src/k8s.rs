@@ -3273,6 +3273,17 @@ fn should_remediate(
         && last_fired_ago.is_none_or(|ago| ago >= REMEDIATE_COOLDOWN)
 }
 
+/// Read a `_cat/recovery` byte cell. With `bytes=b` it is a plain number
+/// (`208`, sometimes as a JSON number); without it OpenSearch renders a size
+/// (`208b`, `12kb`). A plain byte count is read either way; anything else is
+/// `None` — an unknown count, never the zero a wedged `init` row reports.
+fn byte_cell(x: &serde_json::Value) -> Option<i64> {
+    x.as_i64().or_else(|| {
+        let s = x.as_str()?.trim();
+        s.strip_suffix('b').unwrap_or(s).parse().ok()
+    })
+}
+
 /// Why [`choose_bounce_pod`] refused to name a pod. Refusing is the safe
 /// answer: a bounce of the wrong node costs a JVM restart and fixes nothing
 /// (bouncing the TARGET only moves the stall), so no guess is ever made.
@@ -3326,10 +3337,7 @@ fn choose_bounce_pod(
         // `bytes=b` renders the cell as a plain number; without it the cell
         // reads `0b`, `12kb`. A cell that is neither is not evidence of a
         // wedge, so it does not count.
-        let bytes = r.get("bytes_recovered").and_then(|b| {
-            b.as_i64()
-                .or_else(|| b.as_str()?.trim().trim_end_matches('b').parse().ok())
-        });
+        let bytes = r.get("bytes_recovered").and_then(byte_cell);
         let source = text(r, "source_node");
         let is_peer = text(r, "type").is_empty() || text(r, "type").eq_ignore_ascii_case("peer");
         if is_peer
@@ -3577,9 +3585,11 @@ fn parse_cat_duration(s: &str) -> Option<i64> {
 
 /// Narrow a `_cat/recovery?format=json` payload to [`RecoveryRow`]s. Cells
 /// the cluster renders oddly (absent, `-`, stringified numbers) degrade
-/// toward "not evidence": a row without a readable stage or duration can
-/// neither arm a bounce nor hold the throttle back, and an unreadable byte
-/// count reads as the zero an `init` row honestly reports.
+/// toward "not evidence": a row without a readable stage, duration or byte
+/// count can neither arm a bounce nor hold the throttle back. An unreadable
+/// byte count used to read as zero, so a moving recovery rendered as `208b`
+/// looked wedged; the query now asks for `bytes=b` and [`byte_cell`] reads
+/// both spellings.
 fn parse_recovery_rows(v: &serde_json::Value) -> Vec<RecoveryRow> {
     let cell = |row: &serde_json::Value, name: &str| {
         row.get(name).map(|x| {
@@ -3588,24 +3598,17 @@ fn parse_recovery_rows(v: &serde_json::Value) -> Vec<RecoveryRow> {
                 .unwrap_or_else(|| x.to_string())
         })
     };
-    let num = |row: &serde_json::Value, name: &str| -> i64 {
-        row.get(name)
-            .and_then(|x| {
-                x.as_i64()
-                    .or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))
-            })
-            .unwrap_or(0)
-    };
     v.as_array()
         .map(|rows| {
             rows.iter()
                 .filter_map(|row| {
                     let stage = cell(row, "stage")?;
                     let secs = cell(row, "time").and_then(|t| parse_cat_duration(&t))?;
+                    let bytes_recovered = row.get("bytes_recovered").and_then(byte_cell)?;
                     Some(RecoveryRow {
                         index: cell(row, "index").unwrap_or_default(),
                         stage,
-                        bytes_recovered: num(row, "bytes_recovered"),
+                        bytes_recovered,
                         secs,
                     })
                 })
@@ -3652,6 +3655,24 @@ fn wave_settled(rows: &[RecoveryRow]) -> bool {
     !rows
         .iter()
         .any(|r| r.stage.eq_ignore_ascii_case("init") && r.bytes_recovered == 0)
+}
+
+/// The longest a throttle raise outlives its episode. The raise is handed
+/// back as soon as the recoveries settle; if they never do, it is handed
+/// back anyway once the episode's cooldown has run out, so no raise is
+/// permanent. A wedge still there by then is a new episode: the next pass
+/// may fire again, and that fire raises (and later hands back) its own.
+const THROTTLE_HANDBACK_AFTER: std::time::Duration = REMEDIATE_COOLDOWN;
+
+/// The pure hand-back decision for a raise fired `fired_ago` ago: the
+/// recoveries have settled, or the episode is over. Never in the same pass
+/// that just armed a new fire, whose raise would otherwise be undone at once.
+fn should_hand_back_throttle(
+    fired_ago: std::time::Duration,
+    settled: bool,
+    armed_this_pass: bool,
+) -> bool {
+    !armed_this_pass && (settled || fired_ago >= THROTTLE_HANDBACK_AFTER)
 }
 
 /// Is a restart wave walking right now? The operator's own account: a
@@ -3737,7 +3758,7 @@ async fn cat_recovery_rows(namespace: &str, name: &str) -> Option<Vec<RecoveryRo
         let (user, pass) = admin_creds_in(namespace, name).await;
         let resp = http
             .get(format!(
-                "{base}/_cat/recovery?format=json&h=index,stage,time,bytes_recovered&time=s"
+                "{base}/_cat/recovery?format=json&h=index,stage,time,bytes_recovered&time=s&bytes=b"
             ))
             .basic_auth(&user, Some(&pass))
             .timeout(DIAGNOSIS_TIMEOUT)
@@ -3837,7 +3858,9 @@ async fn restart_wave_watch(
     // stalled path: placeholder first (so a concurrent pass sees a
     // just-fired entry), then the bounce updates the log with the pod.
     let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    if let Some((index, secs)) = restart_wave_should_remediate(&rows, fired_ago) {
+    let armed = restart_wave_should_remediate(&rows, fired_ago);
+    let armed_this_pass = armed.is_some();
+    if let Some((index, secs)) = armed {
         if let Ok(mut log) = remediation_log().lock() {
             log.insert(key.clone(), (std::time::Instant::now(), None));
         }
@@ -3854,16 +3877,26 @@ async fn restart_wave_watch(
         });
     }
 
-    // Hand the throttle back once nothing sits in init at zero bytes. The
-    // guard reads the entry fetched before arming, so a fire this pass
-    // cannot be undone by its own restore clause — the rows still carry the
-    // wedge the fire just armed against.
-    if last.is_some() && wave_settled(&rows) && restore_throttle(namespace, name).await {
+    // Hand the throttle back once nothing sits in init at zero bytes, or
+    // once the episode is over (THROTTLE_HANDBACK_AFTER). This covers a
+    // raise from EITHER trigger: a #27 fire leaves its entry in the same
+    // log, and `throttle_still_raised` keeps the deployment on the slow path
+    // that runs this watch until the entry is gone. The guard reads the
+    // entry fetched before arming, and never restores in a pass that armed.
+    let settled = wave_settled(&rows);
+    if fired_ago.is_some_and(|ago| should_hand_back_throttle(ago, settled, armed_this_pass))
+        && restore_throttle(namespace, name).await
+    {
         if let Ok(mut log) = remediation_log().lock() {
             log.remove(&key);
         }
+        let why = if settled {
+            "recoveries drained"
+        } else {
+            "episode ended with recoveries still in init"
+        };
         tracing::info!(
-            "#96 restart-wave remediation for {namespace}/{name}: recoveries drained, \
+            "#27/#96 remediation for {namespace}/{name}: {why}, \
              node_concurrent_recoveries handed back"
         );
     }
@@ -7794,7 +7827,8 @@ mod tests {
             ]
         );
 
-        // A row without a readable stage or duration is skipped, not guessed.
+        // A row without a readable stage, duration or byte count is skipped,
+        // not guessed.
         let junk = serde_json::json!([{"index": "x", "bytes_recovered": 1}, {"nope": true}]);
         assert!(parse_recovery_rows(&junk).is_empty());
         assert!(parse_recovery_rows(&serde_json::json!({})).is_empty());
@@ -7891,6 +7925,68 @@ mod tests {
             3,
             &[("RollingRestart".into(), "Running".into())]
         ));
+    }
+
+    /// A moving recovery must never read as wedged. Without `bytes=b` the
+    /// cluster renders `208b`, which the old parse read as 0 (and so as the
+    /// wedge); the query now asks for raw bytes, and both spellings read 208.
+    #[test]
+    fn a_moving_recovery_in_init_is_never_read_as_wedged() {
+        let rendered = |bytes: serde_json::Value| {
+            serde_json::json!([{"index": "logs-2026.09", "stage": "init",
+                                "time": "900s", "bytes_recovered": bytes}])
+        };
+        // The old parse, as it was: a failed number read as zero.
+        let old = |x: &serde_json::Value| -> i64 {
+            x.as_i64()
+                .or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))
+                .unwrap_or(0)
+        };
+        assert_eq!(old(&serde_json::json!("208b")), 0, "the bug being fixed");
+
+        for cell in [
+            serde_json::json!("208b"),
+            serde_json::json!("208"),
+            serde_json::json!(208),
+        ] {
+            let rows = parse_recovery_rows(&rendered(cell.clone()));
+            assert_eq!(rows.len(), 1, "{cell}");
+            assert_eq!(rows[0].bytes_recovered, 208, "{cell}");
+            assert_eq!(worst_wedged_init(&rows), None, "{cell}");
+            assert!(wave_settled(&rows), "{cell}");
+        }
+        // Zero in either spelling is still the wedge.
+        for cell in [serde_json::json!("0b"), serde_json::json!("0")] {
+            let rows = parse_recovery_rows(&rendered(cell.clone()));
+            assert_eq!(
+                worst_wedged_init(&rows).map(|r| r.secs),
+                Some(900),
+                "{cell}"
+            );
+        }
+        // A size the parser cannot read exactly is not evidence at all.
+        assert!(parse_recovery_rows(&rendered(serde_json::json!("12kb"))).is_empty());
+    }
+
+    /// The hand-back is bounded: settled recoveries return the throttle at
+    /// once, and a raise whose recoveries never settle is still returned
+    /// when its episode ends. Never in the pass that just armed a new fire.
+    #[test]
+    fn the_throttle_is_handed_back_when_settled_or_when_the_episode_ends() {
+        use std::time::Duration;
+        let early = Duration::from_secs(60);
+        let over = THROTTLE_HANDBACK_AFTER;
+        assert!(should_hand_back_throttle(early, true, false));
+        assert!(!should_hand_back_throttle(early, false, false));
+        assert!(!should_hand_back_throttle(
+            over - Duration::from_secs(1),
+            false,
+            false
+        ));
+        assert!(should_hand_back_throttle(over, false, false));
+        // a fire armed this pass keeps its fresh raise, settled or not
+        assert!(!should_hand_back_throttle(over, false, true));
+        assert!(!should_hand_back_throttle(over, true, true));
     }
 
     /// The restore half: the throttle comes back only once nothing sits in

@@ -22,6 +22,15 @@ are called out explicitly.
   logs why.
 - **The stuck-recovery remediation bounces the recovery source, not the
   target (#27/#96, #109).**
+- **The restart-wave watch could read a moving recovery as stuck (#96):**
+  without `bytes=b`, OpenSearch reports the recovered bytes as `208b`, which
+  was read as 0, the stuck signature. The watch now asks for raw bytes and
+  reads both forms. A byte count it cannot read no longer counts as zero.
+- **A recovery-throttle raise had no upper bound (#27/#96):** the raised
+  `node_concurrent_recoveries` was handed back only once every recovery had
+  settled. It is now also handed back when the remediation's 30-minute
+  episode ends. If the recoveries are still stuck by then, the next pass
+  starts a new episode.
 - **The Dashboards hold's 20-minute ceiling could release in the middle of a
   rolling restart (#46, ADR-063):** a post-bootstrap roll that ran past 20
   minutes had its hold released 19s after a node pod was re-created, and
