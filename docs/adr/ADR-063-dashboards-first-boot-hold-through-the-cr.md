@@ -71,6 +71,21 @@ builder (`pkg/builders/dashboards.go`, tags `v3.0.0-alpha` and `v3.0.0`):
      hold is released anyway, so a cluster that never settles still gets
      Dashboards. On a settled cluster the migration takes seconds, well
      inside the fixed ~210s budget.
+
+     **Amended 2026-09-27: the ceiling waits for the nodes to stop
+     rolling.** On a kind create the operator's post-bootstrap rolling
+     restart ran past 20 minutes. At +1229s the age-only ceiling released
+     19s after a node pod was re-created, and Dashboards migrated on a red
+     cluster (2/3 nodes, unassigned shards). The ceiling is the escape for a
+     cluster that is up and stays yellow (single-copy storage, where
+     replicas can never be assigned), not for one that is still moving. It
+     now also requires every node the CR asks for to be ready and on the
+     StatefulSet's current revision, and the same 120s of node-pool
+     stillness the normal release uses. A yellow-forever cluster meets all
+     three and is still released at 20 minutes. A roll that never ends
+     keeps the hold. That is the right trade: booting Dashboards into a
+     roll is the incident this ADR exists for, and the remediation stays
+     armed for whatever happens after the release.
    - **A serving Dashboards is never scaled down by the hold.** If a
      Dashboards replica is already Ready, the hold was lost and the first
      boot already happened. Only the annotation is removed. Scaling a

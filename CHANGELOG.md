@@ -9,6 +9,13 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **The Dashboards hold's 20-minute ceiling could release in the middle of a
+  rolling restart (#46, ADR-063):** a post-bootstrap roll that ran past 20
+  minutes had its hold released 19s after a node pod was re-created, and
+  Dashboards migrated on a red cluster. The ceiling now fires only once
+  every node is ready on the current revision and no node pod has been
+  created for two minutes. A cluster that stays yellow for good (for
+  example on single-copy storage) still gets its Dashboards at 20 minutes.
 - **An admin-password reset during a rolling restart could take a deployment
   down for good (#115, ADR-064):** the operator's one-shot securityconfig Job
   failed against a cluster that was still rolling. The node probes had already
@@ -29,8 +36,9 @@ are called out explicitly.
   - **First boot:** a new deployment's Dashboards is held at zero replicas.
     The hold is released once velox's own verdict says everything but
     Dashboards has settled and the node pool has been still for two
-    minutes, or once the cluster is 20 minutes old and initialized. It no
-    longer uses the operator's lagging `health`. The first migration
+    minutes, or once the cluster is 20 minutes old and initialized with its
+    nodes no longer rolling. It no longer uses the operator's lagging
+    `health`. The first migration
     therefore runs on a settled cluster.
   - **Enforcement:** the operator's first update of a new CR drops a zero
     `replicas` (`omitempty` plus the CRD default of 1), so a post-create
