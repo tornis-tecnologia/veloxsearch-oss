@@ -74,6 +74,12 @@ async fn main() {
     // the same pre-flight. VELOX_VERSION_CHECK_SECS=0 turns it off.
     tokio::spawn(veloxsearch::version_feed::run_poller());
 
+    // Re-revoke the bootstrap cluster-admin binding when an `install.yaml`
+    // re-apply (the upgrade path) re-creates it on an already-bootstrapped
+    // cluster (ADR-027, ADR-057). Deletes only the binding naming this app's
+    // own ServiceAccount, and only once bootstrap and storage are complete.
+    tokio::spawn(veloxsearch::bootstrap::run_revoke_watch());
+
     let addr = std::env::var("VELOX_SITE_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     tracing::info!("listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
