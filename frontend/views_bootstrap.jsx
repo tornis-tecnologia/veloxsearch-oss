@@ -23,6 +23,28 @@ function reqColor(s) { return s === "pass" ? "var(--accent)" : s === "warn" ? "v
 // invisible to a screen reader and ambiguous in grayscale.
 function reqWord(s, t) { return s === "pass" ? t.boot_req_pass : s === "warn" ? t.boot_req_warn : t.boot_req_fail; }
 
+// ADR-057: a running operator that differs from the one this release vendors
+// is reported, never changed. The text is built here from the structured
+// fields (ADR-019 — the backend's R9 detail is only the English fallback), and
+// exported so the main shell can show it too: a conformant cluster never sees
+// this screen, and drift is exactly what an upgraded, conformant cluster has.
+function OperatorDriftNotice({ status, t, style }) {
+  if (!status || !status.operator_drift) return null;
+  return (
+    <div className="card pad" role="status" data-testid="operator-drift"
+      style={{ borderColor: "var(--warn-soft)", ...style }}>
+      <div style={{ color: "var(--warn)", fontWeight: 600, marginBottom: 4 }}>
+        <span aria-hidden="true">⚠ </span>{t.boot_drift_title}
+      </div>
+      <div style={{ color: "var(--text-2)", fontSize: 13 }}>
+        {t.boot_drift
+          .replace("{0}", status.operator_image_running || "?")
+          .replace("{1}", status.operator_image_vendored || "?")}
+      </div>
+    </div>
+  );
+}
+
 function BootPrefs({ lang, setLang, theme, setTheme }) {
   return (
     <div className="prefs" style={{ position: "absolute", top: 16, right: 16, display: "flex", gap: 8, alignItems: "center" }}>
@@ -139,7 +161,9 @@ function BootstrapView({ lang, setLang, theme, setTheme, onReady }) {
                       <b style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}>{r.id}</b>
                       {/* The status as a word, not only as a colored glyph. */}
                       <span style={{ color: reqColor(r.status), fontSize: 12, fontFamily: "var(--font-mono)" }}> [{reqWord(r.status, t)}]</span>
-                      <span style={{ color: "var(--text-2)" }}> — {r.detail}</span>
+                      <span style={{ color: "var(--text-2)" }}> — {r.id === "r9" && r.status === "warn" && status.operator_drift
+                        ? t.boot_drift.replace("{0}", status.operator_image_running || "?").replace("{1}", status.operator_image_vendored || "?")
+                        : r.detail}</span>
                     </span>
                   </li>
                 ))}
@@ -158,7 +182,11 @@ function BootstrapView({ lang, setLang, theme, setTheme, onReady }) {
                   {/* Installing two operators takes minutes; a screen with no
                       clock reads as a hang. */}
                   <p className="hint" style={{ marginTop: 10 }}>
-                    {installing && <>{t.boot_installing} <span style={{ color: "var(--text-2)" }}>{status.installing}</span> · </>}
+                    {/* "wait:<component>" = installed but not Ready; bootstrap
+                        waits on it and applies nothing (ADR-057). */}
+                    {installing && (status.installing.startsWith("wait:")
+                      ? <>{t.boot_waiting} <span style={{ color: "var(--text-2)" }}>{status.installing.slice(5)}</span> · </>
+                      : <>{t.boot_installing} <span style={{ color: "var(--text-2)" }}>{status.installing}</span> · </>)}
                     <span className="tnum">{t.boot_elapsed.replace("{0}", fmtElapsed(elapsed))}</span>
                   </p>
                 </>
@@ -182,4 +210,4 @@ function BootstrapView({ lang, setLang, theme, setTheme, onReady }) {
   );
 }
 
-export { BootstrapView };
+export { BootstrapView, OperatorDriftNotice };
