@@ -1,6 +1,6 @@
 # ADR-055 — VeloxSearch may surgically patch the operator's Dashboards Deployment
 
-**Status:** accepted
+**Status:** decision 1 and decision 2's trigger superseded by ADR-063 (the operator reverts the patch; a probe-kill loop exits 0 and never reads `CrashLoopBackOff`); the container-log refusal and decision 3 stand
 **Date:** 2026-09-10
 
 ## Context
