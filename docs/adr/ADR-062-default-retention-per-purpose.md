@@ -52,7 +52,10 @@ deployment does not have.
 
 Per-deployment configuration lives on the CR (ADR-041). At create, the chosen
 value is stamped as `veloxsearch.ai/retention: <n>d`: the wizard's override, or
-else the installation default for the purpose. The deferred applier reads that
+else the installation default for the purpose. Next to it,
+`veloxsearch.ai/retention-source` records where the value came from:
+`default` (it inherits the installation default) or `override` (a person chose
+it for this deployment). The deferred applier reads that
 annotation and never reads the installation default. So:
 
 - **Changing the default never moves an existing deployment.** A deployment
@@ -63,8 +66,8 @@ annotation and never reads the installation default. So:
   whole annotations map under one field manager, so the value is carried
   through from the existing CR. Omitting it would prune it, which is the same
   trap as the `additionalConfig` round-trip.
-- **A purpose change re-stamps the new purpose's default.** The user picked
-  that purpose, and its default is what they chose.
+- **A purpose change re-stamps the new purpose's default** as `default`. The
+  user picked that purpose, and its default is what they chose.
 
 ### 3. The policy is applied once, then it is the user's
 
@@ -95,18 +98,43 @@ following:
 - The edit tab shows the state (`managed` / `customized` / `absent`) from a
   live read (`/retention_status`).
 
-### 4. Existing deployments move only on an explicit action
+### 4. Existing deployments move only on an explicit action, and only if they inherit
+
+"velox defines the default; the person can always change it" covers two kinds
+of change: an edit to the policy inside OpenSearch (§3), and a value chosen for
+the deployment at create. Neither kind is undone by the default.
 
 - **Admin: "apply default to existing deployments"**
-  (`/apply_default_retention`). The action runs sequentially and returns one
-  row per deployment: `installed` / `updated` / `unchanged` / `customized`
-  (skipped, CR untouched) / `search` (skipped) / `error` (with the cluster's
-  words). There is no background mass rewrite.
+  (`/apply_default_retention`). It moves only deployments whose source is
+  `default`. The action runs sequentially and returns one row per deployment:
+  `installed` / `updated` / `unchanged` / `override` (skipped, chosen for this
+  deployment) / `customized` (skipped, edited in OpenSearch) / `search`
+  (skipped) / `error` (with the cluster's words). Skipped rows report the days
+  the deployment keeps, not the default it did not get, and their CR is left
+  untouched. There is no background mass rewrite.
 - **Per deployment: "restore default"** (`/reset_retention`, tenant-scoped).
-  This is the one path that overwrites a customized policy. It forces the
-  installation default for the purpose and re-stamps both annotations.
+  This is the one path that overwrites a customized policy or an override. It
+  forces the installation default for the purpose and re-stamps the value with
+  source `default`, so the deployment follows the default again from then on.
+- **CRs without a source annotation** (created before the field existed). No
+  retention value at all (pre-ADR-062) inherits, since it runs the built-in.
+  A value equal to a default velox would have stamped (the built-in 30/90, or
+  the installation default in force now) inherits. Any other value is an
+  override. The CR does not record which default was in force at create, so a
+  deployment created on a default the admin has since changed reads as an
+  override. That errs on the safe side: it is skipped, not rewritten, and
+  "restore default" adopts it.
 
 Saving the default applies nothing by itself.
+
+### 5. When a change takes effect
+
+A changed policy reaches existing indices on OpenSearch's next ISM job run,
+which is minutes, not the moment velox writes it. A policy customized inside
+OpenSearch governs only the indices OpenSearch itself attaches it to (its
+`ism_template` for new indices, or an explicit change-policy); velox no longer
+re-attaches indices to a policy it does not own. The Edit tab says so in one
+line.
 
 ## Consequences
 

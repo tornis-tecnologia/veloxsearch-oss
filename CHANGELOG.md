@@ -95,8 +95,10 @@ are called out explicitly.
   "Default retention" block (observability and security days; out-of-box 30
   and 90, the previous fixed values). The create wizard shows the effective
   default for the chosen purpose and accepts a per-deployment override, stamped
-  on the CR. An admin action applies the default to existing deployments and
-  reports per deployment what happened. Each deployment's Edit tab shows its
+  on the CR together with whether it inherits the default or was chosen for
+  that deployment. An admin action applies the default to the existing
+  deployments that inherit it (never to one given its own value) and reports
+  per deployment what happened. Each deployment's Edit tab shows its
   retention, whether the policy was customized, and a "restore default" button.
 
 ### Changed

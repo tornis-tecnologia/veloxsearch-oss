@@ -226,7 +226,7 @@ const API = {
     call("save_retention_defaults", { observability_days, security_days }),
   // Admin: rewrite every non-customized deployment. -> [RetentionApplyResult]
   applyDefaultRetention: () => call("apply_default_retention", {}),
-  // -> RetentionStatus { purpose, days, default_days, state, detail }
+  // -> RetentionStatus { purpose, days, default_days, source, state, detail }
   retentionStatus: (name) => call("retention_status", { name }),
   resetRetention: (name) => call("reset_retention", { name }),
 };

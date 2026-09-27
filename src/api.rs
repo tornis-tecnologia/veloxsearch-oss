@@ -833,6 +833,9 @@ mod server {
         pub days: Option<u32>,
         /// What "reset to default" would set; `None` for `search`.
         pub default_days: Option<u32>,
+        /// `default` (inherits the installation default, follows the admin's
+        /// apply) | `override` (chosen for this deployment) | empty for search.
+        pub source: String,
         /// `absent` | `managed` | `customized` | `none` (search) |
         /// `unreachable` (OpenSearch did not answer; see `detail`).
         pub state: String,
@@ -846,6 +849,7 @@ mod server {
         pub name: String,
         pub namespace: String,
         /// `installed` | `updated` | `unchanged` | `customized` (skipped) |
+        /// `override` (skipped — chosen for this deployment) |
         /// `search` (skipped — no retention) | `error`.
         pub outcome: String,
         pub days: Option<u32>,
@@ -1237,7 +1241,7 @@ mod server {
             // (ADR-048 invariant 1).
             version: None,
             // Set by the create handler / a purpose change only (ADR-062).
-            retention_days: None,
+            retention: None,
         })
     }
 
@@ -1620,9 +1624,14 @@ mod server {
             .map_err(ApiError::internal)?
             .for_purpose(&purpose)
         {
-            let days = req.retention_days.unwrap_or(default_days);
+            // An explicit choice is an override: the admin's "apply default
+            // to existing deployments" must never move it.
+            let (days, source) = match req.retention_days {
+                Some(d) => (d, crate::retention::Source::Override),
+                None => (default_days, crate::retention::Source::Default),
+            };
             crate::retention::validate_days(days).map_err(ApiError::bad_request)?;
-            ov.retention_days = Some(days);
+            ov.retention = Some((days, source));
         }
         // Refuse a malformed snapshot configuration BEFORE the cluster is
         // created (#52): the repository is only registered minutes later, once
@@ -1702,10 +1711,11 @@ mod server {
             .await
             .map_err(ApiError::internal)?;
         if before.purpose != purpose {
-            ov.retention_days = crate::retention::get()
+            ov.retention = crate::retention::get()
                 .await
                 .map_err(ApiError::internal)?
-                .for_purpose(&purpose);
+                .for_purpose(&purpose)
+                .map(|d| (d, crate::retention::Source::Default));
         }
         crate::k8s::create_cluster(&dep, &req.size, &purpose, ov)
             .await
@@ -2322,8 +2332,10 @@ mod server {
     }
 
     /// The admin's explicit "apply the default to existing deployments".
-    /// Sequential and reported per deployment; a policy the user customized
-    /// inside OpenSearch is skipped and its CR left untouched.
+    /// Sequential and reported per deployment. It moves only deployments that
+    /// inherit the default: a value chosen for a deployment (`override`) and a
+    /// policy the user customized inside OpenSearch are both skipped, with the
+    /// CR left untouched.
     async fn apply_default_retention(
         scope: Scope,
     ) -> Result<Json<Vec<RetentionApplyResult>>, ApiError> {
@@ -2346,12 +2358,30 @@ mod server {
                 let Some(days) = defaults.for_purpose(&cr.purpose) else {
                     return Ok::<_, anyhow::Error>(("search", None));
                 };
+                // Skipped rows report what the deployment keeps, not the
+                // default it did not get.
+                let own = crate::retention::effective_days(&cr.purpose, cr.value.as_deref());
+                let source = crate::retention::source_of(
+                    &cr.purpose,
+                    cr.value.as_deref(),
+                    cr.source.as_deref(),
+                    &defaults,
+                );
+                if source == crate::retention::Source::Override {
+                    return Ok(("override", own));
+                }
                 let outcome =
                     crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), false)
                         .await?;
-                if outcome != crate::profiles::RetentionOutcome::Customized {
-                    crate::k8s::set_retention(&dep, Some(days), None).await?;
+                if outcome == crate::profiles::RetentionOutcome::Customized {
+                    return Ok((outcome.as_str(), own));
                 }
+                crate::k8s::set_retention(
+                    &dep,
+                    Some((days, crate::retention::Source::Default)),
+                    None,
+                )
+                .await?;
                 Ok((outcome.as_str(), Some(days)))
             }
             .await;
@@ -2387,10 +2417,19 @@ mod server {
             .await
             .map_err(ApiError::internal)?;
         let days = crate::retention::effective_days(&cr.purpose, cr.value.as_deref());
-        let default_days = crate::retention::get()
-            .await
-            .map_err(ApiError::internal)?
-            .for_purpose(&cr.purpose);
+        let defaults = crate::retention::get().await.map_err(ApiError::internal)?;
+        let default_days = defaults.for_purpose(&cr.purpose);
+        let source = if days.is_some() {
+            crate::retention::source_of(
+                &cr.purpose,
+                cr.value.as_deref(),
+                cr.source.as_deref(),
+                &defaults,
+            )
+            .as_str()
+        } else {
+            ""
+        };
         let (state, detail) = if days.is_none() {
             ("none".to_string(), String::new())
         } else {
@@ -2403,6 +2442,7 @@ mod server {
             purpose: cr.purpose,
             days,
             default_days,
+            source: source.to_string(),
             state,
             detail,
         })
@@ -2429,7 +2469,9 @@ mod server {
         crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), true)
             .await
             .map_err(ApiError::internal)?;
-        crate::k8s::set_retention(&dep, Some(days), None)
+        // Restoring the default also turns an override back into inheriting,
+        // so the next "apply default" moves this deployment again.
+        crate::k8s::set_retention(&dep, Some((days, crate::retention::Source::Default)), None)
             .await
             .map_err(ApiError::internal)?;
         Ok(Json(retention_status_of(&dep).await?))

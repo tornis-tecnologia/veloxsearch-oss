@@ -31,6 +31,68 @@ pub const ANNOTATION: &str = "veloxsearch.ai/retention";
 /// `<_seq_no>:<_primary_term>` of the retention policy velox last wrote. A
 /// live policy with any other pair was written by someone else.
 pub const STAMP_ANNOTATION: &str = "veloxsearch.ai/retention-stamp";
+/// Whether [`ANNOTATION`] inherits the installation default (`default`) or
+/// was chosen for this deployment (`override`). Only an inheriting deployment
+/// follows the admin's "apply default to existing deployments".
+pub const SOURCE_ANNOTATION: &str = "veloxsearch.ai/retention-source";
+
+/// Where a deployment's retention value comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// Inherits the installation default; moves when the admin applies it.
+    Default,
+    /// Chosen for this deployment (the wizard's override); only the user's
+    /// own "restore default" turns it back into [`Source::Default`].
+    Override,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Default => "default",
+            Source::Override => "override",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "default" => Some(Source::Default),
+            "override" => Some(Source::Override),
+            _ => None,
+        }
+    }
+}
+
+/// Does this deployment inherit the installation default, or was its value
+/// chosen for it?
+///
+/// The source annotation decides whenever it is present. Without one the CR
+/// predates it, and the rule is: no value at all (created before ADR-062)
+/// inherits, and so does a value equal to a default velox would have stamped:
+/// the built-in 30/90, or the installation default in force now. Anything else
+/// was chosen by a person and is an override. The CR does not record which
+/// default was in force at create time, so a deployment created on a default
+/// the admin has since changed reads as an override. That is the safe side:
+/// it is skipped, not rewritten.
+pub fn source_of(
+    purpose: &str,
+    value: Option<&str>,
+    source: Option<&str>,
+    current: &Defaults,
+) -> Source {
+    if let Some(s) = source.and_then(Source::parse) {
+        return s;
+    }
+    let Some(days) = value.and_then(parse_age) else {
+        return Source::Default;
+    };
+    let builtin = Defaults::default().for_purpose(purpose);
+    if Some(days) == builtin || Some(days) == current.for_purpose(purpose) {
+        Source::Default
+    } else {
+        Source::Override
+    }
+}
 
 /// The out-of-box defaults — exactly what every deployment got before the
 /// knob existed, so an installation that never touches it changes nothing.
@@ -235,6 +297,54 @@ mod tests {
         );
         data.insert(KEY_SECURITY.to_string(), "0".to_string());
         assert_eq!(Defaults::from_data(&data).security_days, 90, "out of range");
+    }
+
+    /// The admin's apply touches only inheriting deployments, so the source
+    /// decides it. An explicit annotation is final; a CR from before it
+    /// existed inherits only when its value is one velox would have stamped.
+    #[test]
+    fn a_deployment_inherits_the_default_unless_it_chose_its_own() {
+        let now = Defaults {
+            observability_days: 21,
+            security_days: 60,
+        };
+        // Explicit source wins, whatever the value.
+        assert_eq!(
+            source_of("observability", Some("7d"), Some("default"), &now),
+            Source::Default
+        );
+        assert_eq!(
+            source_of("observability", Some("21d"), Some("override"), &now),
+            Source::Override
+        );
+        // Pre-ADR-062: no value at all → inherits (runs the built-in).
+        assert_eq!(
+            source_of("observability", None, None, &now),
+            Source::Default
+        );
+        // No source annotation: equal to the built-in or the current default
+        // → inherited; anything else → the person's choice.
+        assert_eq!(
+            source_of("observability", Some("30d"), None, &now),
+            Source::Default
+        );
+        assert_eq!(
+            source_of("security", Some("60d"), None, &now),
+            Source::Default
+        );
+        assert_eq!(
+            source_of("observability", Some("7d"), None, &now),
+            Source::Override,
+            "the live case: B created with 7d must not be moved to 21d"
+        );
+        // A garbled source reads as absent, not as an error.
+        assert_eq!(
+            source_of("observability", Some("7d"), Some("junk"), &now),
+            Source::Override
+        );
+        for s in [Source::Default, Source::Override] {
+            assert_eq!(Source::parse(s.as_str()), Some(s));
+        }
     }
 
     #[test]

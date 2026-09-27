@@ -877,9 +877,11 @@ pub struct CreateOverrides {
     /// version is preserved and moves solely through `upgrade_cluster`
     /// (ADR-048 invariant 1). `None` = `DEFAULT_VERSION`.
     pub version: Option<String>,
-    /// Retention days to stamp on the CR (ADR-062). `None` keeps whatever the
-    /// CR already carries, so an unrelated save never moves it.
-    pub retention_days: Option<u32>,
+    /// Retention days to stamp on the CR (ADR-062), and whether they inherit
+    /// the installation default or were chosen for this deployment. `None`
+    /// keeps whatever the CR already carries, so an unrelated save never
+    /// moves it.
+    pub retention: Option<(u32, crate::retention::Source)>,
 }
 
 /// The versions to write for a deployment: whatever the CR already carries, or
@@ -1072,21 +1074,30 @@ pub async fn create_cluster(
     // applied by one field manager, so omitting the key would prune it — the
     // same trap the additionalConfig round-trip avoids. A save that does not
     // name a value re-applies what the CR already says.
-    let retention = ov
-        .retention_days
-        .map(crate::retention::render_age)
-        .or_else(|| {
-            existing
-                .as_ref()
-                .and_then(|o| o.metadata.annotations.as_ref())
-                .and_then(|a| a.get(crate::retention::ANNOTATION))
-                .cloned()
-        });
-    if let Some(r) = retention {
-        annotations.insert(
-            crate::retention::ANNOTATION.to_string(),
-            serde_json::Value::String(r),
-        );
+    let carried = |key: &str| {
+        existing
+            .as_ref()
+            .and_then(|o| o.metadata.annotations.as_ref())
+            .and_then(|a| a.get(key))
+            .cloned()
+    };
+    let (retention, source) = match ov.retention {
+        Some((days, src)) => (
+            Some(crate::retention::render_age(days)),
+            Some(src.as_str().to_string()),
+        ),
+        None => (
+            carried(crate::retention::ANNOTATION),
+            carried(crate::retention::SOURCE_ANNOTATION),
+        ),
+    };
+    for (key, value) in [
+        (crate::retention::ANNOTATION, retention),
+        (crate::retention::SOURCE_ANNOTATION, source),
+    ] {
+        if let Some(v) = value {
+            annotations.insert(key.to_string(), serde_json::Value::String(v));
+        }
     }
 
     // Ownership is stamped at creation, in the same apply as the spec, so a CR
@@ -5035,6 +5046,8 @@ pub struct RetentionOnCr {
     pub value: Option<String>,
     /// `retention::STAMP_ANNOTATION`.
     pub stamp: Option<String>,
+    /// `retention::SOURCE_ANNOTATION`, raw; `None` on CRs that predate it.
+    pub source: Option<String>,
 }
 
 fn retention_from(
@@ -5045,6 +5058,9 @@ fn retention_from(
         purpose: labels.get(LABEL_PURPOSE).cloned().unwrap_or_default(),
         value: annotations.get(crate::retention::ANNOTATION).cloned(),
         stamp: annotations.get(crate::retention::STAMP_ANNOTATION).cloned(),
+        source: annotations
+            .get(crate::retention::SOURCE_ANNOTATION)
+            .cloned(),
     }
 }
 
@@ -5063,12 +5079,20 @@ pub async fn retention_of(dep: &Deployment) -> Result<RetentionOnCr> {
 
 /// Write the ADR-062 annotations — `Some` values only, as a JSON merge patch
 /// on those keys, like the provisioning record: it cannot touch the spec.
-pub async fn set_retention(dep: &Deployment, days: Option<u32>, stamp: Option<&str>) -> Result<()> {
+pub async fn set_retention(
+    dep: &Deployment,
+    retention: Option<(u32, crate::retention::Source)>,
+    stamp: Option<&str>,
+) -> Result<()> {
     let mut annotations = serde_json::Map::new();
-    if let Some(d) = days {
+    if let Some((d, src)) = retention {
         annotations.insert(
             crate::retention::ANNOTATION.to_string(),
             crate::retention::render_age(d).into(),
+        );
+        annotations.insert(
+            crate::retention::SOURCE_ANNOTATION.to_string(),
+            src.as_str().into(),
         );
     }
     if let Some(s) = stamp {

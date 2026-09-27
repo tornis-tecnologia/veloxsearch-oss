@@ -646,7 +646,13 @@ function RetentionPanel({ d, lang, locked }) {
               </span>
             </div>
           )}
+          {st.source && (
+            <div className="kvrow"><span className="k">{t.ret_source}</span>
+              <span className="v" data-testid="retention-source">{t["ret_source_" + st.source] || st.source}</span>
+            </div>
+          )}
           {st.state === "customized" && <p className="hint">{t.ret_customized_p}</p>}
+          {st.days && <p className="hint" data-testid="retention-when">{t.ret_when_p}</p>}
           {st.default_days && (
             <Btn variant="outline" disabled={busy || !!locked} style={{ marginTop: 10 }}
               data-testid="retention-reset" onClick={() => setConfirm(true)}>
