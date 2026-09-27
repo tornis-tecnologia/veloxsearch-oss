@@ -259,11 +259,11 @@ pub async fn run_sampler() {
             // whose sampling fails can still owe provisioning (a slow cluster
             // is exactly the one that exhausted its settle budget).
             crate::k8s::maybe_rearm_provisioning(&dep).await;
-            // #46 (ADR-063): a Dashboards held for its first boot (or left
-            // held by a remediation that died with a backend) is released
-            // here once the cluster has settled — the CR is the state, so a
+            // #46 (ADR-063): a Dashboards hold is enforced here (the
+            // operator's full CR updates drop a zero replicas) and released
+            // once the cluster has settled — the CR is the state, so a
             // restart resumes it.
-            crate::k8s::maybe_release_dashboards(&dep).await;
+            crate::k8s::reconcile_dashboards_hold(&dep).await;
             if let Err(e) = sample_once(&dep).await {
                 tracing::debug!("sampler: {dep}: {e:#}");
             }

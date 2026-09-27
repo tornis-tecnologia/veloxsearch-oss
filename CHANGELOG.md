@@ -15,7 +15,12 @@ are called out explicitly.
   same way. The operator's CR has no probe or strategy field, so the fix now
   goes through `spec.dashboards.replicas`. A new deployment's Dashboards is
   held at zero replicas until the cluster is initialized and green (or 20
-  minutes old), so its first migration runs on a settled cluster. The
+  minutes old), so its first migration runs on a settled cluster. The hold
+  is enforced, not only written: the operator's first update of a new CR
+  drops a zero `replicas` (`omitempty` plus the CRD default of 1), so a
+  post-create watch and the metrics sampler write it again. A Dashboards
+  that is already serving is never scaled down, and a save never changes
+  Dashboards replicas. The
   `.kibana_1` remediation holds and releases through the CR too. The
   Deployment patch is gone, and so is the runtime `patch` grant on
   Deployments (ADR-063).

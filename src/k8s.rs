@@ -1038,14 +1038,18 @@ pub async fn create_cluster(
 
     // #46 (ADR-063): a NEW deployment's Dashboards is held at zero replicas
     // until the cluster has settled — its first saved-objects migration must
-    // not run against a cluster that is still allocating. The sampler
-    // releases the hold (`maybe_release_dashboards`). A save of an existing
-    // deployment re-applies whatever hold the CR carries, never a new one, so
-    // this path can neither start a held Dashboards early nor stop a running
-    // one.
-    let dashboards_hold = match existing.as_ref() {
-        None => Some(DASHBOARDS_HOLD_FIRST_BOOT.to_string()),
-        Some(o) => dashboards_hold_of(o.metadata.annotations.as_ref()),
+    // not run against a cluster that is still allocating. The zero does not
+    // survive the operator's first write, so `watch_new_dashboards_hold` and
+    // the sampler enforce it. A save of an existing deployment re-applies the
+    // replicas and the hold annotation exactly as the CR stores them: a save
+    // never moves Dashboards replicas, so it can neither start a held
+    // Dashboards early nor stop a running one.
+    let (dashboards_hold, dashboards_replicas) = match existing.as_ref() {
+        None => (Some(DASHBOARDS_HOLD_FIRST_BOOT.to_string()), 0),
+        Some(o) => (
+            dashboards_hold_of(o.metadata.annotations.as_ref()),
+            dashboards_replicas_of(&o.data),
+        ),
     };
 
     let mut annotations = serde_json::Map::new();
@@ -1086,7 +1090,7 @@ pub async fn create_cluster(
                 "tls": { "transport": { "generate": true }, "http": { "generate": true } },
                 "config": { "adminCredentialsSecret": { "name": admin_secret_name(name) } }
             },
-            "dashboards": dashboards_spec(&dash_version, dashboards_hold.is_some()),
+            "dashboards": dashboards_spec(&dash_version, dashboards_replicas),
             "nodePools": [node_pool(replicas, &disk, &mem, s.cpu_req, s.cpu_lim, longhorn_sc)]
         }
     });
@@ -1094,6 +1098,12 @@ pub async fn create_cluster(
         .patch(name, &pp, &Patch::Apply(&manifest))
         .await
         .context("applying OpenSearchCluster CR")?;
+    if existing.is_none() {
+        tokio::spawn(watch_new_dashboards_hold(
+            dep.namespace().to_string(),
+            name.to_string(),
+        ));
+    }
 
     // Public dashboards ingress at <name>.<base_domain> — ingress mode only
     // (ADR-027). In portforward mode no Ingress exists and the UI hands out a
@@ -3966,7 +3976,7 @@ async fn node_pod_block_in(namespace: &str, name: &str) -> crate::activity::Node
 /// Best-effort by design: a failed step is loud, logged, and retried only
 /// after the cooldown. A backend that dies between the hold and the release
 /// leaves the hold annotation on the CR, and the sampler's
-/// `maybe_release_dashboards` releases it — the in-flight guard there only
+/// `reconcile_dashboards_hold` releases it — the in-flight guard there only
 /// defers to a pass this process is still running.
 async fn remediate_kibana_deadlock(namespace: &str, name: &str) -> bool {
     let Ok(client) = client().await else {
@@ -4074,10 +4084,18 @@ async fn dashboards_pod_count(client: &Client, namespace: &str, name: &str) -> O
 // so the intent is expressed there instead: the first boot does not happen
 // until the cluster has settled, where the migration takes seconds and the
 // fixed budget is ample. The `.kibana_1` remediation uses the same hold.
+//
+// A zero is not stored as sent. The operator's first write to a new CR (the
+// full-object update that adds its finalizers) serializes its Go type, where
+// `replicas` is `int32` with `omitempty` — so 0 is dropped, and the CRD's
+// `default: 1` puts a one back (observed live 2026-09-26, 3 of 3 creates).
+// The hold is therefore ENFORCED, not just written: a short watch right after
+// create re-asserts it once the operator has made that write, and the sampler
+// re-asserts it on every tick as the backstop for any later full update.
 
 /// Annotation carrying an active Dashboards hold; its value is the reason
 /// (`first-boot` or `remediation`), for whoever reads the CR by hand. Present
-/// means `spec.dashboards.replicas` is 0 on purpose; absent means 1.
+/// means `spec.dashboards.replicas` should be 0 and is enforced to be.
 const LABEL_DASHBOARDS_HOLD: &str = "veloxsearch.ai/dashboards-hold";
 const DASHBOARDS_HOLD_FIRST_BOOT: &str = "first-boot";
 const DASHBOARDS_HOLD_REMEDIATION: &str = "remediation";
@@ -4089,18 +4107,37 @@ const DASHBOARDS_HOLD_REMEDIATION: &str = "remediation";
 /// the hold, with the remediation as the backstop.
 const DASHBOARDS_HOLD_MAX_SECS: i64 = 20 * 60;
 
-/// `spec.dashboards` as `create_cluster` applies it; `held` renders zero
-/// replicas. Pure, so the rendering is testable without a cluster.
-fn dashboards_spec(version: &str, held: bool) -> serde_json::Value {
+/// The finalizer the operator adds in its first full update of a new CR —
+/// the write that drops a zero `replicas`. Once it is on the CR and the hold
+/// still reads 0, the post-create watch has done its job.
+const OPERATOR_FINALIZER: &str = "Opensearch";
+
+/// Post-create watch: poll this often, for at most this many polls. The
+/// operator's first write lands within seconds of the apply; the bound only
+/// covers a slow operator, and the sampler takes over after it.
+const HOLD_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const HOLD_WATCH_POLLS: u32 = 90;
+
+/// `spec.dashboards` as `create_cluster` applies it. Pure, so the rendering
+/// is testable without a cluster.
+fn dashboards_spec(version: &str, replicas: i64) -> serde_json::Value {
     serde_json::json!({
         "enable": true,
         "version": version,
-        "replicas": if held { 0 } else { 1 },
+        "replicas": replicas,
         "resources": {
             "requests": { "memory": "512Mi", "cpu": "200m" },
             "limits": { "memory": "1Gi", "cpu": "500m" }
         }
     })
+}
+
+/// `spec.dashboards.replicas` as stored. Absent reads as the CRD default
+/// (1), which is exactly what the API server would store for it.
+fn dashboards_replicas_of(data: &serde_json::Value) -> i64 {
+    data.pointer("/spec/dashboards/replicas")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1)
 }
 
 /// The hold reason a CR carries, if any.
@@ -4115,10 +4152,8 @@ fn dashboards_hold_of(
 
 /// JSON merge patch that places (`Some(reason)`) or releases (`None`) the
 /// hold. Replicas and annotation move in ONE request, so a CR can never say
-/// "held" with a running Dashboards or the reverse. Merge rather than apply:
-/// the same idiom as the version bump (`patch_version`) — it touches exactly
-/// these two fields, and the next save re-applies the same values because
-/// `create_cluster` reads the hold back off the CR.
+/// "released" while still at zero. Merge rather than apply: the same idiom
+/// as the version bump (`patch_version`) — it touches exactly these fields.
 fn dashboards_hold_patch(reason: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "metadata": { "annotations": { LABEL_DASHBOARDS_HOLD: reason } },
@@ -4133,30 +4168,82 @@ fn should_release_dashboards(initialized: bool, health: &str, cr_age_secs: i64) 
     initialized && (health.eq_ignore_ascii_case("green") || cr_age_secs >= DASHBOARDS_HOLD_MAX_SECS)
 }
 
-/// Release a Dashboards hold whose reason has passed. Called by the sampler
-/// every tick for every deployment (the #47 re-arm is the precedent), so the
-/// state lives on the CR and a backend restart resumes it; a CR without the
-/// annotation costs one GET and nothing else.
-pub async fn maybe_release_dashboards(dep: &Deployment) {
-    let Ok(client) = client().await else {
-        return;
-    };
-    let api = os_api(&client, dep);
-    let Ok(Some(obj)) = api.get_opt(dep.name()).await else {
-        return;
-    };
-    if dashboards_hold_of(obj.metadata.annotations.as_ref()).is_none() {
-        return;
+/// One step of the hold, decided from what the cluster says now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldStep {
+    /// No hold, or a hold already in force.
+    Nothing,
+    /// The hold is on the CR but the stored replicas are not 0 (the
+    /// operator's full update dropped the zero): write 0 again.
+    Enforce,
+    /// The reason for the hold has passed: replicas 1, annotation removed.
+    Release,
+    /// A Dashboards replica is already Ready — the hold was lost and the
+    /// first boot happened anyway. Scaling a serving Dashboards to zero
+    /// would be an outage that protects nothing, so only the annotation goes.
+    ClearStale,
+}
+
+/// The pure decision behind every hold write. Order matters: a serving
+/// Dashboards is never scaled down, a released hold is never re-enforced.
+fn dashboards_hold_step(
+    held: bool,
+    stored_replicas: i64,
+    dashboards_serving: bool,
+    initialized: bool,
+    health: &str,
+    cr_age_secs: i64,
+) -> HoldStep {
+    if !held {
+        HoldStep::Nothing
+    } else if dashboards_serving {
+        HoldStep::ClearStale
+    } else if should_release_dashboards(initialized, health, cr_age_secs) {
+        HoldStep::Release
+    } else if stored_replicas != 0 {
+        HoldStep::Enforce
+    } else {
+        HoldStep::Nothing
     }
-    // A remediation this process is still running owns its own release; the
-    // sampler only picks up a hold whose remediation died with a backend.
-    let key = format!("{}/{}", dep.namespace(), dep.name());
-    let in_flight = dashboards_remediation_log()
-        .lock()
-        .ok()
-        .is_some_and(|m| matches!(m.get(&key), Some((_, None))));
-    if in_flight {
-        return;
+}
+
+/// The merge patch for one step, pinned to the `resourceVersion` the step was
+/// decided on: a concurrent write (a release by the sampler, a save) makes the
+/// API server refuse it with a conflict instead of letting a stale decision
+/// land — an `Enforce` racing a `Release` must never leave a zero behind
+/// without the annotation that gets it released.
+fn hold_step_patch(step: HoldStep, resource_version: &str) -> Option<serde_json::Value> {
+    let mut patch = match step {
+        HoldStep::Nothing => return None,
+        HoldStep::Enforce => serde_json::json!({ "spec": { "dashboards": { "replicas": 0 } } }),
+        HoldStep::Release => dashboards_hold_patch(None),
+        HoldStep::ClearStale => serde_json::json!({
+            "metadata": { "annotations": { LABEL_DASHBOARDS_HOLD: null } }
+        }),
+    };
+    patch["metadata"]["resourceVersion"] = serde_json::Value::String(resource_version.into());
+    Some(patch)
+}
+
+/// A Dashboards replica is Ready right now. Unlike `dashboards_ready_in`, a
+/// missing Deployment reads as NOT serving: right after create it simply has
+/// not been rendered yet.
+async fn dashboards_serving_in(client: &Client, namespace: &str, name: &str) -> bool {
+    use k8s_openapi::api::apps::v1::Deployment;
+    let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    matches!(
+        api.get_opt(&format!("{name}-dashboards")).await,
+        Ok(Some(d)) if d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0) >= 1
+    )
+}
+
+/// Decide and write one hold step for a CR just read. Returns the step taken
+/// (`Nothing` when the write was refused — the next poll decides again).
+async fn apply_hold_step(client: &Client, namespace: &str, obj: &DynamicObject) -> HoldStep {
+    let name = obj.metadata.name.clone().unwrap_or_default();
+    let held = dashboards_hold_of(obj.metadata.annotations.as_ref()).is_some();
+    if !held {
+        return HoldStep::Nothing;
     }
     let status = obj.data.get("status");
     let initialized = status
@@ -4173,20 +4260,88 @@ pub async fn maybe_release_dashboards(dep: &Deployment) {
         .as_ref()
         .map(|t| (k8s_openapi::chrono::Utc::now() - t.0).num_seconds())
         .unwrap_or(0);
-    if !should_release_dashboards(initialized, health, age) {
-        return;
-    }
-    match api
-        .patch(
-            dep.name(),
-            &PatchParams::default(),
-            &Patch::Merge(&dashboards_hold_patch(None)),
-        )
+    let step = dashboards_hold_step(
+        held,
+        dashboards_replicas_of(&obj.data),
+        dashboards_serving_in(client, namespace, &name).await,
+        initialized,
+        health,
+        age,
+    );
+    let rv = obj.metadata.resource_version.clone().unwrap_or_default();
+    let Some(patch) = hold_step_patch(step, &rv) else {
+        return HoldStep::Nothing;
+    };
+    match cluster_api_in(client, namespace)
+        .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
     {
-        Ok(_) => tracing::info!("#46 released the Dashboards hold of {dep} ({health})"),
-        Err(e) => tracing::warn!("#46 releasing the Dashboards hold of {dep} failed: {e:#}"),
+        Ok(_) => {
+            tracing::info!("#46 Dashboards hold of {namespace}/{name}: {step:?} ({health})");
+            step
+        }
+        Err(e) => {
+            tracing::debug!("#46 Dashboards hold step {step:?} on {namespace}/{name}: {e:#}");
+            HoldStep::Nothing
+        }
     }
+}
+
+/// Keep a new deployment's hold in force through the operator's first write
+/// (see the section note): poll the CR, re-assert the zero it drops, and stop
+/// once the operator's finalizer is on a CR that still reads 0 — or the hold
+/// is gone (released, or cleared because Dashboards is already serving).
+/// Spawned from `create_cluster`, never awaited; the sampler's
+/// [`reconcile_dashboards_hold`] is the backstop if this task dies with the
+/// backend or outlives its bound.
+async fn watch_new_dashboards_hold(namespace: String, name: String) {
+    for _ in 0..HOLD_WATCH_POLLS {
+        if let Ok(client) = client().await {
+            if let Ok(Some(obj)) = cluster_api_in(&client, &namespace).get_opt(&name).await {
+                if dashboards_hold_of(obj.metadata.annotations.as_ref()).is_none() {
+                    return;
+                }
+                let operator_wrote = obj
+                    .metadata
+                    .finalizers
+                    .as_ref()
+                    .is_some_and(|f| f.iter().any(|x| x == OPERATOR_FINALIZER));
+                if operator_wrote && dashboards_replicas_of(&obj.data) == 0 {
+                    return;
+                }
+                apply_hold_step(&client, &namespace, &obj).await;
+            }
+        }
+        tokio::time::sleep(HOLD_WATCH_INTERVAL).await;
+    }
+    tracing::warn!(
+        "#46 the post-create Dashboards hold watch of {namespace}/{name} ran out; \
+         the sampler keeps enforcing it"
+    );
+}
+
+/// Enforce or release a Dashboards hold — called by the sampler every tick
+/// for every deployment (the #47 re-arm is the precedent), so the state lives
+/// on the CR and a backend restart resumes it; a CR without the annotation
+/// costs one GET and nothing else.
+pub async fn reconcile_dashboards_hold(dep: &Deployment) {
+    // A remediation this process is still running owns its own hold; the
+    // sampler only picks up a hold whose remediation died with a backend.
+    let key = format!("{}/{}", dep.namespace(), dep.name());
+    let in_flight = dashboards_remediation_log()
+        .lock()
+        .ok()
+        .is_some_and(|m| matches!(m.get(&key), Some((_, None))));
+    if in_flight {
+        return;
+    }
+    let Ok(client) = client().await else {
+        return;
+    };
+    let Ok(Some(obj)) = os_api(&client, dep).get_opt(dep.name()).await else {
+        return;
+    };
+    apply_hold_step(&client, dep.namespace(), &obj).await;
 }
 
 /// Message of the most recent `Warning`/`Upgrade` Event on a deployment's CR.
@@ -6275,14 +6430,125 @@ mod tests {
 
     #[test]
     fn a_held_dashboards_spec_renders_zero_replicas() {
-        let held = dashboards_spec("3.3.0", true);
+        let held = dashboards_spec("3.3.0", 0);
         assert_eq!(held["replicas"], 0);
         assert_eq!(
             held["enable"], true,
             "held is not disabled: the Deployment must exist"
         );
         assert_eq!(held["version"], "3.3.0");
-        assert_eq!(dashboards_spec("3.3.0", false)["replicas"], 1);
+        assert_eq!(dashboards_spec("3.3.0", 1)["replicas"], 1);
+    }
+
+    /// What the API server stores after the operator's first full update of a
+    /// CR (observed live 2026-09-26): its Go type carries `replicas` as
+    /// `int32` + `omitempty`, so a 0 is dropped from the body, and the CRD's
+    /// `default: 1` fills the gap back in.
+    fn operator_first_write(sent: &serde_json::Value) -> serde_json::Value {
+        let mut stored = sent.clone();
+        let dash = stored["spec"]["dashboards"].as_object_mut().unwrap();
+        if dash.get("replicas").and_then(|v| v.as_i64()) == Some(0) {
+            dash.remove("replicas"); // omitempty
+        }
+        dash.entry("replicas").or_insert(serde_json::json!(1)); // CRD default
+        stored
+    }
+
+    #[test]
+    fn a_hold_the_operator_rewrote_to_one_is_enforced_again() {
+        let sent = serde_json::json!({ "spec": { "dashboards": dashboards_spec("3.3.0", 0) } });
+        assert_eq!(dashboards_replicas_of(&sent), 0);
+        let stored = operator_first_write(&sent);
+        // the stored CR is NOT what we sent — the premise the first cut missed
+        assert_eq!(dashboards_replicas_of(&stored), 1);
+        // an unsettled cluster whose hold was dropped gets the zero back
+        assert_eq!(
+            dashboards_hold_step(
+                true,
+                dashboards_replicas_of(&stored),
+                false,
+                false,
+                "unknown",
+                5
+            ),
+            HoldStep::Enforce
+        );
+        // and a hold in force is left alone
+        assert_eq!(
+            dashboards_hold_step(
+                true,
+                dashboards_replicas_of(&sent),
+                false,
+                false,
+                "unknown",
+                5
+            ),
+            HoldStep::Nothing
+        );
+        // a nonzero replicas survives the same round trip untouched
+        let running = serde_json::json!({ "spec": { "dashboards": dashboards_spec("3.3.0", 1) } });
+        assert_eq!(dashboards_replicas_of(&operator_first_write(&running)), 1);
+        // absent reads as the CRD default, as the API server would store it
+        assert_eq!(dashboards_replicas_of(&serde_json::json!({})), 1);
+    }
+
+    #[test]
+    fn a_serving_dashboards_is_never_scaled_by_the_hold() {
+        // the hold was lost and Dashboards already booted: only the
+        // annotation goes, whatever the cluster's state
+        for (init, health, age) in [
+            (false, "unknown", 5),
+            (true, "yellow", 60),
+            (true, "green", 60),
+        ] {
+            assert_eq!(
+                dashboards_hold_step(true, 1, true, init, health, age),
+                HoldStep::ClearStale
+            );
+        }
+        let p = hold_step_patch(HoldStep::ClearStale, "42").unwrap();
+        assert!(
+            p.get("spec").is_none(),
+            "ClearStale must not touch replicas"
+        );
+        assert!(p["metadata"]["annotations"][LABEL_DASHBOARDS_HOLD].is_null());
+    }
+
+    #[test]
+    fn hold_steps_release_when_settled_and_do_nothing_without_a_hold() {
+        assert_eq!(
+            dashboards_hold_step(true, 0, false, true, "green", 60),
+            HoldStep::Release
+        );
+        // a settled cluster whose zero was dropped is released, not re-held
+        assert_eq!(
+            dashboards_hold_step(true, 1, false, true, "green", 60),
+            HoldStep::Release
+        );
+        for serving in [false, true] {
+            assert_eq!(
+                dashboards_hold_step(false, 0, serving, false, "red", 5),
+                HoldStep::Nothing
+            );
+        }
+    }
+
+    #[test]
+    fn every_hold_write_is_pinned_to_the_version_it_was_decided_on() {
+        assert_eq!(hold_step_patch(HoldStep::Nothing, "7"), None);
+        for step in [HoldStep::Enforce, HoldStep::Release, HoldStep::ClearStale] {
+            let p = hold_step_patch(step, "7").unwrap();
+            assert_eq!(p["metadata"]["resourceVersion"], "7", "{step:?}");
+        }
+        let enforce = hold_step_patch(HoldStep::Enforce, "7").unwrap();
+        assert_eq!(enforce["spec"]["dashboards"]["replicas"], 0);
+        assert!(
+            enforce["metadata"].get("annotations").is_none(),
+            "Enforce keeps the annotation as it is"
+        );
+        let release = hold_step_patch(HoldStep::Release, "7").unwrap();
+        assert_eq!(release["spec"]["dashboards"]["replicas"], 1);
+        assert!(release["metadata"]["annotations"][LABEL_DASHBOARDS_HOLD].is_null());
     }
 
     #[test]
@@ -6290,7 +6556,7 @@ mod tests {
         // Operator 3.0.x has no probe or strategy field under
         // spec.dashboards; an unknown field would be pruned by the API server
         // and read as a fix that is not there.
-        let spec = dashboards_spec("3.3.0", true);
+        let spec = dashboards_spec("3.3.0", 0);
         let keys: Vec<&str> = spec
             .as_object()
             .unwrap()
