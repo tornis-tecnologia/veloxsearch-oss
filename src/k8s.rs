@@ -3273,26 +3273,102 @@ fn should_remediate(
         && last_fired_ago.is_none_or(|ago| ago >= REMEDIATE_COOLDOWN)
 }
 
-/// The node to bounce for a wedged peer recovery: the SOURCE of a row in
-/// `init` with nothing transferred. Pure, over a `_cat/recovery?format=json`
-/// payload; `None` when no row shows the wedge (or it names no source — a
-/// store/snapshot recovery has none to bounce).
-fn wedged_recovery_source(v: &serde_json::Value) -> Option<String> {
-    v.as_array()?
+/// Why [`choose_bounce_pod`] refused to name a pod. Refusing is the safe
+/// answer: a bounce of the wrong node costs a JVM restart and fixes nothing
+/// (bouncing the TARGET only moves the stall), so no guess is ever made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BounceRefusal {
+    /// No active peer recovery sits in `init` at zero bytes with a source.
+    NoWedgedPeerRecovery,
+    /// Two or more sources serve the same, highest number of wedged
+    /// recoveries; the counts do not say which one holds the dead sessions.
+    AmbiguousSource(Vec<(String, usize)>),
+    /// The winning source node name is not the name of any node pod of this
+    /// deployment, so there is no pod to delete that is known to be it.
+    UnmappedSource(String),
+}
+
+/// The pod to bounce for a wedged peer recovery, and the tally that chose it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BounceChoice {
+    pod: String,
+    /// Wedged recoveries per source node, most first.
+    by_source: Vec<(String, usize)>,
+    /// How many wedged recoveries were counted in all.
+    wedged: usize,
+}
+
+/// Pick the node to bounce from a CLUSTER-WIDE
+/// `_cat/recovery?active_only=true&format=json&bytes=b` payload (#27/#96).
+///
+/// The wedge's signature is a PEER recovery in `init` with nothing
+/// transferred. Its SOURCE is the node whose dead outgoing sessions hold the
+/// recovery slots, so the pick is the source of the most such rows. A node
+/// that only receives is never a candidate: it has no count. Store, snapshot
+/// and empty-store recoveries have no source and are not counted.
+///
+/// The winner must be the name of one of `node_pods`. The operator names
+/// each OpenSearch node after its pod, but that is checked here, never
+/// assumed: an unknown name, a tie, or no wedge at all is a refusal.
+fn choose_bounce_pod(
+    v: &serde_json::Value,
+    node_pods: &[String],
+) -> Result<BounceChoice, BounceRefusal> {
+    let text = |r: &serde_json::Value, k: &str| {
+        r.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for r in v.as_array().map(Vec::as_slice).unwrap_or_default() {
+        // `bytes=b` renders the cell as a plain number; without it the cell
+        // reads `0b`, `12kb`. A cell that is neither is not evidence of a
+        // wedge, so it does not count.
+        let bytes = r.get("bytes_recovered").and_then(|b| {
+            b.as_i64()
+                .or_else(|| b.as_str()?.trim().trim_end_matches('b').parse().ok())
+        });
+        let source = text(r, "source_node");
+        let is_peer = text(r, "type").is_empty() || text(r, "type").eq_ignore_ascii_case("peer");
+        if is_peer
+            && text(r, "stage").eq_ignore_ascii_case("init")
+            && bytes == Some(0)
+            && !source.is_empty()
+            && source != "n/a"
+            && source != "-"
+        {
+            *counts.entry(source).or_default() += 1;
+        }
+    }
+    let wedged = counts.values().sum();
+    let mut by_source: Vec<(String, usize)> = counts.into_iter().collect();
+    // Most first; the BTreeMap already ordered equal counts by name.
+    by_source.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let Some((top, n)) = by_source.first().cloned() else {
+        return Err(BounceRefusal::NoWedgedPeerRecovery);
+    };
+    if by_source.get(1).is_some_and(|(_, m)| *m == n) {
+        return Err(BounceRefusal::AmbiguousSource(by_source));
+    }
+    if !node_pods.contains(&top) {
+        return Err(BounceRefusal::UnmappedSource(top));
+    }
+    Ok(BounceChoice {
+        pod: top,
+        by_source,
+        wedged,
+    })
+}
+
+/// Render a per-source tally for the logs: `d-nodes-1=5, d-nodes-2=1`.
+fn fmt_source_counts(by_source: &[(String, usize)]) -> String {
+    by_source
         .iter()
-        .find(|r| {
-            let stage = r.get("stage").and_then(|s| s.as_str()).unwrap_or("");
-            let bytes = r
-                .get("bytes_recovered")
-                .and_then(|b| b.as_i64().or_else(|| b.as_str()?.trim().parse().ok()))
-                .unwrap_or(0);
-            stage.eq_ignore_ascii_case("init") && bytes == 0
-        })?
-        .get("source_node")
-        .and_then(|n| n.as_str())
-        .map(str::trim)
-        .filter(|n| !n.is_empty() && *n != "n/a" && *n != "-")
-        .map(str::to_string)
+        .map(|(node, n)| format!("{node}={n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Break a wedged rolling restart, the sequence proven live on the
@@ -3334,53 +3410,101 @@ async fn remediate_wedged_recovery(namespace: &str, name: &str, index: &str) -> 
         tracing::warn!("#27 throttle raise for {namespace}/{name} failed: {e:#}");
     }
 
-    // 2. Name the SOURCE of the wedged recovery (see step 2 above). Node
-    //    names ARE pod names (network.publish_host is the pod name by
-    //    operator convention). Fall back to the INITIALIZING replica's node
-    //    only when the recovery row cannot be read.
+    // 2. Name the SOURCE of the wedged recoveries (see step 2 above). The
+    //    question is asked of the WHOLE cluster, not of the one index that
+    //    armed the pass: the wedge holds a node's outgoing slots, so every
+    //    recovery queued behind it — whatever its index — votes for the same
+    //    source. `bytes=b` keeps the byte cell a plain number.
     let recovery = auth(http.get(format!(
-        "{base}/_cat/recovery/{index}?active_only=true&h=stage,bytes_recovered,source_node,target_node&format=json"
+        "{base}/_cat/recovery?active_only=true&format=json&bytes=b\
+         &h=index,shard,type,stage,bytes_recovered,source_node,target_node"
     )))
     .send()
-    .await
-    .ok();
-    let source = match recovery {
-        Some(r) => r
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| wedged_recovery_source(&v)),
-        None => None,
+    .await;
+    let rows = match recovery {
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "#27 remediation for {namespace}/{name}: unreadable _cat/recovery: {e:#}; \
+                     not bouncing anything"
+                );
+                return None;
+            }
+        },
+        Ok(r) => {
+            tracing::warn!(
+                "#27 remediation for {namespace}/{name}: _cat/recovery answered {}; \
+                 not bouncing anything",
+                r.status()
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "#27 remediation for {namespace}/{name}: _cat/recovery failed: {e:#}; \
+                 not bouncing anything"
+            );
+            return None;
+        }
     };
-    let node = match source {
-        Some(n) => n,
-        None => auth(http.get(format!(
-            "{base}/_cat/shards/{index}?h=state,node&format=json"
-        )))
-        .send()
-        .await
-        .ok()?
-        .json::<serde_json::Value>()
-        .await
-        .ok()?
-        .as_array()?
-        .iter()
-        .find(|r| {
-            r.get("state")
-                .and_then(|s| s.as_str())
-                .is_some_and(|s| s.eq_ignore_ascii_case("initializing"))
-        })?
-        .get("node")
-        .and_then(|n| n.as_str())?
-        .to_string(),
+
+    //    Node names must be pod names for the delete to hit the right JVM.
+    //    The operator sets `node.name` from the pod name; checked against
+    //    the live pod list, never assumed.
+    let client = client().await.ok()?;
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    let prefix = format!("{name}-nodes-");
+    let node_pods: Vec<String> = match pods.list(&ListParams::default()).await {
+        Ok(list) => list
+            .into_iter()
+            .filter_map(|p| p.metadata.name)
+            .filter(|n| n.starts_with(&prefix))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                "#27 remediation for {namespace}/{name}: cannot list node pods: {e:#}; \
+                 not bouncing anything"
+            );
+            return None;
+        }
+    };
+    let node = match choose_bounce_pod(&rows, &node_pods) {
+        Ok(c) => {
+            tracing::info!(
+                "#27 remediation for {namespace}/{name}: bouncing {}, the source of {} of \
+                 {} wedged peer recoveries (by source: {})",
+                c.pod,
+                c.by_source.first().map_or(0, |(_, n)| *n),
+                c.wedged,
+                fmt_source_counts(&c.by_source)
+            );
+            c.pod
+        }
+        Err(refusal) => {
+            let why = match refusal {
+                BounceRefusal::NoWedgedPeerRecovery => {
+                    "no active peer recovery is in init at 0 bytes".to_string()
+                }
+                BounceRefusal::AmbiguousSource(by) => format!(
+                    "no single source holds the most wedged recoveries ({})",
+                    fmt_source_counts(&by)
+                ),
+                BounceRefusal::UnmappedSource(node) => format!(
+                    "source node {node} is not a node pod of this deployment \
+                     (pods: {})",
+                    node_pods.join(", ")
+                ),
+            };
+            tracing::warn!("#27 remediation for {namespace}/{name}: not bouncing anything: {why}");
+            return None;
+        }
     };
 
     // 3. The bounce. Best-effort by design: the operator owns the pod's
     //    lifecycle and will recreate it; our job was to clear the dead
     //    sessions, and a failed delete is loud, logged, and retried only
     //    after the cooldown.
-    let client = client().await.ok()?;
-    let pods: Api<Pod> = Api::namespaced(client, namespace);
     match pods.delete(&node, &DeleteParams::default()).await {
         Ok(_) => {
             tracing::warn!(
@@ -6958,29 +7082,131 @@ mod tests {
 
     // ── #27/#96 bounce target: the recovery SOURCE ─────────────────────
 
+    fn pods(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// The cluster-wide `_cat/recovery?active_only=true` reading of the
+    /// 2026-09-27 kind stall (OpenSearch 3.7.0, deployment `retb-6yp8`):
+    /// every wedged row sources from nodes-1, towards BOTH other nodes. The
+    /// byte cell is what 3.7.0 renders without `bytes=b` (`0b`), as probed.
+    fn kind_stall_rows() -> serde_json::Value {
+        serde_json::json!([
+            {"index": ".plugins-ml-config", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-0"},
+            {"index": ".plugins-ml-config", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-2"},
+            {"index": ".opendistro_security", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-0"},
+            {"index": ".opendistro_security", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-2"},
+            {"index": "security-auditlog-2026.09.27", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-0"}
+        ])
+    }
+
+    const RETB_PODS: [&str; 3] = [
+        "retb-6yp8-nodes-0",
+        "retb-6yp8-nodes-1",
+        "retb-6yp8-nodes-2",
+    ];
+
     #[test]
-    fn wedged_recovery_bounces_the_source_not_the_target() {
-        // the live 2026-09-24 shape: every wedged row sources from nodes-1
-        let v = serde_json::json!([
-            {"stage": "done", "bytes_recovered": "208", "source_node": "d-nodes-2", "target_node": "d-nodes-0"},
-            {"stage": "init", "bytes_recovered": "0", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
-            {"stage": "init", "bytes_recovered": 0, "source_node": "d-nodes-1", "target_node": "d-nodes-2"}
-        ]);
-        assert_eq!(wedged_recovery_source(&v).as_deref(), Some("d-nodes-1"));
+    fn the_kind_stall_bounces_the_source_pod_not_a_receiver() {
+        let c = choose_bounce_pod(&kind_stall_rows(), &pods(&RETB_PODS)).unwrap();
+        assert_eq!(c.pod, "retb-6yp8-nodes-1");
+        assert_eq!(c.by_source, vec![("retb-6yp8-nodes-1".to_string(), 5)]);
+        assert_eq!(c.wedged, 5);
     }
 
     #[test]
-    fn wedged_recovery_source_needs_a_real_wedge_and_a_source() {
-        let moving = serde_json::json!([
-            {"stage": "init", "bytes_recovered": "4096", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
-            {"stage": "index", "bytes_recovered": "0", "source_node": "d-nodes-1", "target_node": "d-nodes-2"}
+    fn the_source_of_the_most_wedged_recoveries_wins() {
+        let v = serde_json::json!([
+            {"type": "peer", "stage": "init", "bytes_recovered": "0", "source_node": "d-nodes-2", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "init", "bytes_recovered": "0", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "init", "bytes_recovered": 0, "source_node": "d-nodes-1", "target_node": "d-nodes-2"}
         ]);
-        assert_eq!(wedged_recovery_source(&moving), None);
-        let no_source = serde_json::json!([
-            {"stage": "init", "bytes_recovered": "0", "source_node": "n/a", "target_node": "d-nodes-0"}
+        let c = choose_bounce_pod(&v, &pods(&["d-nodes-0", "d-nodes-1", "d-nodes-2"])).unwrap();
+        assert_eq!(c.pod, "d-nodes-1");
+        assert_eq!(
+            c.by_source,
+            vec![("d-nodes-1".to_string(), 2), ("d-nodes-2".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn only_wedged_peer_recoveries_are_counted() {
+        // Moving (bytes in either rendering), past init, and source-less
+        // store recoveries are not the wedge.
+        let v = serde_json::json!([
+            {"type": "peer", "stage": "init", "bytes_recovered": "12kb", "source_node": "d-nodes-2", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "init", "bytes_recovered": "4096", "source_node": "d-nodes-2", "target_node": "d-nodes-1"},
+            {"type": "peer", "stage": "index", "bytes_recovered": "0b", "source_node": "d-nodes-2", "target_node": "d-nodes-1"},
+            {"type": "existing_store", "stage": "init", "bytes_recovered": "0b", "source_node": "n/a", "target_node": "d-nodes-2"},
+            {"type": "peer", "stage": "init", "bytes_recovered": "0b", "source_node": "d-nodes-1", "target_node": "d-nodes-0"}
         ]);
-        assert_eq!(wedged_recovery_source(&no_source), None);
-        assert_eq!(wedged_recovery_source(&serde_json::json!({})), None);
+        let c = choose_bounce_pod(&v, &pods(&["d-nodes-0", "d-nodes-1", "d-nodes-2"])).unwrap();
+        assert_eq!(c.pod, "d-nodes-1");
+        assert_eq!(c.wedged, 1);
+    }
+
+    #[test]
+    fn no_wedge_means_no_bounce_never_a_fallback_to_a_receiver() {
+        let receivers_only = serde_json::json!([
+            {"type": "existing_store", "stage": "init", "bytes_recovered": "0b", "source_node": "n/a", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "translog", "bytes_recovered": "0b", "source_node": "d-nodes-1", "target_node": "d-nodes-0"}
+        ]);
+        let all = pods(&["d-nodes-0", "d-nodes-1"]);
+        assert_eq!(
+            choose_bounce_pod(&receivers_only, &all),
+            Err(BounceRefusal::NoWedgedPeerRecovery)
+        );
+        assert_eq!(
+            choose_bounce_pod(&serde_json::json!([]), &all),
+            Err(BounceRefusal::NoWedgedPeerRecovery)
+        );
+        // An error body (a 4xx/5xx answered as JSON) is not a wedge either.
+        assert_eq!(
+            choose_bounce_pod(&serde_json::json!({"error": "x", "status": 403}), &all),
+            Err(BounceRefusal::NoWedgedPeerRecovery)
+        );
+    }
+
+    #[test]
+    fn a_tie_between_sources_is_refused() {
+        let v = serde_json::json!([
+            {"type": "peer", "stage": "init", "bytes_recovered": "0b", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "init", "bytes_recovered": "0b", "source_node": "d-nodes-2", "target_node": "d-nodes-0"}
+        ]);
+        assert_eq!(
+            choose_bounce_pod(&v, &pods(&["d-nodes-0", "d-nodes-1", "d-nodes-2"])),
+            Err(BounceRefusal::AmbiguousSource(vec![
+                ("d-nodes-1".to_string(), 1),
+                ("d-nodes-2".to_string(), 1)
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_node_pod_is_refused() {
+        // e.g. a node named after its host or IP instead of its pod
+        let v = serde_json::json!([
+            {"type": "peer", "stage": "init", "bytes_recovered": "0b", "source_node": "10-0-0-7", "target_node": "d-nodes-0"}
+        ]);
+        assert_eq!(
+            choose_bounce_pod(&v, &pods(&["d-nodes-0", "d-nodes-1"])),
+            Err(BounceRefusal::UnmappedSource("10-0-0-7".to_string()))
+        );
+        // and the kind stall with its source pod missing from the list
+        assert_eq!(
+            choose_bounce_pod(
+                &kind_stall_rows(),
+                &pods(&["retb-6yp8-nodes-0", "retb-6yp8-nodes-2"])
+            ),
+            Err(BounceRefusal::UnmappedSource(
+                "retb-6yp8-nodes-1".to_string()
+            ))
+        );
     }
 
     // ── #46 Dashboards hold (ADR-063) ──────────────────────────────────
