@@ -105,6 +105,7 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-059 | *Proposed.* Collector configuration for sources outside the cluster — optional `collectors` manifest section (schema 1.1), a write-only `_bulk` ingest route per deployment, one ingest-only OpenSearch principal per integration, never admin credentials |
 | ADR-060 | *(proposed)* A bounded cluster profile (`GET /api/cluster_profile`): derived facts only, one field allowlist enforced by test, tenant-scoped, workload percentiles over the sampler's retained window, exported only by admin download — never pushed |
 | ADR-061 | Flexible default storage — Longhorn when present; otherwise the cluster's default StorageClass (foreign CSI durable, node-local warned); Longhorn auto-bootstrap only when no default exists (amends ADR-043, #88) |
+| ADR-064 | *(proposed)* Admin-password reset safety — refused (409) unless the deployment is settled and no reset is pending; a failed operator nudge rolls the Secret back (or says the password changed); a failed securityconfig Job restores the previous password (#115) |
 
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and

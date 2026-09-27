@@ -9,6 +9,18 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **An admin-password reset during a rolling restart could take a deployment
+  down for good (#115, ADR-064):** the operator's one-shot securityconfig Job
+  failed against a cluster that was still rolling. The node probes had already
+  switched to the new password, so every node went unready, and the operator
+  never retries that Job. A reset is now refused with 409 unless the deployment
+  has settled (ADR-050) and no earlier reset is pending. If the operator cannot
+  be nudged, the Secret is rolled back and the error says the password was not
+  changed; before, the API returned 500 with the password already changed. If
+  the securityconfig Job fails anyway, the previous password (kept in the
+  credentials Secret for the reset window) is restored and the nodes recover.
+  `tests/day2_check.py` now waits for `settled`, not just `green`, before the
+  password step, and asserts the 409 during a roll.
 - **Upgrading could re-install the OpenSearch operator, grant cluster-admin
   back, or downgrade (#54, ADR-057):** bootstrap applied its vendored operator
   bundle (CRDs included, force-applied) whenever the operator was not Ready at
