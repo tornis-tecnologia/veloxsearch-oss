@@ -8,6 +8,36 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **Upgrading could re-install the OpenSearch operator, grant cluster-admin
+  back, or downgrade (#54, ADR-057):** bootstrap applied its vendored operator
+  bundle (CRDs included, force-applied) whenever the operator was not Ready at
+  the moment it probed — which an operator restarting during a rollout is.
+  Bootstrap now installs only what is **absent**; an installed component that
+  is not Ready is waited on and reported, never re-applied. Upgrades no longer
+  grant cluster-admin: DEPLOY.md's upgrade applies the release's new
+  `upgrade.yaml` (below), and a `veloxsearch-bootstrap` binding re-created by
+  re-applying `install.yaml` is revoked again by the running app once bootstrap
+  is complete. `deploy/install.yaml` once pinned 0.8.1 while the crate was
+  0.9.0 (so did the 0.9.0 `velox` CLI, which embeds it); CI now fails when its
+  tag is not `Cargo.toml`'s version, and the release gate refuses a version
+  lower than the previous release.
+
+### Added
+- **`upgrade.yaml` release asset (ADR-057):** the release's `install.yaml`
+  without the one-time `veloxsearch-bootstrap` cluster-admin binding, derived
+  by `deploy/upgrade-manifest.sh`. Use it to upgrade; `install.yaml` stays the
+  first-install manifest.
+- **Operator drift is reported (R9, ADR-057):** the conformity report and a
+  notice above the main navigation show when the running operator's image
+  differs from the one this release vendors. Warn-only; nothing is changed.
+- **N-1 → N upgrade lane** (`.github/workflows/upgrade.yml`): installs the
+  previous release on minikube, brings a deployment to green, rolls the
+  candidate out with `upgrade.yaml`, and asserts the operator, CRDs and
+  `OpenSearchCluster` specs are unchanged and no cluster-admin was granted —
+  plus a variant that scales the operator to 0 and re-applies the full
+  `install.yaml`.
+
 ## [0.10.5] - 2026-09-24
 
 ### Changed
