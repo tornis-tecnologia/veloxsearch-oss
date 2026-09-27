@@ -2599,7 +2599,7 @@ async fn status_from(
                 ..crate::activity::Activity::idle()
             }
         } else {
-            crate::activity::evaluate(&crate::activity::ActivityInput {
+            let mut input = crate::activity::ActivityInput {
                 phase: phase.clone(),
                 health: health.clone(),
                 initialized,
@@ -2611,13 +2611,29 @@ async fn status_from(
                 dashboards_ready: false,
                 upgrade: upgrade.clone(),
                 components: components.clone(),
-                // The one clause this path skipped is Dashboards, which is
-                // seconds-scale — not a stall worth two HTTP calls to explain.
-                since_secs: 0,
+                // Everything but Dashboards is settled, so the clock that
+                // matters is the Dashboards pod's own: a fresh boot is young
+                // and never a stall, a boot the kubelet keeps restarting in
+                // the same pod ages into one (#46). No pod — a held
+                // Dashboards (ADR-063) — measures nothing and is never
+                // accused.
+                since_secs: dashboards_pod_age_secs(client, &obj_ns, &name).await,
                 cluster: None,
                 dashboards: None,
                 nodes: None,
-            })
+            };
+            let first = crate::activity::evaluate(&input);
+            // #46: this is the path a Dashboards deadlock on an otherwise
+            // settled cluster takes, so the rung's diagnosis — and the
+            // remediation it arms — must be reachable from here too. Before,
+            // `since_secs: 0` kept it unreachable (observed live 2026-09-27:
+            // five probe-kill restarts, zero arms).
+            if first.stalled && first.stage == "dashboards" {
+                input.dashboards = Some(dashboards_block_in(&obj_ns, &name).await);
+                crate::activity::evaluate(&input)
+            } else {
+                first
+            }
         }
     } else {
         let pvcs = data_pvcs_in(&obj_ns, &name).await;
@@ -3752,16 +3768,48 @@ fn dashboards_cache() -> &'static DashboardsCache {
     CACHE.get_or_init(Default::default)
 }
 
-/// The pure decision — crash-looping, budget of restarts, cooldown respected
-/// — split out so the policy is testable without a cluster, exactly like
+/// #46: the restart budget only counts while the container is still dying —
+/// its last termination is at most this old. A deadlocked boot is killed
+/// every ~210s by the startup probe and, under `CrashLoopBackOff`, waits at
+/// most 5 minutes between tries, so a live loop always has a death well
+/// inside the window; three restarts from long ago do not.
+const DASHBOARDS_RESTART_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long ago a container last terminated, from `lastState.terminated`;
+/// `None` when the cluster does not say.
+fn last_terminated_ago_of(
+    cs: &k8s_openapi::api::core::v1::ContainerStatus,
+    now: k8s_openapi::chrono::DateTime<k8s_openapi::chrono::Utc>,
+) -> Option<std::time::Duration> {
+    cs.last_state
+        .as_ref()
+        .and_then(|s| s.terminated.as_ref())
+        .and_then(|t| t.finished_at.as_ref())
+        .and_then(|t| (now - t.0).to_std().ok())
+}
+
+/// The pure decision — a restart budget spent recently, cooldown respected —
+/// split out so the policy is testable without a cluster, exactly like
 /// `should_remediate`.
+///
+/// The waiting reason is NOT required. The deadlock's own shape (observed
+/// live 2026-09-27, k8s 1.34): Dashboards logs "another instance appears to
+/// be migrating", the startup probe kills it, it exits 0 (`Completed`) on the
+/// SIGTERM and is restarted at once — `Running` with a growing restartCount,
+/// never `CrashLoopBackOff`. Requiring that reason armed zero times in five
+/// restarts. `CrashLoopBackOff` still counts as "dying now" when the last
+/// termination time is unreadable.
 fn should_remediate_dashboards(
     restarts: i32,
     waiting_reason: &str,
+    last_terminated_ago: Option<std::time::Duration>,
     last_fired_ago: Option<std::time::Duration>,
 ) -> bool {
-    waiting_reason == "CrashLoopBackOff"
-        && restarts >= DASHBOARDS_REMEDIATE_AFTER_RESTARTS
+    let dying_now = last_terminated_ago.map_or(waiting_reason == "CrashLoopBackOff", |ago| {
+        ago <= DASHBOARDS_RESTART_WINDOW
+    });
+    restarts >= DASHBOARDS_REMEDIATE_AFTER_RESTARTS
+        && dying_now
         && last_fired_ago.is_none_or(|ago| ago >= DASHBOARDS_REMEDIATE_COOLDOWN)
 }
 
@@ -3781,6 +3829,7 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
     }
 
     let mut out = crate::activity::DashboardsBlock::default();
+    let mut last_terminated_ago: Option<std::time::Duration> = None;
     let prefix = format!("{name}-dashboards");
     if let Ok(client) = client().await {
         use k8s_openapi::api::core::v1::Pod;
@@ -3801,6 +3850,9 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
                     // replica must not soften it.
                     if cs.restart_count > out.restarts {
                         out.restarts = cs.restart_count;
+                        // When it last died — the budget's window.
+                        last_terminated_ago =
+                            last_terminated_ago_of(&cs, k8s_openapi::chrono::Utc::now());
                     }
                     // The waiting reason of the crash-looping container, kept
                     // verbatim — the panel words it, the wire never does.
@@ -3821,7 +3873,12 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
         .ok()
         .and_then(|m| m.get(&key).cloned());
     let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    if should_remediate_dashboards(out.restarts, &out.waiting_reason, fired_ago) {
+    if should_remediate_dashboards(
+        out.restarts,
+        &out.waiting_reason,
+        last_terminated_ago,
+        fired_ago,
+    ) {
         if let Ok(mut log) = dashboards_remediation_log().lock() {
             log.insert(key.clone(), (std::time::Instant::now(), None));
         }
@@ -4055,6 +4112,34 @@ async fn remediate_kibana_deadlock(namespace: &str, name: &str) -> bool {
     deleted
 }
 
+/// Seconds since the newest Dashboards pod was created; `0` when there is no
+/// pod or the list failed — the same "unmeasured is never a stall" contract
+/// as `node_pool_age_secs`.
+async fn dashboards_pod_age_secs(client: &Client, namespace: &str, name: &str) -> i64 {
+    use k8s_openapi::api::core::v1::Pod;
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let Ok(list) = pods.list(&ListParams::default()).await else {
+        return 0;
+    };
+    let prefix = format!("{name}-dashboards-");
+    let now = k8s_openapi::chrono::Utc::now();
+    list.into_iter()
+        .filter(|p| {
+            p.metadata
+                .name
+                .as_deref()
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .filter_map(|p| {
+            p.metadata
+                .creation_timestamp
+                .map(|t| (now - t.0).num_seconds())
+        })
+        .min()
+        .unwrap_or(0)
+        .max(0)
+}
+
 /// Dashboards pods currently existing for a deployment, `None` when the list
 /// failed (which must read as "cannot proceed", not "zero").
 async fn dashboards_pod_count(client: &Client, namespace: &str, name: &str) -> Option<i32> {
@@ -4161,11 +4246,29 @@ fn dashboards_hold_patch(reason: Option<&str>) -> serde_json::Value {
     })
 }
 
-/// The release decision: the security plugin is initialized (before that
-/// Dashboards cannot even authenticate) and the cluster is green, or the
-/// hold has outlived [`DASHBOARDS_HOLD_MAX_SECS`].
-fn should_release_dashboards(initialized: bool, health: &str, cr_age_secs: i64) -> bool {
-    initialized && (health.eq_ignore_ascii_case("green") || cr_age_secs >= DASHBOARDS_HOLD_MAX_SECS)
+/// How long the node pool must have been still — no node pod created — before
+/// a settled verdict is trusted for the release. The operator restarts a node
+/// right after the security bootstrap, and the CR's `health` lags that
+/// restart: observed live 2026-09-27, a release on a CR "green" 18s after
+/// nodes-0 was re-created, while the real health went unknown → red →
+/// yellow. Two minutes covers the node's boot and its replica recovery on
+/// the sizes velox creates.
+const DASHBOARDS_RELEASE_QUIET_SECS: i64 = 120;
+
+/// The release decision. Normally: velox's own verdict says everything but
+/// Dashboards has settled (`activity::nodes_settled_of` — nodes ready and on
+/// their revision, security initialized, green, nothing rolling) AND the node
+/// pool has been still for [`DASHBOARDS_RELEASE_QUIET_SECS`]. As a ceiling:
+/// an initialized cluster past [`DASHBOARDS_HOLD_MAX_SECS`] gets Dashboards
+/// even if it never settles.
+fn should_release_dashboards(
+    nodes_settled: bool,
+    nodes_quiet_secs: i64,
+    initialized: bool,
+    cr_age_secs: i64,
+) -> bool {
+    (nodes_settled && nodes_quiet_secs >= DASHBOARDS_RELEASE_QUIET_SECS)
+        || (initialized && cr_age_secs >= DASHBOARDS_HOLD_MAX_SECS)
 }
 
 /// One step of the hold, decided from what the cluster says now.
@@ -4190,15 +4293,13 @@ fn dashboards_hold_step(
     held: bool,
     stored_replicas: i64,
     dashboards_serving: bool,
-    initialized: bool,
-    health: &str,
-    cr_age_secs: i64,
+    release_due: bool,
 ) -> HoldStep {
     if !held {
         HoldStep::Nothing
     } else if dashboards_serving {
         HoldStep::ClearStale
-    } else if should_release_dashboards(initialized, health, cr_age_secs) {
+    } else if release_due {
         HoldStep::Release
     } else if stored_replicas != 0 {
         HoldStep::Enforce
@@ -4237,36 +4338,26 @@ async fn dashboards_serving_in(client: &Client, namespace: &str, name: &str) -> 
     )
 }
 
-/// Decide and write one hold step for a CR just read. Returns the step taken
-/// (`Nothing` when the write was refused — the next poll decides again).
-async fn apply_hold_step(client: &Client, namespace: &str, obj: &DynamicObject) -> HoldStep {
+/// Decide and write one hold step for a CR just read, given whether the
+/// release is due (`release_due` — the caller's call, see
+/// [`reconcile_dashboards_hold`]). Returns the step taken (`Nothing` when the
+/// write was refused — the next poll decides again).
+async fn apply_hold_step(
+    client: &Client,
+    namespace: &str,
+    obj: &DynamicObject,
+    release_due: bool,
+) -> HoldStep {
     let name = obj.metadata.name.clone().unwrap_or_default();
     let held = dashboards_hold_of(obj.metadata.annotations.as_ref()).is_some();
     if !held {
         return HoldStep::Nothing;
     }
-    let status = obj.data.get("status");
-    let initialized = status
-        .and_then(|s| s.get("initialized"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let health = status
-        .and_then(|s| s.get("health"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let age = obj
-        .metadata
-        .creation_timestamp
-        .as_ref()
-        .map(|t| (k8s_openapi::chrono::Utc::now() - t.0).num_seconds())
-        .unwrap_or(0);
     let step = dashboards_hold_step(
         held,
         dashboards_replicas_of(&obj.data),
         dashboards_serving_in(client, namespace, &name).await,
-        initialized,
-        health,
-        age,
+        release_due,
     );
     let rv = obj.metadata.resource_version.clone().unwrap_or_default();
     let Some(patch) = hold_step_patch(step, &rv) else {
@@ -4277,7 +4368,7 @@ async fn apply_hold_step(client: &Client, namespace: &str, obj: &DynamicObject) 
         .await
     {
         Ok(_) => {
-            tracing::info!("#46 Dashboards hold of {namespace}/{name}: {step:?} ({health})");
+            tracing::info!("#46 Dashboards hold of {namespace}/{name}: {step:?}");
             step
         }
         Err(e) => {
@@ -4299,6 +4390,10 @@ async fn watch_new_dashboards_hold(namespace: String, name: String) {
         if let Ok(client) = client().await {
             if let Ok(Some(obj)) = cluster_api_in(&client, &namespace).get_opt(&name).await {
                 if dashboards_hold_of(obj.metadata.annotations.as_ref()).is_none() {
+                    tracing::info!(
+                        "#46 post-create Dashboards hold watch of {namespace}/{name} stopped: \
+                         the hold is gone"
+                    );
                     return;
                 }
                 let operator_wrote = obj
@@ -4307,16 +4402,22 @@ async fn watch_new_dashboards_hold(namespace: String, name: String) {
                     .as_ref()
                     .is_some_and(|f| f.iter().any(|x| x == OPERATOR_FINALIZER));
                 if operator_wrote && dashboards_replicas_of(&obj.data) == 0 {
+                    tracing::info!(
+                        "#46 post-create Dashboards hold watch of {namespace}/{name} stopped: \
+                         the operator's first write is in and the hold reads 0"
+                    );
                     return;
                 }
-                apply_hold_step(&client, &namespace, &obj).await;
+                // Enforce only: releasing is the sampler's call, on velox's
+                // own settled verdict.
+                apply_hold_step(&client, &namespace, &obj, false).await;
             }
         }
         tokio::time::sleep(HOLD_WATCH_INTERVAL).await;
     }
-    tracing::warn!(
-        "#46 the post-create Dashboards hold watch of {namespace}/{name} ran out; \
-         the sampler keeps enforcing it"
+    tracing::info!(
+        "#46 post-create Dashboards hold watch of {namespace}/{name} stopped at its \
+         bound; the sampler keeps enforcing the hold"
     );
 }
 
@@ -4341,7 +4442,33 @@ pub async fn reconcile_dashboards_hold(dep: &Deployment) {
     let Ok(Some(obj)) = os_api(&client, dep).get_opt(dep.name()).await else {
         return;
     };
-    apply_hold_step(&client, dep.namespace(), &obj).await;
+    if dashboards_hold_of(obj.metadata.annotations.as_ref()).is_none() {
+        return;
+    }
+    // Only a held deployment pays for the full evaluation: the release waits
+    // on velox's own verdict, not the CR's lagging `health`.
+    let nodes_settled = matches!(
+        get_deployment(dep).await,
+        Ok(Some(ref st)) if st.activity.nodes_settled
+    );
+    let created = obj.metadata.creation_timestamp.as_ref();
+    let quiet = node_pool_age_secs(&client, dep.namespace(), dep.name(), created).await;
+    let initialized = obj
+        .data
+        .pointer("/status/initialized")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let age = created
+        .map(|t| (k8s_openapi::chrono::Utc::now() - t.0).num_seconds())
+        .unwrap_or(0);
+    let release_due = should_release_dashboards(nodes_settled, quiet, initialized, age);
+    // Re-read so the write is pinned to a fresh resourceVersion: the
+    // evaluation above takes long enough for an operator status write to
+    // land, which would otherwise turn every release into a conflict.
+    let Ok(Some(obj)) = os_api(&client, dep).get_opt(dep.name()).await else {
+        return;
+    };
+    apply_hold_step(&client, dep.namespace(), &obj, release_due).await;
 }
 
 /// Message of the most recent `Warning`/`Upgrade` Event on a deployment's CR.
@@ -6463,26 +6590,12 @@ mod tests {
         assert_eq!(dashboards_replicas_of(&stored), 1);
         // an unsettled cluster whose hold was dropped gets the zero back
         assert_eq!(
-            dashboards_hold_step(
-                true,
-                dashboards_replicas_of(&stored),
-                false,
-                false,
-                "unknown",
-                5
-            ),
+            dashboards_hold_step(true, dashboards_replicas_of(&stored), false, false),
             HoldStep::Enforce
         );
         // and a hold in force is left alone
         assert_eq!(
-            dashboards_hold_step(
-                true,
-                dashboards_replicas_of(&sent),
-                false,
-                false,
-                "unknown",
-                5
-            ),
+            dashboards_hold_step(true, dashboards_replicas_of(&sent), false, false),
             HoldStep::Nothing
         );
         // a nonzero replicas survives the same round trip untouched
@@ -6496,13 +6609,9 @@ mod tests {
     fn a_serving_dashboards_is_never_scaled_by_the_hold() {
         // the hold was lost and Dashboards already booted: only the
         // annotation goes, whatever the cluster's state
-        for (init, health, age) in [
-            (false, "unknown", 5),
-            (true, "yellow", 60),
-            (true, "green", 60),
-        ] {
+        for (replicas, release_due) in [(1, false), (1, true), (0, false)] {
             assert_eq!(
-                dashboards_hold_step(true, 1, true, init, health, age),
+                dashboards_hold_step(true, replicas, true, release_due),
                 HoldStep::ClearStale
             );
         }
@@ -6517,17 +6626,17 @@ mod tests {
     #[test]
     fn hold_steps_release_when_settled_and_do_nothing_without_a_hold() {
         assert_eq!(
-            dashboards_hold_step(true, 0, false, true, "green", 60),
+            dashboards_hold_step(true, 0, false, true),
             HoldStep::Release
         );
         // a settled cluster whose zero was dropped is released, not re-held
         assert_eq!(
-            dashboards_hold_step(true, 1, false, true, "green", 60),
+            dashboards_hold_step(true, 1, false, true),
             HoldStep::Release
         );
         for serving in [false, true] {
             assert_eq!(
-                dashboards_hold_step(false, 0, serving, false, "red", 5),
+                dashboards_hold_step(false, 0, serving, false),
                 HoldStep::Nothing
             );
         }
@@ -6608,28 +6717,37 @@ mod tests {
     }
 
     #[test]
-    fn the_hold_releases_on_a_settled_cluster_or_after_its_ceiling() {
-        // settled
-        assert!(should_release_dashboards(true, "green", 60));
-        assert!(should_release_dashboards(true, "GREEN", 0));
-        // still settling
-        assert!(!should_release_dashboards(true, "yellow", 60));
-        assert!(!should_release_dashboards(
-            true,
-            "red",
-            DASHBOARDS_HOLD_MAX_SECS - 1
-        ));
-        // security not initialized: Dashboards could not authenticate anyway
-        assert!(!should_release_dashboards(false, "green", 60));
-        assert!(!should_release_dashboards(
+    fn the_hold_releases_on_velox_settled_and_quiet_or_after_its_ceiling() {
+        let q = DASHBOARDS_RELEASE_QUIET_SECS;
+        // velox's own verdict, and the node pool has been still long enough
+        assert!(should_release_dashboards(true, q, true, 300));
+        // settled per the evaluation, but a node pod was just re-created —
+        // the live 2026-09-27 case: the operator's post-bootstrap restart,
+        // CR still saying green (18s after nodes-0 came back)
+        assert!(!should_release_dashboards(true, 18, true, 300));
+        assert!(!should_release_dashboards(true, q - 1, true, 300));
+        // unmeasured stillness is never trusted
+        assert!(!should_release_dashboards(true, 0, true, 300));
+        // not settled (yellow, a node not ready, rolling…), however quiet
+        assert!(!should_release_dashboards(false, 10 * q, true, 300));
+        // the ceiling: an initialized cluster that never settles still gets
+        // its Dashboards; an uninitialized one could not authenticate anyway
+        assert!(should_release_dashboards(
             false,
-            "yellow",
+            0,
+            true,
             DASHBOARDS_HOLD_MAX_SECS
         ));
-        // a cluster that never turns green still gets its Dashboards
-        assert!(should_release_dashboards(
+        assert!(!should_release_dashboards(
+            false,
+            0,
             true,
-            "yellow",
+            DASHBOARDS_HOLD_MAX_SECS - 1
+        ));
+        assert!(!should_release_dashboards(
+            false,
+            0,
+            false,
             DASHBOARDS_HOLD_MAX_SECS
         ));
     }
@@ -6751,39 +6869,115 @@ mod tests {
     #[test]
     fn dashboards_remediation_respects_budget_and_cooldown() {
         use std::time::Duration;
+        let recent = Some(Duration::from_secs(30));
         // Budget: one restart is a slow cluster; three full cycles is a
         // deterministically dying boot.
         assert!(!should_remediate_dashboards(
             DASHBOARDS_REMEDIATE_AFTER_RESTARTS - 1,
             "CrashLoopBackOff",
+            recent,
             None
         ));
         assert!(should_remediate_dashboards(
             DASHBOARDS_REMEDIATE_AFTER_RESTARTS,
             "CrashLoopBackOff",
+            recent,
             None
         ));
-        // Only a crash-loop arms it: a pod still in its first start (no
-        // waiting reason) or waiting for something else is left alone.
-        assert!(!should_remediate_dashboards(9_999, "Pending", None));
-        assert!(!should_remediate_dashboards(9_999, "", None));
         // Cooldown: identical contract to the #27 half.
         assert!(!should_remediate_dashboards(
             9_999,
             "CrashLoopBackOff",
+            recent,
             Some(Duration::from_secs(60))
         ));
         let just_under = DASHBOARDS_REMEDIATE_COOLDOWN - Duration::from_secs(1);
         assert!(!should_remediate_dashboards(
             9_999,
-            "CrashLoopBackOff",
+            "",
+            recent,
             Some(just_under)
         ));
         assert!(should_remediate_dashboards(
             9_999,
-            "CrashLoopBackOff",
+            "",
+            recent,
             Some(DASHBOARDS_REMEDIATE_COOLDOWN)
         ));
+    }
+
+    #[test]
+    fn a_probe_kill_loop_that_exits_zero_arms_the_remediation() {
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateRunning, ContainerStateTerminated, ContainerStatus,
+        };
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        use std::time::Duration;
+        // The container status of the live 2026-09-27 deadlock at restart
+        // 3: running again at once, last death an exit 0 `Completed` from
+        // the startup probe's SIGTERM — no waiting state at all, so never
+        // `CrashLoopBackOff`.
+        let now = k8s_openapi::chrono::Utc::now();
+        let cs = ContainerStatus {
+            name: "dashboards".into(),
+            restart_count: 3,
+            ready: false,
+            state: Some(ContainerState {
+                running: Some(ContainerStateRunning {
+                    started_at: Some(Time(now - k8s_openapi::chrono::Duration::seconds(3))),
+                }),
+                ..Default::default()
+            }),
+            last_state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code: 0,
+                    reason: Some("Completed".into()),
+                    finished_at: Some(Time(now - k8s_openapi::chrono::Duration::seconds(4))),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Read the way `dashboards_block_in` reads it.
+        let waiting = cs
+            .state
+            .as_ref()
+            .and_then(|s| s.waiting.as_ref())
+            .and_then(|w| w.reason.clone())
+            .unwrap_or_default();
+        let last_terminated_ago = last_terminated_ago_of(&cs, now);
+        assert_eq!(last_terminated_ago, Some(Duration::from_secs(4)));
+        assert_eq!(waiting, "");
+        assert!(should_remediate_dashboards(
+            cs.restart_count,
+            &waiting,
+            last_terminated_ago,
+            None
+        ));
+        // Window: the same three restarts, last one long ago, is a boot that
+        // stopped dying — not armed.
+        assert!(!should_remediate_dashboards(
+            3,
+            "",
+            Some(DASHBOARDS_RESTART_WINDOW + Duration::from_secs(1)),
+            None
+        ));
+        assert!(should_remediate_dashboards(
+            3,
+            "",
+            Some(DASHBOARDS_RESTART_WINDOW),
+            None
+        ));
+        // No readable termination time: only a crash-loop counts as dying now.
+        assert!(should_remediate_dashboards(
+            3,
+            "CrashLoopBackOff",
+            None,
+            None
+        ));
+        assert!(!should_remediate_dashboards(9_999, "", None, None));
+        assert!(!should_remediate_dashboards(9_999, "Pending", None, None));
     }
 
     // ── restart-wave wedge watch (#96) ─────────────────────────────────

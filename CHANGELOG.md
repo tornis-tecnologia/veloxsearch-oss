@@ -13,17 +13,26 @@ are called out explicitly.
   the operator reverts the `Recreate` strategy and startup budget on its
   Deployment within a second, and it reverted the remediation's 0/1 scale the
   same way. The operator's CR has no probe or strategy field, so the fix now
-  goes through `spec.dashboards.replicas`. A new deployment's Dashboards is
-  held at zero replicas until the cluster is initialized and green (or 20
-  minutes old), so its first migration runs on a settled cluster. The hold
-  is enforced, not only written: the operator's first update of a new CR
-  drops a zero `replicas` (`omitempty` plus the CRD default of 1), so a
-  post-create watch and the metrics sampler write it again. A Dashboards
-  that is already serving is never scaled down, and a save never changes
-  Dashboards replicas. The
-  `.kibana_1` remediation holds and releases through the CR too. The
-  Deployment patch is gone, and so is the runtime `patch` grant on
-  Deployments (ADR-063).
+  goes through `spec.dashboards.replicas`.
+  - **First boot:** a new deployment's Dashboards is held at zero replicas.
+    The hold is released once velox's own verdict says everything but
+    Dashboards has settled and the node pool has been still for two
+    minutes, or once the cluster is 20 minutes old and initialized. It no
+    longer uses the operator's lagging `health`. The first migration
+    therefore runs on a settled cluster.
+  - **Enforcement:** the operator's first update of a new CR drops a zero
+    `replicas` (`omitempty` plus the CRD default of 1), so a post-create
+    watch and the metrics sampler write it again. A Dashboards that is
+    already serving is never scaled down, and a save never changes
+    Dashboards replicas.
+  - **Remediation:** the `.kibana_1` remediation holds and releases through
+    the CR, and it now actually arms. A deadlocked Dashboards is killed by
+    its startup probe, exits 0 and restarts at once, so it never showed the
+    `CrashLoopBackOff` the trigger required. On an otherwise settled
+    cluster, the stall that arms it was also never measured. The trigger is
+    now three restarts with the last one within 15 minutes.
+  - **Removed:** the Deployment patch, and the runtime `patch` grant on
+    Deployments (ADR-063).
 - **Upgrading could re-install the OpenSearch operator, grant cluster-admin
   back, or downgrade (#54, ADR-057):** bootstrap applied its vendored operator
   bundle (CRDs included, force-applied) whenever the operator was not Ready at

@@ -1,6 +1,6 @@
 # ADR-063 — The Dashboards first-boot fix goes through the CR, not the operator's Deployment
 
-**Status:** accepted (supersedes ADR-055 decision 1; decisions 2 and 3 stand)
+**Status:** accepted (supersedes ADR-055 decision 1 and the trigger in decision 2; ADR-055 decision 3 and its container-log refusal stand)
 **Date:** 2026-09-26
 
 ## Context
@@ -56,10 +56,21 @@ builder (`pkg/builders/dashboards.go`, tags `v3.0.0-alpha` and `v3.0.0`):
      precedent) makes the same decision as a backstop: after a backend
      restart, and after any later full update by the operator.
    - **Release** is one JSON merge patch (`replicas: 1`, annotation removed).
-     It happens once the security plugin is initialized and health is green,
-     or once the CR is 20 minutes old and initialized, so a cluster that
-     stays yellow still gets Dashboards. On a settled cluster the migration
-     takes seconds, well inside the fixed ~210s budget.
+     Only the sampler releases, and only on velox's own verdict, never on the
+     CR's `status.health`. That field lags: in the 2026-09-27 run a release
+     fired on a CR "green" 18s after the operator's post-bootstrap restart
+     re-created nodes-0, while the real health went unknown → red → yellow.
+     Release needs two things:
+     - `activity::nodes_settled_of`: `settled_of` without its Dashboards
+       clause. Every node ready and on its revision, security initialized,
+       green, nothing rolling.
+     - A still node pool: no node pod created for 120s, on the same clock the
+       activity panel uses.
+
+     The ceiling stays. Once the CR is 20 minutes old and initialized, the
+     hold is released anyway, so a cluster that never settles still gets
+     Dashboards. On a settled cluster the migration takes seconds, well
+     inside the fixed ~210s budget.
    - **A serving Dashboards is never scaled down by the hold.** If a
      Dashboards replica is already Ready, the hold was lost and the first
      boot already happened. Only the annotation is removed. Scaling a
@@ -80,6 +91,24 @@ builder (`pkg/builders/dashboards.go`, tags `v3.0.0-alpha` and `v3.0.0`):
    release. A backend that dies mid-pass leaves the annotation, and the
    sampler releases it; it skips a hold whose remediation this process is
    still running.
+
+   **Its trigger** was never reachable in the deadlock's real shape. A
+   planted deadlock on 2026-09-27 (k8s 1.34) restarted 5 times and armed 0
+   times, for two reasons:
+   - **Wrong signal.** On each startup-probe kill Dashboards exits 0
+     (`Completed`) and is restarted at once. It shows `Running` with a
+     growing `restartCount` and never `CrashLoopBackOff`, which the trigger
+     required. It now arms on `restartCount ≥ 3` with the last termination
+     at most 15 minutes old, whatever the waiting reason. `CrashLoopBackOff`
+     counts as "dying now" only when the termination time is unreadable.
+     The one-shot cooldown and the rung gate (never-ready Dashboards only)
+     are unchanged. Container logs stay unread.
+   - **Wrong clock.** On an otherwise settled cluster, status takes a fast
+     path that set `since_secs: 0`, so the Dashboards rung could never read
+     as stalled and its diagnosis never ran. That path now measures the
+     Dashboards pod's own age. A fresh boot is young and never a stall. A
+     boot restarted in the same pod ages into one. A held Dashboards has no
+     pod and is never flagged.
 3. **Saves never move Dashboards replicas.** `create_cluster` is also the
    save path. For an existing CR it re-applies the stored
    `spec.dashboards.replicas` and hold annotation exactly as read, the same
