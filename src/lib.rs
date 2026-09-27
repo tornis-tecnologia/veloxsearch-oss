@@ -106,6 +106,11 @@ pub mod upgrade;
 #[cfg(feature = "ssr")]
 pub mod activity;
 
+// #115 (ADR-064): the admin-password reset's gate, its applied-or-not verdict,
+// and the backstop that undoes a reset whose securityconfig Job failed.
+#[cfg(feature = "ssr")]
+pub mod admin_reset;
+
 // ADR-049: pure renderers and rules for the snapshot repository + the scheduled
 // snapshot policy. `k8s.rs` owns the writes.
 #[cfg(feature = "ssr")]

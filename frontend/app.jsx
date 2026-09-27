@@ -253,7 +253,8 @@ function App() {
       showToast(tr.pass_reset);
       return c;
     } catch (e) {
-      showToast(e.message);
+      // 409: refused before anything changed — the deployment is busy (#115).
+      showToast(e.status === 409 ? tr.sec_reset_busy : e.message);
       throw e;
     }
   }

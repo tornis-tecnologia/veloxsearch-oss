@@ -2708,6 +2708,13 @@ async fn status_from(
         }
     };
 
+    // #115: a reset still in its window gets its backstop looked at. The
+    // marker is on the CR we already hold, so every other deployment pays
+    // nothing for this.
+    if let Some(pending) = annotations.get(crate::admin_reset::PENDING_ANNOTATION) {
+        reset_backstop_in(client, &obj_ns, &name, pending).await;
+    }
+
     // Snapshot state (ADR-049). The repository lives on the CR we already have,
     // so the policy CR is only fetched for a deployment that actually
     // configured snapshots — a deployment without them costs no extra call.
@@ -4561,6 +4568,11 @@ pub async fn dashboard_credentials(dep: &Deployment) -> Result<(String, String)>
 /// re-run its securityconfig update job so the new hash is applied to the
 /// running cluster. `admin_creds` immediately reflects the new password for the
 /// app's own calls.
+///
+/// That Job runs once and its failure is permanent, so a reset is refused
+/// unless the deployment has settled, is rolled back if the nudge fails, and
+/// is undone by the status backstop if the Job fails (#115, ADR-064,
+/// `crate::admin_reset`).
 /// Reset the cluster admin password to a freshly generated one and return it.
 ///
 /// The caller never chooses the value. A human-chosen password for a machine
@@ -4576,6 +4588,8 @@ pub async fn reset_admin_password_random(dep: &Deployment) -> Result<String> {
 }
 
 pub async fn reset_admin_password(dep: &Deployment, new_password: &str) -> Result<()> {
+    use crate::admin_reset::{self, ResetError};
+
     let name = dep.name();
     validate_name(name)?;
     password_check(new_password)?;
@@ -4584,52 +4598,252 @@ pub async fn reset_admin_password(dep: &Deployment, new_password: &str) -> Resul
     // exist would either 404 cryptically or, worse, leave an orphan Secret a
     // later create would silently adopt. Refuse with the actual situation.
     ensure_namespace_exists(&client, dep.namespace()).await?;
-    if os_api(&client, dep).get_opt(name).await?.is_none() {
+    let Some(cr) = os_api(&client, dep).get_opt(name).await? else {
         bail!(
             "no deployment named '{name}' in namespace '{}' — cannot reset \
              its admin password",
             dep.namespace()
         );
-    }
+    };
+
+    // #115: only a settled deployment (ADR-050) can take a reset. The
+    // operator's securityconfig Job reaches the cluster through its Service
+    // and runs once; a reset landing mid-roll left every node unready for
+    // good. An unconfirmed earlier reset is refused too — this one would
+    // overwrite the only copy of the password that one replaced.
+    let pending = cr
+        .metadata
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.contains_key(admin_reset::PENDING_ANNOTATION));
+    let settled = get_deployment(dep)
+        .await?
+        .is_some_and(|s| s.activity.settled);
+    admin_reset::gate(settled, pending).map_err(ResetError::Refused)?;
 
     // 1. Update the credentials Secret — the source of truth the operator seeds
-    //    the admin hash from, and what `admin_creds` reads.
+    //    the admin hash from, and what `admin_creds` reads — keeping the
+    //    password it replaces for the backstop (`reset_backstop_in`). Read
+    //    with errors propagated: without the old value there is no way back.
     let secrets: Api<Secret> = Api::namespaced(client.clone(), dep.namespace());
-    let patch =
-        serde_json::json!({ "stringData": { "username": ADMIN_USER, "password": new_password } });
+    let secret_name = admin_secret_name(name);
+    let previous = secrets
+        .get(&secret_name)
+        .await
+        .context("reading admin credentials Secret")?
+        .data
+        .and_then(|d| d.get("password").map(|b| b.0.clone()))
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|p| !p.is_empty())
+        .context(
+            "admin credentials Secret has no password — refusing to reset without a way back",
+        )?;
+    let patch = admin_reset::start_patch(ADMIN_USER, new_password, &previous);
     secrets
+        .patch(&secret_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("updating admin credentials Secret")?;
+
+    // 2. Force a reconcile so the operator re-applies the security config with
+    //    the new hash, and mark the reset pending in the same apply.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+        .to_string();
+    let Err(nudge_err) =
+        apply_reset_annotations(&client, dep.namespace(), name, &ts, Some(&ts)).await
+    else {
+        return Ok(());
+    };
+
+    // 3. The nudge failed after the Secret was rewritten (#115: the operator's
+    //    webhook refusing with a 500). Put the old password back, so the
+    //    answer is "nothing changed" rather than a 500 over a changed password.
+    let rollback = admin_reset::restore_patch(&previous, true);
+    let rolled = secrets
+        .patch(
+            &secret_name,
+            &PatchParams::default(),
+            &Patch::Merge(&rollback),
+        )
+        .await;
+    let cause = format!("{nudge_err:#}");
+    let err = match admin_reset::outcome(false, Some(rolled.is_ok())) {
+        admin_reset::Outcome::NotApplied => ResetError::NotApplied { cause },
+        _ => ResetError::Partial {
+            cause,
+            rollback: rolled.err().map(|e| e.to_string()).unwrap_or_default(),
+        },
+    };
+    Err(err.into())
+}
+
+/// The reconcile nudge, applied under a dedicated field manager that owns ONLY
+/// these annotations, so server-side apply can't prune the rest of the spec.
+/// `pending: None` omits [`crate::admin_reset::PENDING_ANNOTATION`], which
+/// server-side apply then REMOVES — this manager is its only writer.
+async fn apply_reset_annotations(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    nudge: &str,
+    pending: Option<&str>,
+) -> Result<()> {
+    let mut annotations = serde_json::Map::new();
+    annotations.insert(
+        crate::admin_reset::NUDGE_ANNOTATION.into(),
+        serde_json::Value::String(nudge.into()),
+    );
+    if let Some(p) = pending {
+        annotations.insert(
+            crate::admin_reset::PENDING_ANNOTATION.into(),
+            serde_json::Value::String(p.into()),
+        );
+    }
+    let anno = serde_json::json!({
+        "apiVersion": "opensearch.org/v1",
+        "kind": "OpenSearchCluster",
+        "metadata": { "name": name, "annotations": annotations }
+    });
+    cluster_api_in(client, namespace)
+        .patch(
+            name,
+            &PatchParams::apply(SECRESET_FIELD_MANAGER).force(),
+            &Patch::Apply(&anno),
+        )
+        .await
+        .context("forcing operator reconcile for password reset")?;
+    Ok(())
+}
+
+/// The field manager that owns the reset annotations — and nothing else.
+const SECRESET_FIELD_MANAGER: &str = "veloxsearch-secreset";
+
+/// Epoch seconds, for comparing against a Kubernetes timestamp.
+fn now_secs() -> i64 {
+    k8s_openapi::chrono::Utc::now().timestamp()
+}
+
+/// The newest pod of `<name>-securityconfig-update`, the operator's one-shot
+/// Job. Pods, not Jobs: the runtime role can already read pods everywhere, and
+/// with `BackoffLimit: 0` the one pod's phase is the Job's verdict.
+async fn securityconfig_run_in(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<crate::admin_reset::UpdateRun>> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let lp = ListParams::default().labels(&format!("job-name={name}-securityconfig-update"));
+    let list = pods
+        .list(&lp)
+        .await
+        .context("listing securityconfig pods")?;
+    Ok(list
+        .into_iter()
+        .filter_map(|p| {
+            Some(crate::admin_reset::UpdateRun {
+                created_secs: p.metadata.creation_timestamp?.0.timestamp(),
+                phase: p.status.and_then(|s| s.phase).unwrap_or_default(),
+            })
+        })
+        .max_by_key(|r| r.created_secs))
+}
+
+/// The #115 backstop, run from `status_from` for a CR that carries
+/// [`crate::admin_reset::PENDING_ANNOTATION`] — a reset in its window, so a
+/// deployment without one pays nothing. The sampler lists every deployment
+/// on its own clock, so this runs with nobody watching the UI.
+///
+/// Every step is idempotent: two readers acting on the same tick restore the
+/// same password and remove the same marker.
+async fn reset_backstop_in(client: &Client, namespace: &str, name: &str, pending: &str) {
+    use crate::admin_reset::{self, Backstop};
+
+    let decision = match admin_reset::parse_pending(pending) {
+        None => Backstop::Forget,
+        Some(since) => match securityconfig_run_in(client, namespace, name).await {
+            Ok(run) => admin_reset::backstop(since, run.as_ref(), now_secs()),
+            Err(e) => {
+                tracing::debug!("#115 backstop for {namespace}/{name}: {e:#}");
+                return;
+            }
+        },
+    };
+    let result = match decision {
+        Backstop::Wait => return,
+        Backstop::Forget => forget_reset_in(client, namespace, name).await,
+        Backstop::Restore => restore_reset_in(client, namespace, name).await,
+    };
+    match result {
+        Ok(()) if decision == Backstop::Restore => tracing::warn!(
+            "#115 the securityconfig Job for {namespace}/{name} failed after an admin-password \
+             reset; the previous password was restored so the nodes can pass their probes again"
+        ),
+        Ok(()) => {}
+        Err(e) => tracing::warn!("#115 backstop ({decision:?}) for {namespace}/{name}: {e:#}"),
+    }
+}
+
+/// Drop the pending marker, then the kept password. In that order: a marker
+/// without a password is harmless (the backstop forgets it), a password
+/// without a marker is only stale.
+async fn forget_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+    let nudge = cluster_api_in(client, namespace)
+        .get(name)
+        .await
+        .context("reading the deployment")?
+        .metadata
+        .annotations
+        .and_then(|a| a.get(crate::admin_reset::NUDGE_ANNOTATION).cloned())
+        .unwrap_or_default();
+    apply_reset_annotations(client, namespace, name, &nudge, None).await?;
+    drop_previous_password_in(client, namespace, name).await
+}
+
+/// Put the previous password back and nudge the operator, which copies it into
+/// the probe Secret and re-runs its Job with the old hash — the one the cluster
+/// still has. The marker is removed by the same apply as the nudge, and the
+/// kept password only after both landed, so a failure midway is retried whole
+/// on the next read.
+async fn restore_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let secret_name = admin_secret_name(name);
+    let previous = secrets
+        .get(&secret_name)
+        .await
+        .context("reading admin credentials Secret")?
+        .data
+        .and_then(|d| {
+            d.get(crate::admin_reset::PREVIOUS_PASSWORD_KEY)
+                .map(|b| b.0.clone())
+        })
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|p| !p.is_empty());
+    let Some(previous) = previous else {
+        // Nothing to restore to: forgetting is all that is left.
+        return forget_reset_in(client, namespace, name).await;
+    };
+    let patch = crate::admin_reset::restore_patch(&previous, false);
+    secrets
+        .patch(&secret_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("restoring the previous admin password")?;
+    let ts = now_secs().to_string();
+    apply_reset_annotations(client, namespace, name, &ts, None).await?;
+    drop_previous_password_in(client, namespace, name).await
+}
+
+async fn drop_previous_password_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+    let patch = crate::admin_reset::drop_kept_patch();
+    Api::<Secret>::namespaced(client.clone(), namespace)
         .patch(
             &admin_secret_name(name),
             &PatchParams::default(),
             &Patch::Merge(&patch),
         )
         .await
-        .context("updating admin credentials Secret")?;
-
-    // 2. Force a reconcile so the operator re-applies the security config with
-    //    the new hash. A dedicated field manager owns ONLY this annotation, so
-    //    server-side apply can't prune the rest of the spec.
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    let anno = serde_json::json!({
-        "apiVersion": "opensearch.org/v1",
-        "kind": "OpenSearchCluster",
-        "metadata": {
-            "name": name,
-            "annotations": { "veloxsearch.ai/security-reset": ts.to_string() }
-        }
-    });
-    os_api(&client, dep)
-        .patch(
-            name,
-            &PatchParams::apply("veloxsearch-secreset").force(),
-            &Patch::Apply(&anno),
-        )
-        .await
-        .context("forcing operator reconcile for password reset")?;
-
+        .context("dropping the kept admin password")?;
     Ok(())
 }
 

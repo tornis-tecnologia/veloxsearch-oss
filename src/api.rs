@@ -2405,7 +2405,7 @@ mod server {
         let dep = scope.require(&req.name).await?;
         let password = crate::k8s::reset_admin_password_random(&dep)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(reset_error)?;
         let (username, _) = crate::k8s::admin_creds(&dep).await;
         Ok(Json(DashCreds { username, password }))
     }
@@ -2417,8 +2417,19 @@ mod server {
         let dep = scope.require(&req.name).await?;
         crate::k8s::reset_admin_password(&dep, &req.new_password)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(reset_error)?;
         Ok(StatusCode::OK)
+    }
+
+    /// #115: a reset refused before anything was written is a 409 — the
+    /// deployment is busy, and the SPA shows its own wording for it. Every
+    /// other failure is a 500 whose message states whether the password
+    /// changed (`admin_reset::ResetError`).
+    fn reset_error(e: anyhow::Error) -> ApiError {
+        match e.downcast_ref::<crate::admin_reset::ResetError>() {
+            Some(crate::admin_reset::ResetError::Refused(_)) => ApiError::conflict(e.to_string()),
+            _ => ApiError::internal(e),
+        }
     }
 
     // ───────────────────────── SSE status stream (ADR-005) ─────────────
