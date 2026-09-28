@@ -168,6 +168,9 @@ with sync_playwright() as p:
     page.wait_for_timeout(500)
     page.click('[data-testid="delete-deployment"]')        # arm: opens the Confirm modal
     page.wait_for_selector('[data-testid="delete-confirm"]', timeout=5000)
+    # type-to-confirm: the delete stays disabled until the deployment's name is
+    # typed (the Confirm modal's requireText) — an irreversible action names its target
+    page.fill('[data-testid="confirm-text"]', dep_name)
     page.click('[data-testid="delete-confirm"]')           # confirm delete -> go(status)
 
     # Success = we left the detail: onDelete navigates home, so the crumb

@@ -24,6 +24,7 @@ operation is refused with an informative error instead of a broken apply:
                                        #55/ADR-035)
     - weak admin password (<8 chars)
     - password reset on a deployment that doesn't exist (existence-first)
+    - password reset while the deployment is rolling (409, #115)
 
   The namespace-first guard (missing app namespace → actionable refusal)
   cannot be exercised here without breaking the live install; it is enforced
@@ -124,14 +125,39 @@ def save_reflected(name, what, field, want, **changes):
     fail(f"{what}: accepted but {field} never became {want!r}")
 
 
-def wait_green(name, secs):
+def settled(d):
+    """ADR-050's predicate, as the server computed it. `health == green` alone
+    reads true between two node restarts of a rolling restart (#115)."""
+    return bool(d) and d.get("health") == "green" and (d.get("activity") or {}).get("settled") is True
+
+
+def wait_settled(name, secs):
     deadline = time.time() + secs
     while time.time() < deadline:
-        d = get_deployment(name)
-        if d and d.get("health") == "green":
+        if settled(get_deployment(name)):
             return
         time.sleep(15)
-    fail(f"{name} not green within {secs}s — cannot validate recipe/password ops")
+    fail(f"{name} not settled within {secs}s — cannot validate recipe/password ops")
+
+
+def reset_refused_while_rolling(name):
+    """#115: a reset that lands mid-roll used to take the deployment down for
+    good. Right after a spec change the deployment is rolling; the reset must be
+    a 409 and must leave the password alone."""
+    deadline = time.time() + 120
+    while settled(get_deployment(name)):
+        if time.time() > deadline:
+            print("  skip: reset-while-rolling (the deployment never read unsettled)")
+            return
+        time.sleep(3)
+    _, before = api("dashboard_credentials", {"name": name})
+    status, resp = api("reset_admin_password_random", {"name": name})
+    if status != 409:
+        fail(f"reset while rolling: expected 409, got HTTP {status} {resp}")
+    _, after = api("dashboard_credentials", {"name": name})
+    if (before or {}).get("password") != (after or {}).get("password"):
+        fail("reset while rolling: refused, but the password changed anyway")
+    ok(f"reset while rolling → 409, password unchanged: {(resp or {}).get('error', '')[:60]}")
 
 
 def grow(qty, extra_gi):
@@ -212,6 +238,7 @@ def main():
     mem_up, _ = grow(base_mem, 1)
     save_reflected(name, f"memory up {base_mem}→{mem_up}", "memory", mem_up,
                    memory=mem_up)
+    reset_refused_while_rolling(name)
     save_reflected(name, f"memory back down →{base_mem}", "memory", base_mem,
                    memory=base_mem)
     nodes_up = base_nodes + 1
@@ -234,8 +261,8 @@ def main():
         ok(f"disk grow → honestly refused (SC can't expand): {err[:80]}")
 
     # ── ops that need OpenSearch answering: extra dashboard + password ──────
-    wait_green(name, green_timeout)
-    ok("deployment green")
+    wait_settled(name, green_timeout)
+    ok("deployment settled")
 
     recipe = "k8s-events"
     if recipe in get_deployment(name).get("monitors", []):

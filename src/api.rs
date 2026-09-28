@@ -633,6 +633,15 @@ pub struct BootstrapStatus {
     pub requirements: Vec<ReqCheck>,
     /// Any hard failure — the installer refuses to run on this cluster.
     pub unsupported: bool,
+    /// Image of the operator VeloxSearch installed, as it runs (ADR-057).
+    #[serde(default)]
+    pub operator_image_running: Option<String>,
+    /// Image this release's vendored operator bundle would install.
+    #[serde(default)]
+    pub operator_image_vendored: Option<String>,
+    /// Both images are known and differ — the R9 warning the UI renders.
+    #[serde(default)]
+    pub operator_drift: bool,
 }
 
 /// Read-only storage classification for the create flow (ADR-031/043, flexible
@@ -809,6 +818,42 @@ mod server {
         /// has its own write path, and a save must never touch it.
         #[serde(default)]
         pub snapshot: Option<crate::snapshot::SnapshotConfig>,
+        /// Retention days chosen in the wizard (ADR-062); `None` = the
+        /// installation default for the purpose. `create_cluster` only — a
+        /// save never moves it (the reset action does, explicitly).
+        #[serde(default)]
+        pub retention_days: Option<u32>,
+    }
+
+    /// One deployment's retention, for the edit tab (ADR-062).
+    #[derive(Serialize)]
+    pub struct RetentionStatus {
+        pub purpose: String,
+        /// Days velox applies to this deployment; `None` for `search`.
+        pub days: Option<u32>,
+        /// What "reset to default" would set; `None` for `search`.
+        pub default_days: Option<u32>,
+        /// `default` (inherits the installation default, follows the admin's
+        /// apply) | `override` (chosen for this deployment) | empty for search.
+        pub source: String,
+        /// `absent` | `managed` | `customized` | `none` (search) |
+        /// `unreachable` (OpenSearch did not answer; see `detail`).
+        pub state: String,
+        pub detail: String,
+    }
+
+    /// What the admin's "apply default to existing deployments" did, per
+    /// deployment (ADR-062). Never silent: a skip says why.
+    #[derive(Serialize)]
+    pub struct RetentionApplyResult {
+        pub name: String,
+        pub namespace: String,
+        /// `installed` | `updated` | `unchanged` | `customized` (skipped) |
+        /// `override` (skipped — chosen for this deployment) |
+        /// `search` (skipped — no retention) | `error`.
+        pub outcome: String,
+        pub days: Option<u32>,
+        pub detail: String,
     }
 
     #[derive(Deserialize)]
@@ -1137,6 +1182,9 @@ mod server {
                 })
                 .collect(),
             unsupported: s.unsupported,
+            operator_image_running: s.operator_images.running,
+            operator_image_vendored: s.operator_images.vendored.map(str::to_string),
+            operator_drift: s.operator_images.drift,
         }
     }
 
@@ -1192,6 +1240,8 @@ mod server {
             // Set by the create handler only; a save never carries a version
             // (ADR-048 invariant 1).
             version: None,
+            // Set by the create handler / a purpose change only (ADR-062).
+            retention: None,
         })
     }
 
@@ -1566,6 +1616,23 @@ mod server {
         // The wizard's version choice (ADR-048 rev. 2). Only the create path
         // passes it on; `save_cluster` deliberately does not.
         ov.version = req.version.clone();
+        // ADR-062: every new non-search deployment carries its retention on
+        // the CR — the wizard's choice, else the installation default — so the
+        // applier never has to consult the (changeable) default later.
+        if let Some(default_days) = crate::retention::get()
+            .await
+            .map_err(ApiError::internal)?
+            .for_purpose(&purpose)
+        {
+            // An explicit choice is an override: the admin's "apply default
+            // to existing deployments" must never move it.
+            let (days, source) = match req.retention_days {
+                Some(d) => (d, crate::retention::Source::Override),
+                None => (default_days, crate::retention::Source::Default),
+            };
+            crate::retention::validate_days(days).map_err(ApiError::bad_request)?;
+            ov.retention = Some((days, source));
+        }
         // Refuse a malformed snapshot configuration BEFORE the cluster is
         // created (#52): the repository is only registered minutes later, once
         // the cluster is green, and a create that silently drops the backup the
@@ -1637,6 +1704,18 @@ mod server {
             .map_err(ApiError::bad_request)?;
         if purpose == "search" {
             ov.monitors.clear();
+        }
+        // ADR-062: a save keeps the deployment's retention — except when it
+        // changes the purpose, whose default is what the user just picked.
+        let before = crate::k8s::retention_of(&dep)
+            .await
+            .map_err(ApiError::internal)?;
+        if before.purpose != purpose {
+            ov.retention = crate::retention::get()
+                .await
+                .map_err(ApiError::internal)?
+                .for_purpose(&purpose)
+                .map(|d| (d, crate::retention::Source::Default));
         }
         crate::k8s::create_cluster(&dep, &req.size, &purpose, ov)
             .await
@@ -2228,6 +2307,176 @@ mod server {
         Json(series)
     }
 
+    // ───────────────────────── handlers: retention (ADR-062) ───────────
+
+    /// The installation's default retention per purpose. Every signed-in
+    /// account reads it: the create wizard shows it. Names no deployment.
+    async fn retention_defaults() -> Result<Json<crate::retention::Defaults>, ApiError> {
+        Ok(Json(
+            crate::retention::get().await.map_err(ApiError::internal)?,
+        ))
+    }
+
+    /// Change the default. Touches no deployment: new ones pick it up at
+    /// create; existing ones move only through `apply_default_retention`.
+    async fn save_retention_defaults(
+        scope: Scope,
+        Json(req): Json<crate::retention::Defaults>,
+    ) -> Result<StatusCode, ApiError> {
+        scope.require_admin()?;
+        req.validate().map_err(ApiError::bad_request)?;
+        crate::retention::set(&req)
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(StatusCode::OK)
+    }
+
+    /// The admin's explicit "apply the default to existing deployments".
+    /// Sequential and reported per deployment. It moves only deployments that
+    /// inherit the default: a value chosen for a deployment (`override`) and a
+    /// policy the user customized inside OpenSearch are both skipped, with the
+    /// CR left untouched.
+    async fn apply_default_retention(
+        scope: Scope,
+    ) -> Result<Json<Vec<RetentionApplyResult>>, ApiError> {
+        scope.require_admin()?;
+        let defaults = crate::retention::get().await.map_err(ApiError::internal)?;
+        let deps = crate::k8s::scoped_deployments(&scope)
+            .await
+            .map_err(ApiError::internal)?;
+        let mut out = Vec::with_capacity(deps.len());
+        for dep in deps {
+            let mut row = RetentionApplyResult {
+                name: dep.name().to_string(),
+                namespace: dep.namespace().to_string(),
+                outcome: String::new(),
+                days: None,
+                detail: String::new(),
+            };
+            let result = async {
+                let cr = crate::k8s::retention_of(&dep).await?;
+                let Some(days) = defaults.for_purpose(&cr.purpose) else {
+                    return Ok::<_, anyhow::Error>(("search", None));
+                };
+                // Skipped rows report what the deployment keeps, not the
+                // default it did not get.
+                let own = crate::retention::effective_days(&cr.purpose, cr.value.as_deref());
+                let source = crate::retention::source_of(
+                    &cr.purpose,
+                    cr.value.as_deref(),
+                    cr.source.as_deref(),
+                    &defaults,
+                );
+                if source == crate::retention::Source::Override {
+                    return Ok(("override", own));
+                }
+                let outcome =
+                    crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), false)
+                        .await?;
+                if outcome == crate::profiles::RetentionOutcome::Customized {
+                    return Ok((outcome.as_str(), own));
+                }
+                crate::k8s::set_retention(
+                    &dep,
+                    Some((days, crate::retention::Source::Default)),
+                    None,
+                )
+                .await?;
+                Ok((outcome.as_str(), Some(days)))
+            }
+            .await;
+            match result {
+                Ok((outcome, days)) => {
+                    row.outcome = outcome.to_string();
+                    row.days = days;
+                }
+                Err(e) => {
+                    row.outcome = "error".to_string();
+                    row.detail = format!("{e:#}");
+                }
+            }
+            out.push(row);
+        }
+        Ok(Json(out))
+    }
+
+    /// Where one deployment's retention stands, including whether the user
+    /// customized the policy inside OpenSearch (a live read).
+    async fn retention_status(
+        scope: Scope,
+        Json(req): Json<NameReq>,
+    ) -> Result<Json<RetentionStatus>, ApiError> {
+        let dep = scope.require(&req.name).await?;
+        Ok(Json(retention_status_of(&dep).await?))
+    }
+
+    async fn retention_status_of(
+        dep: &crate::scope::Deployment,
+    ) -> Result<RetentionStatus, ApiError> {
+        let cr = crate::k8s::retention_of(dep)
+            .await
+            .map_err(ApiError::internal)?;
+        let days = crate::retention::effective_days(&cr.purpose, cr.value.as_deref());
+        let defaults = crate::retention::get().await.map_err(ApiError::internal)?;
+        let default_days = defaults.for_purpose(&cr.purpose);
+        let source = if days.is_some() {
+            crate::retention::source_of(
+                &cr.purpose,
+                cr.value.as_deref(),
+                cr.source.as_deref(),
+                &defaults,
+            )
+            .as_str()
+        } else {
+            ""
+        };
+        let (state, detail) = if days.is_none() {
+            ("none".to_string(), String::new())
+        } else {
+            match crate::profiles::retention_state(dep, cr.stamp.as_deref()).await {
+                Ok(s) => (s.to_string(), String::new()),
+                Err(e) => ("unreachable".to_string(), format!("{e:#}")),
+            }
+        };
+        Ok(RetentionStatus {
+            purpose: cr.purpose,
+            days,
+            default_days,
+            source: source.to_string(),
+            state,
+            detail,
+        })
+    }
+
+    /// "Reset to default": overwrite the deployment's policy — customized or
+    /// not — with the installation default for its purpose, and stamp both on
+    /// the CR. The one path that replaces a user's edit, and only on request.
+    async fn reset_retention(
+        scope: Scope,
+        Json(req): Json<NameReq>,
+    ) -> Result<Json<RetentionStatus>, ApiError> {
+        let dep = scope.require(&req.name).await?;
+        let cr = crate::k8s::retention_of(&dep)
+            .await
+            .map_err(ApiError::internal)?;
+        let days = crate::retention::get()
+            .await
+            .map_err(ApiError::internal)?
+            .for_purpose(&cr.purpose)
+            .ok_or_else(|| {
+                ApiError::bad_request("a search deployment has no retention to reset")
+            })?;
+        crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), true)
+            .await
+            .map_err(ApiError::internal)?;
+        // Restoring the default also turns an override back into inheriting,
+        // so the next "apply default" moves this deployment again.
+        crate::k8s::set_retention(&dep, Some((days, crate::retention::Source::Default)), None)
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(Json(retention_status_of(&dep).await?))
+    }
+
     // ───────────────────────── handlers: access / security ─────────────
 
     /// Installation-wide dashboard-access configuration (ingress class, base
@@ -2393,7 +2642,7 @@ mod server {
         let dep = scope.require(&req.name).await?;
         let password = crate::k8s::reset_admin_password_random(&dep)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(reset_error)?;
         let (username, _) = crate::k8s::admin_creds(&dep).await;
         Ok(Json(DashCreds { username, password }))
     }
@@ -2405,8 +2654,19 @@ mod server {
         let dep = scope.require(&req.name).await?;
         crate::k8s::reset_admin_password(&dep, &req.new_password)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(reset_error)?;
         Ok(StatusCode::OK)
+    }
+
+    /// #115: a reset refused before anything was written is a 409 — the
+    /// deployment is busy, and the SPA shows its own wording for it. Every
+    /// other failure is a 500 whose message states whether the password
+    /// changed (`admin_reset::ResetError`).
+    fn reset_error(e: anyhow::Error) -> ApiError {
+        match e.downcast_ref::<crate::admin_reset::ResetError>() {
+            Some(crate::admin_reset::ResetError::Refused(_)) => ApiError::conflict(e.to_string()),
+            _ => ApiError::internal(e),
+        }
     }
 
     // ───────────────────────── SSE status stream (ADR-005) ─────────────
@@ -2498,6 +2758,8 @@ mod server {
         RoutePolicy { path: "/cluster_capacity", policy: AdminOnly, note: "host node CPU/mem/disk; aggregate info about everyone's footprint. A tenant's headroom is its quota (#84)." },
         RoutePolicy { path: "/access_settings", policy: AdminOnly, note: "installation ingress class / base domain / TLS Secret name." },
         RoutePolicy { path: "/save_access_settings", policy: AdminOnly, note: "writes that config and backfills Ingresses; admin-scoped backfill." },
+        RoutePolicy { path: "/save_retention_defaults", policy: AdminOnly, note: "the installation's default retention per purpose (ADR-062); touches no deployment." },
+        RoutePolicy { path: "/apply_default_retention", policy: AdminOnly, note: "rewrites the retention policy of EVERY deployment not customized by its user — cross-tenant by nature (ADR-062)." },
         // -- deployment surface --------------------------------------------
         RoutePolicy { path: "/list_deployments", policy: TenantScoped, note: "namespace + owner-label filtered (k8s::list_clusters)." },
         RoutePolicy { path: "/get_deployment", policy: TenantScoped, note: "unowned answers null, identically to nonexistent." },
@@ -2525,6 +2787,8 @@ mod server {
         RoutePolicy { path: "/plan_snapshot_config", policy: TenantScoped, note: "dry run over the STORED config — unscoped it would leak whether a bucket is set." },
         RoutePolicy { path: "/save_snapshot_config", policy: TenantScoped, note: "writes the repository slice, its Secret and the policy CR; resolve-before-mutate." },
         RoutePolicy { path: "/verify_snapshot_repo", policy: TenantScoped, note: "makes the deployment's nodes reach the bucket with its stored credentials." },
+        RoutePolicy { path: "/retention_status", policy: TenantScoped, note: "reads the deployment's retention off its CR and its ISM policy out of its OpenSearch (ADR-062)." },
+        RoutePolicy { path: "/reset_retention", policy: TenantScoped, note: "overwrites the deployment's ISM retention policy; resolve-before-mutate (ADR-062)." },
         RoutePolicy { path: "/deployment_activity_log", policy: TenantScoped, note: "Events, pod state and componentsStatus OF that deployment (ADR-050)." },
         // -- OTel observability stack (ADR-053) ---------------------------
         RoutePolicy { path: "/otel_stack_info", policy: Authenticated, note: "static component/image/resource-cost table out of the binary (otel_stack::resource_cost) — names no deployment and reads no cluster." },
@@ -2540,6 +2804,7 @@ mod server {
         // -- stateless helpers ---------------------------------------------
         RoutePolicy { path: "/sizing_presets", policy: Authenticated, note: "static preset table (k8s::sizing) — no cluster read." },
         RoutePolicy { path: "/custom_sizing", policy: Authenticated, note: "pure arithmetic on the submitted numbers." },
+        RoutePolicy { path: "/retention_defaults", policy: Authenticated, note: "the installation's default retention days per purpose, shown by the create wizard — no deployment, no secret (ADR-062)." },
         RoutePolicy { path: "/available_versions", policy: Authenticated, note: "the pinned catalog + the hourly upstream check — installation-wide data, no cluster read (ADR-048 rev. 2)." },
     ];
 
@@ -2601,6 +2866,12 @@ mod server {
             .route(p("/metrics_series"), post(metrics_series))
             .route(p("/access_settings"), get(get_access_settings))
             .route(p("/save_access_settings"), post(save_access_settings))
+            // -- default retention (ADR-062)
+            .route(p("/retention_defaults"), get(retention_defaults))
+            .route(p("/save_retention_defaults"), post(save_retention_defaults))
+            .route(p("/apply_default_retention"), post(apply_default_retention))
+            .route(p("/retention_status"), post(retention_status))
+            .route(p("/reset_retention"), post(reset_retention))
             .route(p("/dashboard_credentials"), post(dashboard_credentials))
             .route(p("/reset_admin_password"), post(reset_admin_password))
             .route(p("/auth_provider"), post(auth_provider))

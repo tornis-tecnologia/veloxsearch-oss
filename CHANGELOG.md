@@ -8,6 +8,127 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-27
+
+### Fixed
+- **The stuck-recovery remediation could still bounce a node that only
+  receives (#27/#96):** when its per-index lookup of the recovery source
+  failed or found no stalled row, it fell back to the node holding the
+  INITIALIZING replica, which is the receiver. Seen on OpenSearch 3.7.0: it
+  bounced `nodes-0` while every stalled recovery came from `nodes-1`, and the
+  stall stayed. The remediation now reads active recoveries cluster-wide,
+  bounces the node that is the source of the most recoveries stuck in `init`
+  at 0 bytes, checks that this node name is one of the deployment's node
+  pods, and logs the per-source counts it used. If there is no such source,
+  the top count is a tie, or the name matches no pod, it bounces nothing and
+  logs why.
+- **The stuck-recovery remediation bounces the recovery source, not the
+  target (#27/#96, #109).**
+- **The restart-wave watch could read a moving recovery as stuck (#96):**
+  without `bytes=b`, OpenSearch reports the recovered bytes as `208b`, which
+  was read as 0, the stuck signature. The watch now asks for raw bytes and
+  reads both forms. A byte count it cannot read no longer counts as zero.
+- **A recovery-throttle raise had no upper bound (#27/#96):** the raised
+  `node_concurrent_recoveries` was handed back only once every recovery had
+  settled. It is now also handed back when the remediation's 30-minute
+  episode ends. If the recoveries are still stuck by then, the next pass
+  starts a new episode.
+- **The Dashboards hold's 20-minute ceiling could release in the middle of a
+  rolling restart (#46, ADR-063):** a post-bootstrap roll that ran past 20
+  minutes had its hold released 19s after a node pod was re-created, and
+  Dashboards migrated on a red cluster. The ceiling now fires only once
+  every node is ready on the current revision and no node pod has been
+  created for two minutes. A cluster that stays yellow for good (for
+  example on single-copy storage) still gets its Dashboards at 20 minutes.
+- **The admin-reset backstop stopped watching after its restore (#115,
+  ADR-064):** it dropped the pending marker and the kept previous password
+  as soon as it restored, before the restore's own securityconfig Job had
+  run, so a failure of that Job went unseen. The backstop now watches the
+  restore until its Job succeeds and retries once (deleting the failed Job
+  so the operator runs it again, which needs a new namespaced `delete` on
+  `batch/jobs`). After that it marks the reset stalled on the CR, and a
+  new reset is refused with a 409 whose message says so (the SPA still
+  shows its generic "busy" text for every 409). The kept password is
+  dropped only on a confirmed success or an hour after the latest nudge.
+- **An admin-password reset during a rolling restart could take a deployment
+  down for good (#115, ADR-064):** the operator's one-shot securityconfig Job
+  failed against a cluster that was still rolling. The node probes had already
+  switched to the new password, so every node went unready, and the operator
+  never retries that Job. A reset is now refused with 409 unless the deployment
+  has settled (ADR-050) and no earlier reset is pending. If the operator cannot
+  be nudged, the Secret is rolled back and the error says the password was not
+  changed; before, the API returned 500 with the password already changed. If
+  the securityconfig Job fails anyway, the previous password (kept in the
+  credentials Secret for the reset window) is restored and the nodes recover.
+  `tests/day2_check.py` now waits for `settled`, not just `green`, before the
+  password step, and asserts the 409 during a roll.
+- **The Dashboards first-boot fix now sticks (#46):** the 0.10.5 run showed
+  the operator reverts the `Recreate` strategy and startup budget on its
+  Deployment within a second, and it reverted the remediation's 0/1 scale the
+  same way. The operator's CR has no probe or strategy field, so the fix now
+  goes through `spec.dashboards.replicas`.
+  - **First boot:** a new deployment's Dashboards is held at zero replicas.
+    The hold is released once velox's own verdict says everything but
+    Dashboards has settled and the node pool has been still for two
+    minutes, or once the cluster is 20 minutes old and initialized with its
+    nodes no longer rolling. It no longer uses the operator's lagging
+    `health`. The first migration
+    therefore runs on a settled cluster.
+  - **Enforcement:** the operator's first update of a new CR drops a zero
+    `replicas` (`omitempty` plus the CRD default of 1), so a post-create
+    watch and the metrics sampler write it again. A Dashboards that is
+    already serving is never scaled down, and a save never changes
+    Dashboards replicas.
+  - **Remediation:** the `.kibana_1` remediation holds and releases through
+    the CR, and it now actually arms. A deadlocked Dashboards is killed by
+    its startup probe, exits 0 and restarts at once, so it never showed the
+    `CrashLoopBackOff` the trigger required. On an otherwise settled
+    cluster, the stall that arms it was also never measured. The trigger is
+    now three restarts with the last one within 15 minutes.
+  - **Removed:** the Deployment patch, and the runtime `patch` grant on
+    Deployments (ADR-063).
+- **Upgrading could re-install the OpenSearch operator, grant cluster-admin
+  back, or downgrade (#54, ADR-057):** bootstrap applied its vendored operator
+  bundle (CRDs included, force-applied) whenever the operator was not Ready at
+  the moment it probed — which an operator restarting during a rollout is.
+  Bootstrap now installs only what is **absent**; an installed component that
+  is not Ready is waited on and reported, never re-applied. Upgrades no longer
+  grant cluster-admin: DEPLOY.md's upgrade applies the release's new
+  `upgrade.yaml` (below), and a `veloxsearch-bootstrap` binding re-created by
+  re-applying `install.yaml` is revoked again by the running app once bootstrap
+  is complete. `deploy/install.yaml` once pinned 0.8.1 while the crate was
+  0.9.0 (so did the 0.9.0 `velox` CLI, which embeds it); CI now fails when its
+  tag is not `Cargo.toml`'s version, and the release gate refuses a version
+  lower than the previous release.
+
+### Added
+- **Default retention per purpose (ADR-062):** Settings has an admin-only
+  "Default retention" block (observability and security days; out-of-box 30
+  and 90, the previous fixed values). The create wizard shows the effective
+  default for the chosen purpose and accepts a per-deployment override, stamped
+  on the CR together with whether it inherits the default or was chosen for
+  that deployment. An admin action applies the default to the existing
+  deployments that inherit it (never to one given its own value) and reports
+  per deployment what happened. Each deployment's Edit tab shows its
+  retention, whether the policy was customized, and a "restore default" button.
+- **`upgrade.yaml` release asset (ADR-057):** the release's `install.yaml`
+  without the one-time `veloxsearch-bootstrap` cluster-admin binding, derived
+  by `deploy/upgrade-manifest.sh`. Use it to upgrade; `install.yaml` stays the
+  first-install manifest.
+- **Operator drift is reported (R9, ADR-057):** the conformity report and a
+  notice above the main navigation show when the running operator's image
+  differs from the one this release vendors. Warn-only; nothing is changed.
+- **N-1 → N upgrade lane** (`.github/workflows/upgrade.yml`): installs the
+  previous release on minikube, brings a deployment to green, rolls the
+  candidate out with `upgrade.yaml`, and asserts the operator, CRDs and
+  `OpenSearchCluster` specs are unchanged and no cluster-admin was granted —
+  plus a variant that scales the operator to 0 and re-applies the full
+  `install.yaml`.
+### Changed
+- velox no longer overwrites a `velox-retention` ISM policy that the user
+  edited inside OpenSearch. Saves, retries and upgrades leave a customized
+  policy alone (ADR-062). Only "restore default" replaces it.
+
 ## [0.10.5] - 2026-09-24
 
 ### Changed

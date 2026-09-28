@@ -18,7 +18,7 @@ import { STR } from "./i18n.jsx";
 import { API, adaptDeployment } from "./api.jsx";
 import { Logo, Icon, Toast } from "./ui.jsx";
 import { AuthView } from "./views_auth.jsx";
-import { BootstrapView } from "./views_bootstrap.jsx";
+import { BootstrapView, OperatorDriftNotice } from "./views_bootstrap.jsx";
 import { StatusView } from "./views_status.jsx";
 import { CreateView } from "./views_create.jsx";
 import { CapacityView } from "./views_capacity.jsx";
@@ -75,6 +75,9 @@ function App() {
   // both warnings stay silent rather than guessing.
   const [hostNodes, setHostNodes] = useState([]);
   const [sseDead, setSseDead] = useState(false);
+  // The conformity probe the boot gate took. Kept for the operator-drift
+  // notice (ADR-057), which matters most on clusters that PASS the gate.
+  const [bootStatus, setBootStatus] = useState(null);
   // Which build is serving (#55). Installation-level and admin-only, so a
   // tenant session never asks (the route would 404 for it).
   const [isTenant, setIsTenant] = useState(false);
@@ -111,6 +114,7 @@ function App() {
       // to the main UI, which surfaces its own problems.
       try {
         const bs = await API.bootstrapStatus();
+        setBootStatus(bs);
         setBoot(bs && bs.ready ? "ready" : "bootstrap");
       } catch (e) {
         setBoot("ready");
@@ -191,7 +195,7 @@ function App() {
   // ── API-backed handlers ────────────────────────────────────────
   // Toast AND rethrow (same contract as toggleOtelStack): the wizard keeps its
   // submit button disabled until this settles and must re-arm it on failure.
-  async function createCluster({ name, purpose, size, sources, extra, memory, disk, version, snapshot }) {
+  async function createCluster({ name, purpose, size, sources, extra, memory, disk, version, snapshot, retentionDays }) {
     const monitors = Object.keys(sources || {}).filter(k => sources[k]).join(",");
     try {
       // Heads-up signal (ADR-031): a node-local/absent default means this create
@@ -214,6 +218,8 @@ function App() {
         // skipped. Same rule as `version`: create-only, because the slice has
         // its own write path and a save must never touch it.
         snapshot: snapshot || null,
+        // ADR-062: null = the installation default for the purpose.
+        retention_days: retentionDays || null,
       });
       showToast(installedLonghorn ? tr.storage_installed_toast : (tr.created_h + " ✓"));
       go({ name: "deployment", id: finalName, tab: "overview" });
@@ -249,7 +255,8 @@ function App() {
       showToast(tr.pass_reset);
       return c;
     } catch (e) {
-      showToast(e.message);
+      // 409: refused before anything changed — the deployment is busy (#115).
+      showToast(e.status === 409 ? tr.sec_reset_busy : e.message);
       throw e;
     }
   }
@@ -347,6 +354,8 @@ function App() {
           ))}
         </nav>
 
+        <OperatorDriftNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
+
         {route.name === "status" && (
           <StatusView deployments={deployments} lang={lang}
             onOpen={id => go({ name: "deployment", id, tab: "overview" })}
@@ -363,7 +372,7 @@ function App() {
           <CapacityView lang={lang} />
         )}
         {route.name === "settings" && (
-          <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} />
+          <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} isTenant={isTenant} />
         )}
         {route.name === "deployment" && (current
           ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}

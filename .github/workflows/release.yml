@@ -50,6 +50,13 @@ jobs:
             echo "::error::tag v$now already exists but Cargo.toml just changed to it"
             exit 1
           fi
+          # Versions only move forward. A lower version would publish a release
+          # whose install.yaml pins an OLDER image than the one already out,
+          # and applying it rolls installs back past forward-only migrations.
+          if [ -n "$before" ] && [ "$(printf '%s\n%s\n' "$before" "$now" | sort -V | tail -1)" != "$now" ]; then
+            echo "::error::Cargo.toml version went backwards ($before -> $now)"
+            exit 1
+          fi
           echo "version $before -> $now — releasing"
           echo "release=true" >> "$GITHUB_OUTPUT"
 
@@ -176,12 +183,18 @@ jobs:
           grep -q "@${{ needs.publish.outputs.digest }}" install.yaml \
             || { echo "::error::digest pin did not apply"; exit 1; }
 
+      # The artifact upgrades apply (ADR-057, #54): the same pinned manifest
+      # without the bootstrap cluster-admin binding, so rolling a release out
+      # over an existing install never re-grants cluster-admin.
+      - name: Derive the upgrade manifest
+        run: deploy/upgrade-manifest.sh install.yaml > upgrade.yaml
+
       - name: Build the velox CLI as a release asset
         run: |
           set -euo pipefail
           cargo build --release --bin velox
           cp target/release/velox velox-linux-amd64
-          sha256sum install.yaml velox-linux-amd64 > SHA256SUMS
+          sha256sum install.yaml upgrade.yaml velox-linux-amd64 > SHA256SUMS
 
       - name: Extract the changelog section
         id: notes
@@ -209,5 +222,6 @@ jobs:
           body_path: NOTES.md
           files: |
             install.yaml
+            upgrade.yaml
             velox-linux-amd64
             SHA256SUMS
