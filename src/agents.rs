@@ -37,9 +37,11 @@ const PRUNE_LUA: &str = include_str!("agents/k8s_events_prune.lua");
 /// the path gets the script mounted next to it (`agent_manifests`).
 const PRUNE_LUA_KEY: &str = "prune.lua";
 const PRUNE_LUA_PATH: &str = "/fluent-bit/etc/prune.lua";
-/// The `[FILTER]` block that runs `PRUNE_LUA` on every event record. One
-/// constant for the template and the #104 repair of existing collectors, so a
-/// repaired config is byte-identical to a freshly rendered one.
+/// The `[FILTER]` block that runs `PRUNE_LUA` on every event record. The core
+/// ships the script, so the core owns the stanza that calls it: it is added by
+/// `with_events_prune` when the collector is built, never carried by the
+/// recipe template or the registry package (whose `agent.conf.tmpl` stays
+/// byte-identical to the registry's).
 const EVENTS_PRUNE_FILTER: &str = "[FILTER]
     Name lua
     Match k8s_events
@@ -98,30 +100,27 @@ pub(crate) fn fluent_bit_conf_template(recipe: &str) -> String {
     // stream (in-cluster defaults: kube url/token/CA from the SA mount).
     // NOTE: this FB version's opensearch output has no Include_Time_Key (es
     // output only) — @timestamp comes from the k8s-events ingest pipeline.
-    // Every event passes EVENTS_PRUNE_FILTER first (#104): raw Event objects
-    // carry empty maps the OpenSearch mapper rejects.
     if recipe == "k8s-events" {
-        return format!(
-            r#"[SERVICE]
+        return r#"[SERVICE]
     Flush 5
     Log_Level info
 [INPUT]
     Name kubernetes_events
     Tag k8s_events
-{EVENTS_PRUNE_FILTER}[OUTPUT]
+[OUTPUT]
     Name opensearch
     Match *
-    Host {{os_host}}
+    Host {os_host}
     Port 9200
-    HTTP_User {{os_user}}
-    HTTP_Passwd {{os_password}}
+    HTTP_User {os_user}
+    HTTP_Passwd {os_password}
     tls On
     tls.verify Off
     Suppress_Type_Name On
-    Index {{index}}
+    Index {index}
     Trace_Error On
 "#
-        );
+        .to_string();
     }
     // Security sources are NODE files, not container logs: the kubernetes
     // metadata filter and CRI multiline parser don't apply. ssh/auth lines and
@@ -321,10 +320,32 @@ async fn apply_agent_workload(
     Ok(())
 }
 
+/// An events-watcher config (`kubernetes_events` input) with the prune stanza
+/// the core owns (#104) inserted before its first `[OUTPUT]`. Every other
+/// config comes back unchanged, and so does one that already calls the script
+/// (idempotent: never a second filter block, whether the core added it on an
+/// earlier apply or a future template carries it). Applies to whatever config
+/// reaches the builder — the compiled-in recipe and a registry package alike.
+fn with_events_prune(conf: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if !conf.contains("Name kubernetes_events") || conf.contains(PRUNE_LUA_PATH) {
+        return Cow::Borrowed(conf);
+    }
+    match conf.find("\n[OUTPUT]\n") {
+        Some(i) => Cow::Owned(format!(
+            "{}{EVENTS_PRUNE_FILTER}{}",
+            &conf[..=i],
+            &conf[i + 1..]
+        )),
+        None => Cow::Borrowed(conf),
+    }
+}
+
 /// The collector's ConfigMap and workload (DaemonSet when `tails_logs`, else a
 /// single-replica Deployment), built off-cluster so the shape is unit-tested.
-/// A config that runs the prune script (`PRUNE_LUA_PATH`, #104) gets the script
-/// as a second ConfigMap key and a second subPath mount — subPath because the
+/// An events watcher gets the prune stanza (`with_events_prune`), and a config
+/// that runs the prune script (`PRUNE_LUA_PATH`, #104) gets the script as a
+/// second ConfigMap key and a second subPath mount — subPath because the
 /// directory already holds the image's own files.
 fn agent_manifests(
     deployment: &Deployment,
@@ -332,6 +353,8 @@ fn agent_manifests(
     conf: &str,
     tails_logs: bool,
 ) -> (serde_json::Value, serde_json::Value) {
+    let conf = with_events_prune(conf);
+    let conf = conf.as_ref();
     let prune = conf.contains(PRUNE_LUA_PATH);
     let mut data = serde_json::json!({ "fluent-bit.conf": conf });
     let mut mounts = vec![serde_json::json!(
@@ -455,9 +478,10 @@ async fn repair_events_collector(client: &Client, dep: &Deployment) -> Result<bo
 /// workload is not velox's collector for `dep` (name label + target annotation
 /// both written by `agent_manifests`), when the config is not an events watcher
 /// with an `[OUTPUT]` to insert before, and when the filter, the current
-/// script and its mount are all already in place. The existing config is kept
-/// (with its credentials) and only gains `EVENTS_PRUNE_FILTER`, so a repaired
-/// config is byte-identical to a fresh render.
+/// script and its mount are all already in place. The existing config (with
+/// its credentials) is returned as-is: the re-apply goes through
+/// `agent_manifests`, whose `with_events_prune` adds the stanza exactly as it
+/// does on a fresh install, so both produce the same bytes.
 fn events_collector_repair(
     dep: &Deployment,
     workload: &serde_json::Value,
@@ -479,7 +503,11 @@ fn events_collector_repair(
     if !conf.contains("Name kubernetes_events") {
         return None;
     }
-    let has_filter = conf.contains(EVENTS_PRUNE_FILTER);
+    let desired = with_events_prune(conf);
+    if !desired.contains(PRUNE_LUA_PATH) {
+        return None;
+    }
+    let has_filter = desired == conf;
     let script_current = str_at(config_map, "/data/prune.lua") == Some(PRUNE_LUA);
     let mounted = workload
         .pointer("/spec/template/spec/containers")
@@ -492,16 +520,7 @@ fn events_collector_repair(
     if has_filter && script_current && mounted {
         return None;
     }
-    if has_filter {
-        return Some(conf.to_string());
-    }
-    conf.contains("\n[OUTPUT]\n").then(|| {
-        conf.replacen(
-            "\n[OUTPUT]\n",
-            &format!("\n{EVENTS_PRUNE_FILTER}[OUTPUT]\n"),
-            1,
-        )
-    })
+    Some(conf.to_string())
 }
 
 /// Remove a recipe's agent for one deployment (plus any pre-rename legacy
@@ -531,17 +550,23 @@ mod tests {
         Deployment::for_test("logs-ab12", crate::k8s::ns(), None)
     }
 
+    fn events_agent() -> String {
+        agent_name(&dep(), "k8s-events")
+    }
+
+    /// The rendered recipe config — byte-identical to the registry package's
+    /// rendering (`registry_golden::agent_config_is_frozen_rust_output`).
     fn events_conf() -> String {
         fluent_bit_conf(&dep(), "k8s-events", "admin", "s3cr3t-pw")
     }
 
-    /// What a collector shipped before #104 carried: the same render without
-    /// the prune filter, and the workload built from it (no script, no mount).
-    fn pre_fix_collector() -> (String, serde_json::Value, serde_json::Value) {
-        let conf = events_conf().replace(EVENTS_PRUNE_FILTER, "");
-        let agent = agent_name(&dep(), "k8s-events");
-        let (cm, workload) = agent_manifests(&dep(), &agent, &conf, false);
-        (conf, cm, workload)
+    /// What the builder deploys for a fresh install: (ConfigMap, Deployment).
+    fn fresh() -> (serde_json::Value, serde_json::Value) {
+        agent_manifests(&dep(), &events_agent(), &events_conf(), false)
+    }
+
+    fn deployed_conf(cm: &serde_json::Value) -> &str {
+        cm["data"]["fluent-bit.conf"].as_str().unwrap()
     }
 
     fn mount_paths(workload: &serde_json::Value) -> Vec<String> {
@@ -553,25 +578,79 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn events_config_runs_the_prune_filter_before_the_output() {
-        let conf = events_conf();
-        let filter = conf.find(EVENTS_PRUNE_FILTER).expect("prune filter");
-        assert!(filter < conf.find("[OUTPUT]").unwrap());
-        assert!(conf.contains(PRUNE_LUA_PATH));
-        // The filter matches the input's tag, or it would filter nothing.
-        assert!(
-            conf.contains("Tag k8s_events") && EVENTS_PRUNE_FILTER.contains("Match k8s_events")
-        );
+    /// What a collector shipped before #104 carried: the plain rendered config,
+    /// no script key, no script mount.
+    fn pre_fix_collector() -> (serde_json::Value, serde_json::Value) {
+        let (_, mut workload) = fresh();
+        let cm = serde_json::json!({ "data": { "fluent-bit.conf": events_conf() } });
+        workload["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|m| m["mountPath"] != PRUNE_LUA_PATH);
+        (cm, workload)
     }
 
     #[test]
-    fn only_the_events_recipe_ships_the_script() {
-        for recipe in crate::recipes::RECIPES {
+    fn the_recipe_template_stays_the_registry_template() {
+        // The core owns the stanza; the template (= the registry package's
+        // agent.conf.tmpl) must not carry it, or the golden gate drifts.
+        assert!(!fluent_bit_conf_template("k8s-events").contains(PRUNE_LUA_PATH));
+    }
+
+    #[test]
+    fn deployed_events_config_runs_the_filter_once_before_the_output() {
+        let (cm, _) = fresh();
+        let conf = deployed_conf(&cm);
+        assert_eq!(conf.matches(EVENTS_PRUNE_FILTER).count(), 1);
+        assert_eq!(conf.matches("Name lua").count(), 1);
+        assert!(conf.find(EVENTS_PRUNE_FILTER).unwrap() < conf.find("[OUTPUT]").unwrap());
+        // The filter matches the input's tag, or it would filter nothing.
+        assert!(conf.contains("Tag k8s_events"));
+        assert!(EVENTS_PRUNE_FILTER.contains("Match k8s_events"));
+        // Nothing else moved: removing the stanza gives back the render.
+        assert_eq!(conf.replace(EVENTS_PRUNE_FILTER, ""), events_conf());
+    }
+
+    #[test]
+    fn a_template_that_already_calls_the_script_is_not_doubled() {
+        let (cm, workload) = fresh();
+        let already = deployed_conf(&cm).to_string();
+        let (again_cm, again_workload) = agent_manifests(&dep(), &events_agent(), &already, false);
+        assert_eq!(deployed_conf(&again_cm).matches("Name lua").count(), 1);
+        assert_eq!((again_cm, again_workload), (cm, workload));
+    }
+
+    #[test]
+    fn a_registry_package_config_gets_the_same_filter() {
+        // The package path hands the builder the package template rendered by
+        // the engine; the stanza is added there too, byte for byte.
+        let vars = crate::integrations::Vars::new(
+            &dep(),
+            crate::recipes::recipe_index("k8s-events"),
+            "k8s-events",
+            "admin",
+            "s3cr3t-pw",
+        );
+        let pkg_conf =
+            crate::integrations::render(&fluent_bit_conf_template("k8s-events"), &vars).unwrap();
+        let (cm, workload) = agent_manifests(&dep(), &events_agent(), &pkg_conf, false);
+        assert_eq!((cm, workload), fresh());
+    }
+
+    #[test]
+    fn no_other_integration_config_changes() {
+        for recipe in crate::recipes::RECIPES
+            .iter()
+            .filter(|r| **r != "k8s-events")
+        {
             let conf = fluent_bit_conf(&dep(), recipe, "admin", "pw");
-            assert_eq!(
-                conf.contains(PRUNE_LUA_PATH),
-                *recipe == "k8s-events",
+            let agent = agent_name(&dep(), recipe);
+            let (cm, workload) = agent_manifests(&dep(), &agent, &conf, true);
+            assert_eq!(deployed_conf(&cm), conf, "{recipe}");
+            assert!(cm["data"].get(PRUNE_LUA_KEY).is_none(), "{recipe}");
+            assert_eq!(workload["kind"], "DaemonSet");
+            assert!(
+                !mount_paths(&workload).contains(&PRUNE_LUA_PATH.to_string()),
                 "{recipe}"
             );
         }
@@ -579,24 +658,13 @@ mod tests {
 
     #[test]
     fn events_collector_mounts_the_script_from_its_config_map() {
-        let agent = agent_name(&dep(), "k8s-events");
-        let (cm, workload) = agent_manifests(&dep(), &agent, &events_conf(), false);
+        let (cm, workload) = fresh();
         assert_eq!(cm["data"][PRUNE_LUA_KEY], PRUNE_LUA);
         assert_eq!(workload["kind"], "Deployment");
         let mounts = &workload["spec"]["template"]["spec"]["containers"][0]["volumeMounts"];
         assert!(mounts.as_array().unwrap().contains(&serde_json::json!(
             {"name":"config","mountPath":PRUNE_LUA_PATH,"subPath":PRUNE_LUA_KEY}
         )));
-    }
-
-    #[test]
-    fn tailers_do_not_get_the_script() {
-        let agent = agent_name(&dep(), "nginx");
-        let conf = fluent_bit_conf(&dep(), "nginx", "admin", "pw");
-        let (cm, workload) = agent_manifests(&dep(), &agent, &conf, true);
-        assert!(cm["data"].get(PRUNE_LUA_KEY).is_none());
-        assert_eq!(workload["kind"], "DaemonSet");
-        assert!(!mount_paths(&workload).contains(&PRUNE_LUA_PATH.to_string()));
     }
 
     #[test]
@@ -611,23 +679,18 @@ mod tests {
     }
 
     #[test]
-    fn repair_turns_a_pre_fix_collector_into_a_fresh_render() {
-        let (_, cm, workload) = pre_fix_collector();
+    fn repair_and_fresh_install_produce_the_same_bytes() {
+        let (cm, workload) = pre_fix_collector();
+        let conf = events_collector_repair(&dep(), &workload, &cm).expect("needs repair");
         assert_eq!(
-            events_collector_repair(&dep(), &workload, &cm),
-            Some(events_conf())
+            agent_manifests(&dep(), &events_agent(), &conf, false),
+            fresh()
         );
     }
 
     #[test]
     fn repair_is_a_no_op_on_a_fixed_collector() {
-        let agent = agent_name(&dep(), "k8s-events");
-        let (cm, workload) = agent_manifests(&dep(), &agent, &events_conf(), false);
-        assert_eq!(events_collector_repair(&dep(), &workload, &cm), None);
-        // …including one this repair itself produced.
-        let (_, old_cm, old_workload) = pre_fix_collector();
-        let repaired = events_collector_repair(&dep(), &old_workload, &old_cm).unwrap();
-        let (cm, workload) = agent_manifests(&dep(), &agent, &repaired, false);
+        let (cm, workload) = fresh();
         assert_eq!(events_collector_repair(&dep(), &workload, &cm), None);
     }
 
@@ -635,22 +698,23 @@ mod tests {
     fn repair_finishes_a_half_patched_collector() {
         // Filter in the config but no mount (the first step of the manual
         // playbook): Fluent Bit fails Lua init, so it still needs the apply.
-        let (_, mut cm, workload) = pre_fix_collector();
-        cm["data"]["fluent-bit.conf"] = events_conf().into();
+        let (mut cm, workload) = pre_fix_collector();
+        let (fixed_cm, _) = fresh();
+        cm["data"]["fluent-bit.conf"] = fixed_cm["data"]["fluent-bit.conf"].clone();
+        let conf = events_collector_repair(&dep(), &workload, &cm).expect("needs repair");
         assert_eq!(
-            events_collector_repair(&dep(), &workload, &cm),
-            Some(events_conf())
+            agent_manifests(&dep(), &events_agent(), &conf, false),
+            fresh()
         );
         // A stale script is re-shipped too.
-        let agent = agent_name(&dep(), "k8s-events");
-        let (mut cm, workload) = agent_manifests(&dep(), &agent, &events_conf(), false);
+        let (mut cm, workload) = fresh();
         cm["data"][PRUNE_LUA_KEY] = "-- old".into();
         assert!(events_collector_repair(&dep(), &workload, &cm).is_some());
     }
 
     #[test]
     fn repair_never_touches_a_collector_velox_does_not_manage() {
-        let (_, cm, workload) = pre_fix_collector();
+        let (cm, workload) = pre_fix_collector();
         let mut foreign_target = workload.clone();
         foreign_target["spec"]["template"]["metadata"]["annotations"]["veloxsearch.ai/target"] =
             "someone-else".into();
