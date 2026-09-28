@@ -2472,6 +2472,25 @@ pub async fn wait_available(dep: &Deployment, part: &str, secs: u64) -> Result<(
 pub struct PolicyResult<T> {
     pub policy_id: &'static str,
     pub outcome: std::result::Result<T, String>,
+    /// Non-fatal: the policy is written, but some index it governs could not
+    /// be moved onto the new version. Empty when there is nothing to say.
+    pub detail: String,
+}
+
+/// The index patterns a stack policy's managed indices are looked up under.
+///
+/// Its own `ism_template` pattern, plus, for the service map, the physical
+/// index behind that alias (`SERVICE_MAP_INDEX`): whether Data Prepper names
+/// the physical index after the alias depends on its version, and a lookup
+/// that only knows one of the two names skips the service map on the other.
+/// Widening is safe because [`crate::retention::stale_indices`] keeps only
+/// the indices this policy id manages.
+fn governed_patterns(pattern: &'static str) -> Vec<&'static str> {
+    if pattern == SERVICE_MAP_PATTERN {
+        vec![SERVICE_MAP_PATTERN, SERVICE_MAP_INDEX]
+    } else {
+        vec![pattern]
+    }
 }
 
 /// Apply `days` to the stack's three ISM policies, once (ADR-062 §3, §6).
@@ -2499,6 +2518,7 @@ pub async fn ensure_retention(
             .map(|(id, _)| PolicyResult {
                 policy_id: id,
                 outcome: Err(format!("{e:#}")),
+                detail: String::new(),
             })
             .collect()
     };
@@ -2530,25 +2550,47 @@ pub async fn ensure_retention(
             |live| ism_is_current(live, pattern, &age),
         )
         .await;
+        let mut detail = String::new();
         let outcome = match applied {
             Ok((outcome, written)) => {
+                // Every index this policy governs goes onto the version now
+                // live — after a rewrite, and also when the policy was already
+                // current, so an index a previous pass failed to move is
+                // caught up by the next one. A customized policy is not
+                // velox's, and its indices are left as they are.
+                if let (Some(stamp), true) = (
+                    written.as_deref(),
+                    matches!(
+                        outcome,
+                        RetentionOutcome::Updated | RetentionOutcome::Unchanged
+                    ),
+                ) {
+                    if let Err(e) = crate::retention::reattach(
+                        &c,
+                        (&u, &p),
+                        &base,
+                        policy_id,
+                        &governed_patterns(pattern),
+                        stamp,
+                    )
+                    .await
+                    {
+                        tracing::warn!("otel stack: re-attaching {policy_id} on {dep}: {e}");
+                        detail = e;
+                    }
+                }
                 if let Some(stamp) = written {
                     known.insert(policy_id.to_string(), stamp);
-                }
-                if outcome == RetentionOutcome::Updated {
-                    // Best-effort: fails harmlessly when no index matches yet.
-                    let _ = c
-                        .post(format!("{base}/_plugins/_ism/change_policy/{pattern}"))
-                        .basic_auth(&u, Some(&p))
-                        .json(&serde_json::json!({ "policy_id": policy_id }))
-                        .send()
-                        .await;
                 }
                 Ok(outcome)
             }
             Err(e) => Err(format!("{e:#}")),
         };
-        out.push(PolicyResult { policy_id, outcome });
+        out.push(PolicyResult {
+            policy_id,
+            outcome,
+            detail,
+        });
     }
 
     if known != before {
@@ -2584,7 +2626,11 @@ pub async fn retention_state(
             .map_err(|e| format!("{e:#}")),
             Err(e) => Err(format!("{e:#}")),
         };
-        out.push(PolicyResult { policy_id, outcome });
+        out.push(PolicyResult {
+            policy_id,
+            outcome,
+            detail: String::new(),
+        });
     }
     out
 }
@@ -4429,6 +4475,34 @@ mod tests {
                 "no Service for component {part}"
             );
         }
+    }
+
+    #[test]
+    fn every_policy_looks_its_indices_up_under_its_own_pattern() {
+        // The re-attach after "apply default" / "restore default" (ADR-062 §6)
+        // finds the indices through these; the service map must be found
+        // whichever name its physical index has.
+        for (_, pattern) in ISM_POLICIES {
+            assert!(governed_patterns(pattern).contains(&pattern));
+        }
+        let svc = governed_patterns(SERVICE_MAP_PATTERN);
+        assert!(svc.contains(&SERVICE_MAP_INDEX));
+        let e = serde_json::json!({
+            "otel-v2-apm-service-map-000001": {
+                "policy_id": "otel-v2-apm-service-map-policy",
+                "policy_seq_no": 41, "policy_primary_term": 3
+            }
+        });
+        // The index the live run left behind matches one of the patterns and
+        // is reported stale against the rewritten policy's stamp.
+        let index = "otel-v2-apm-service-map-000001";
+        assert!(svc
+            .iter()
+            .any(|p| index.starts_with(p.trim_end_matches('*'))));
+        assert_eq!(
+            crate::retention::stale_indices(&e, "otel-v2-apm-service-map-policy", "67:3"),
+            vec![index]
+        );
     }
 
     #[test]

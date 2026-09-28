@@ -162,7 +162,12 @@ under the same rules as `velox-retention`:
   (<n>d)`, which is unchanged from every earlier install, so an existing stack
   reads as velox's and not as customized. A policy velox rewrites is
   re-attached to the indices it already manages (`change_policy`), because ISM
-  keeps a managed index on the policy version it started with.
+  keeps a managed index on the policy version it started with. Which indices
+  those are comes from `explain` (filtered by policy id, and for the service
+  map looked up under its physical index name as well as the alias). They are
+  moved by name, and the response is checked, with refused indices retried.
+  This also runs when the policy was already current, so a pass heals an
+  index that an earlier one could not move.
 - **When they are written.** Only on the stack install, the admin's "apply
   default to existing deployments", and the per-deployment "restore default".
   A VeloxSearch upgrade and a deployment save never touch them (ADR-057). On

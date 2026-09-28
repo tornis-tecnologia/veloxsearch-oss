@@ -57,6 +57,17 @@ are called out explicitly.
   CRD rejects (422). The revert is now a merge patch that deletes exactly the
   keys the stack set, so an emptied map stays `{}`. Turning the
   next-generation UI off reverts its own keys the same way.
+- After "restore default", an OTel stack index could stay on the old
+  version of its ISM policy (seen on the service map) while the policy
+  itself moved on (ADR-062 §6). The re-attach was a single `change_policy`
+  on the index pattern whose response was never read, so a per-index refusal
+  was lost. It now asks `explain` which indices each policy governs, under
+  its pattern and, for the service map, its physical index name too, and
+  moves the ones on an older version by name. It reads the response and
+  retries refused indices a bounded number of times. It also runs when the
+  policy was already current, so a later pass catches up an index an earlier
+  one missed. Whatever is still refused shows in that policy's row of the
+  apply report.
 
 ## [0.11.0] - 2026-09-27
 
