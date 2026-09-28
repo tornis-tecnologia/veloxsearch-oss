@@ -75,7 +75,11 @@ pub(crate) fn pseudonym_key() -> String {
     secret()
 }
 fn secure_cookie() -> bool {
-    env_or("VELOX_COOKIE_SECURE", "0") == "1"
+    cookie_secure_from(std::env::var("VELOX_COOKIE_SECURE").ok().as_deref())
+}
+/// Pure parse of `VELOX_COOKIE_SECURE`; absent means "0" (#128).
+pub(crate) fn cookie_secure_from(v: Option<&str>) -> bool {
+    v.unwrap_or("0") == "1"
 }
 
 fn secret_str(s: &Secret, key: &str) -> Option<String> {

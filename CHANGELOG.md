@@ -8,7 +8,23 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Upgrade notes
+- **GitOps with pruning (Argo CD, Flux): own `veloxsearch-env` BEFORE you
+  bump to this release, or the sync DELETES it.** `upgrade.yaml` no longer
+  carries the `veloxsearch-env` ConfigMap (#128). A tool that renders
+  `upgrade.yaml` and prunes will remove the ConfigMap; the next Pod then
+  cannot start and your settings are gone. Add the ConfigMap, with the values
+  you run today, to your own overlay (or annotate it
+  `argocd.argoproj.io/sync-options: Prune=false`) first. See DEPLOY.md,
+  "GitOps installs". `kubectl apply -f upgrade.yaml` users need do nothing.
+
 ### Added
+- Release notes now open with an **Upgrade:** line that says whether
+  `kubectl set image` is enough or `upgrade.yaml` has to be applied, with the
+  RBAC, config and other manifest changes listed. `deploy/manifest-changes.sh`
+  compares the previous release's `install.yaml` with the new one, ignoring
+  the image reference, and CI writes the same verdict for every PR to its job
+  summary. See "When is an image-only upgrade enough?" in `docs/DEPLOY.md`.
 - `GET /api/cluster_profile[?names=true]`: a read-only cluster profile
   (ADR-060, #59). It is one bounded JSON document covering size, shape, load
   and health: host nodes and storage for the admin, per-deployment indices,
@@ -41,6 +57,21 @@ are called out explicitly.
   those two actions.
 
 ### Fixed
+- **Self-serve signup never provisioned tenant isolation (#122):** the
+  runtime ClusterRole in `deploy/install.yaml` had no grant for
+  `resourcequotas`, `limitranges` or `networkpolicies`, so the server-side
+  apply of every tenant's ResourceQuota, LimitRange and default-deny
+  NetworkPolicy set was forbidden. Tenants got a namespace and no walls, and
+  signup still reported success. The ClusterRole now grants `get`, `create`
+  and `patch` on those three resources (no `update`, no `delete`), and
+  `upgrade.yaml` carries it. A test fails the build if a tenant template kind
+  is not appliable by the shipped ClusterRole.
+- **A failed tenant provisioning was only a log line (#122):** tenants whose
+  latest provisioning outcome is not a success are now listed to the admin
+  as a notice (`bootstrap_status.unisolated_tenants`) and re-provisioned at
+  startup, then after 5 min, 15 min, 1 h and every 6 h. Existing tenants
+  created before this fix are provisioned on the first start of the new
+  release. Signup itself is unchanged.
 - The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
   e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
   answered, and records nothing when none did.
@@ -68,6 +99,17 @@ are called out explicitly.
   policy was already current, so a later pass catches up an index an earlier
   one missed. Whatever is still refused shows in that policy's row of the
   apply report.
+- **Upgrading reset the operator's settings (#128):** applying a release's
+  `upgrade.yaml` re-applied the `veloxsearch-env` ConfigMap with the shipped
+  defaults, so values the operator had set there (`VELOX_PG_ENABLED`,
+  `VELOX_MULTITENANT_AUTH`, SMTP, …) reverted on every upgrade; turning
+  multitenancy off broke tenant sign-in. `upgrade.yaml` now leaves the
+  ConfigMap out: `install.yaml` creates it once and it is the operator's from
+  then on. Every key has a default in the binary equal to the shipped value,
+  so a release that adds a key needs no ConfigMap change; a test fails the
+  build if a shipped key lacks one or if an env var would need a ConfigMap key
+  to exist. The N-1 → N upgrade lane sets a non-default value before the
+  upgrade and asserts it reaches the new Pod unchanged (ADR-057).
 
 ## [0.11.0] - 2026-09-27
 

@@ -1,0 +1,79 @@
+# Fixture for tests/manifest_changes_check.py: the "previous release".
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: veloxsearch-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: veloxsearch-runtime
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: veloxsearch-runtime
+  namespace: veloxsearch-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: veloxsearch-runtime
+subjects:
+  - kind: ServiceAccount
+    name: veloxsearch
+    namespace: veloxsearch-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: veloxsearch-env
+  namespace: veloxsearch-system
+data:
+  RUST_LOG: "info"
+  VELOX_COOKIE_SECURE: "0"
+  init.sh: |
+    #!/bin/sh
+    set -eu
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: veloxsearch
+  namespace: veloxsearch-system
+  labels: { app: veloxsearch }
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: veloxsearch
+          image: docker.io/tornistecnologia/veloxsearch-oss:1.0.0
+          envFrom:
+            - configMapRef:
+                name: veloxsearch-env
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits: { memory: "512Mi", cpu: "500m" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: veloxsearch
+  namespace: veloxsearch-system
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      nodePort: 30080
