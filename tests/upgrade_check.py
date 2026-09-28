@@ -137,6 +137,10 @@ def kubectl_json(*args):
 
 
 HOLD_ANNOTATION = "veloxsearch.ai/dashboards-hold"
+# Fully qualified: the vendored operator also ships the legacy
+# opensearch.opster.io CRD with the same plural, and a bare
+# `opensearchclusters` resolves to that empty one.
+OSC_RESOURCE = "opensearchclusters.opensearch.org"
 
 
 def wait_hold_released(name, secs):
@@ -149,7 +153,7 @@ def wait_hold_released(name, secs):
     """
     deadline = time.time() + secs
     while time.time() < deadline:
-        items = kubectl_json("get", "opensearchclusters", "-A")["items"]
+        items = kubectl_json("get", OSC_RESOURCE, "-A")["items"]
         cr = next((i for i in items if i["metadata"]["name"] == name), None)
         if cr is None:
             fail(f"no OpenSearchCluster named {name}")
@@ -189,7 +193,7 @@ def snapshot():
     for crd in kubectl_json("get", "customresourcedefinitions")["items"]:
         if crd["spec"]["group"] in CRD_GROUPS:
             snap[f"crd/{crd['metadata']['name']}"] = record(crd)
-    for cr in kubectl_json("get", "opensearchclusters.opensearch.org", "-A")["items"]:
+    for cr in kubectl_json("get", OSC_RESOURCE, "-A")["items"]:
         m = cr["metadata"]
         snap[f"opensearchcluster/{m['namespace']}/{m['name']}"] = record(cr)
     if not any(k.startswith("opensearchcluster/") for k in snap):
