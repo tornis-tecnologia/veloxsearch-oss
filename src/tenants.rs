@@ -521,11 +521,13 @@ pub async fn run_isolation_reconcile() {
     if !enabled() {
         return;
     }
-    for pass in 0u32.. {
+    let mut pass = 0u32;
+    loop {
         tokio::time::sleep(reconcile_delay(pass)).await;
         if let Err(e) = reconcile_isolation_once().await {
             tracing::warn!("tenant isolation reconcile pass failed: {e:#}");
         }
+        pass = pass.saturating_add(1);
     }
 }
 
