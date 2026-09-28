@@ -94,6 +94,19 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["create", "patch"]
+  # Tenant isolation (#81, #122, ADR-044): signup server-side-applies the
+  # deploy/tenant-templates/ ResourceQuota, LimitRange and NetworkPolicy set
+  # into each `velox-t-<slug>` namespace. A server-side apply is a PATCH, and
+  # one that creates the object also needs `create`. No `update` (nothing
+  # replaces these) and no `delete` (there is no tenant teardown; deleting the
+  # namespace would take them with it). Cluster-scoped because tenant
+  # namespaces are created at runtime and no Role can pre-exist in them.
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "patch"]
   # Conformity probe (REQUIREMENTS.md): CRDs present? version? storage? nodes?
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]

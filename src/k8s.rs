@@ -7621,6 +7621,74 @@ mod tests {
         );
     }
 
+    // ── runtime RBAC covers tenant isolation (#122) ───────────────────
+
+    /// Every kind `provision_tenant` applies must be appliable by the runtime
+    /// ClusterRole as shipped in `deploy/install.yaml`. Server-side apply is a
+    /// PATCH that creates the object when absent, so `get`, `create` and
+    /// `patch` are the floor. Tenant namespaces are created at runtime, so the
+    /// grant has to be cluster-scoped: no Role can pre-exist inside them.
+    ///
+    /// A template kind added without its grant fails here, not at a
+    /// customer's signup (#122: every tenant ran without walls because this
+    /// grant was documented but never shipped).
+    #[test]
+    fn runtime_cluster_role_can_apply_every_tenant_template_kind() {
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let cluster = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .find(|v| {
+                v["kind"].as_str() == Some("ClusterRole")
+                    && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+            })
+            .expect("runtime ClusterRole");
+        let grants = |group: &str, resource: &str, verb: &str| {
+            cluster["rules"]
+                .as_sequence()
+                .into_iter()
+                .flatten()
+                .any(|r| {
+                    let has = |k: &str, x: &str| {
+                        r[k].as_sequence()
+                            .into_iter()
+                            .flatten()
+                            .any(|e| e.as_str() == Some(x))
+                    };
+                    has("apiGroups", group) && has("resources", resource) && has("verbs", verb)
+                })
+        };
+
+        let bundle = rendered();
+        assert!(!bundle.is_empty());
+        for doc in &bundle {
+            let kind = doc["kind"].as_str().expect("template has a kind");
+            let api_version = doc["apiVersion"]
+                .as_str()
+                .expect("template has an apiVersion");
+            let group = api_version.split_once('/').map_or("", |(g, _)| g);
+            // Kind → REST resource. Explicit on purpose: a naive plural gets
+            // NetworkPolicy wrong, and a new kind must be looked at, not guessed.
+            let resource = match kind {
+                "Namespace" => "namespaces",
+                "ResourceQuota" => "resourcequotas",
+                "LimitRange" => "limitranges",
+                "NetworkPolicy" => "networkpolicies",
+                other => panic!(
+                    "tenant template kind {other} is new: map it to its resource here and \
+                     grant it to the runtime ClusterRole in deploy/install.yaml"
+                ),
+            };
+            for verb in ["get", "create", "patch"] {
+                assert!(
+                    grants(group, resource, verb),
+                    "the runtime ClusterRole cannot `{verb}` {resource} (apiGroup \
+                     {group:?}) — provision_tenant would be forbidden on {kind}"
+                );
+            }
+        }
+    }
+
     // ── stall-remediation policy (#27) ─────────────────────────────────
     //
     // The ACTIONS (throttle raise, pod bounce) are fleet-validated, not
