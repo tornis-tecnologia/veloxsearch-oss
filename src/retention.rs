@@ -419,6 +419,134 @@ pub async fn apply_once(
     Ok((RetentionOutcome::Updated, policy_stamp(&doc)))
 }
 
+/// The indices `explain` reports as governed by `policy_id` but still running
+/// an older version of it than `stamp` (`seq_no:primary_term`).
+///
+/// ISM keeps a managed index on the policy version it started with, so a
+/// rewritten policy only reaches the indices it already manages through
+/// `change_policy`. This is the list that call has to cover. It is filtered by
+/// policy id, not by index name, which is what makes it safe to explain a wide
+/// pattern. An index that ISM has not initialized yet carries no version and
+/// is skipped: it starts on the live one anyway.
+pub fn stale_indices(explain: &serde_json::Value, policy_id: &str, stamp: &str) -> Vec<String> {
+    let Some(map) = explain.as_object() else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = map
+        .iter()
+        .filter_map(|(index, v)| {
+            let id = v
+                .get("policy_id")
+                .or_else(|| v.get("index.plugins.index_state_management.policy_id"))?
+                .as_str()?;
+            let seq = v.get("policy_seq_no")?.as_i64()?;
+            let term = v.get("policy_primary_term")?.as_i64()?;
+            (id == policy_id && format!("{seq}:{term}") != stamp).then(|| index.clone())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The indices a `change_policy` response says it did not update, with the
+/// reason, minus the ones that are simply not managed (nothing to re-attach).
+///
+/// The response is how a per-index refusal shows up: an index mid-transition,
+/// or a concurrent write to its managed-index job (a bulk version conflict).
+/// The call itself still answers 200 in both cases.
+pub fn change_policy_failures(resp: &serde_json::Value) -> Vec<(String, String)> {
+    resp["failed_indices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| {
+            let index = f["index_name"].as_str()?.to_string();
+            let reason = f["reason"].as_str().unwrap_or_default().to_string();
+            (!reason.contains("not being managed")).then_some((index, reason))
+        })
+        .collect()
+}
+
+/// How many times a refused `change_policy` is retried, and how long apart.
+const REATTACH_ATTEMPTS: u32 = 3;
+const REATTACH_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Move every index `policy_id` governs, under any of `patterns`, onto the
+/// policy's live version `stamp`. Returns how many were moved.
+///
+/// Checked, where the call it replaces was fire-and-forget: the indices are
+/// named explicitly (from [`stale_indices`]), the response is read, and the
+/// ones ISM refused are retried a bounded number of times. What is still
+/// refused after that is the error, by index and reason.
+pub async fn reattach(
+    c: &reqwest::Client,
+    auth: (&str, &str),
+    base: &str,
+    policy_id: &str,
+    patterns: &[&str],
+    stamp: &str,
+) -> std::result::Result<usize, String> {
+    let (u, p) = auth;
+    let mut stale = std::collections::BTreeSet::new();
+    for pattern in patterns {
+        let explain: serde_json::Value = match c
+            .get(format!("{base}/_plugins/_ism/explain/{pattern}"))
+            .basic_auth(u, Some(p))
+            .send()
+            .await
+        {
+            // No index matching the pattern is a 200 with nothing in it on
+            // current ISM, a 404 on older builds: either way, nothing to move.
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+            Ok(_) => continue,
+            Err(e) => return Err(format!("explaining {pattern}: {e}")),
+        };
+        stale.extend(stale_indices(&explain, policy_id, stamp));
+    }
+    let total = stale.len();
+    let mut pending: Vec<String> = stale.into_iter().collect();
+    let mut last = Vec::new();
+    for attempt in 0..REATTACH_ATTEMPTS {
+        if pending.is_empty() {
+            return Ok(total);
+        }
+        if attempt > 0 {
+            tokio::time::sleep(REATTACH_BACKOFF).await;
+        }
+        let resp = c
+            .post(format!(
+                "{base}/_plugins/_ism/change_policy/{}",
+                pending.join(",")
+            ))
+            .basic_auth(u, Some(p))
+            .json(&serde_json::json!({ "policy_id": policy_id }))
+            .send()
+            .await;
+        last = match resp {
+            Ok(r) if r.status().is_success() => {
+                change_policy_failures(&r.json().await.unwrap_or_default())
+            }
+            Ok(r) => {
+                let why = format!("HTTP {}", r.status());
+                pending.iter().map(|i| (i.clone(), why.clone())).collect()
+            }
+            Err(e) => pending.iter().map(|i| (i.clone(), e.to_string())).collect(),
+        };
+        pending = last.iter().map(|(i, _)| i.clone()).collect();
+    }
+    if pending.is_empty() {
+        return Ok(total);
+    }
+    Err(format!(
+        "{} of {total} indices still on an older version of {policy_id}: {}",
+        last.len(),
+        last.iter()
+            .map(|(i, why)| format!("{i} ({why})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// Where a live policy stands, read-only: `absent`, `managed` (velox's own,
 /// still as velox wrote it) or `customized`, with the days it deletes at.
 pub async fn live_state(
@@ -509,6 +637,89 @@ pub fn otel_days(purpose: &str, annotation: Option<&str>, defaults: Option<&Defa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `_plugins/_ism/explain` as the 2026-09-28 kind run read it after
+    /// "restore default": the live policies were at 63:3 / 65:3 / 67:3, and
+    /// the service map was left on 41:3.
+    fn explain_after_restore() -> serde_json::Value {
+        serde_json::json!({
+            "otel-v1-apm-span-000001": {
+                "index.plugins.index_state_management.policy_id": "raw-span-policy",
+                "policy_id": "raw-span-policy", "policy_seq_no": 39, "policy_primary_term": 3,
+                "enabled": true
+            },
+            "logs-otel-v1-000001": {
+                "index.plugins.index_state_management.policy_id": "logs-policy",
+                "policy_id": "logs-policy", "policy_seq_no": 65, "policy_primary_term": 3,
+                "enabled": true
+            },
+            "otel-v2-apm-service-map-000001": {
+                "index.plugins.index_state_management.policy_id": "otel-v2-apm-service-map-policy",
+                "policy_id": "otel-v2-apm-service-map-policy",
+                "policy_seq_no": 41, "policy_primary_term": 3, "enabled": true
+            },
+            "total_managed_indices": 3
+        })
+    }
+
+    #[test]
+    fn every_index_on_an_older_policy_version_is_stale() {
+        let e = explain_after_restore();
+        assert_eq!(
+            stale_indices(&e, "otel-v2-apm-service-map-policy", "67:3"),
+            vec!["otel-v2-apm-service-map-000001"]
+        );
+        assert_eq!(
+            stale_indices(&e, "raw-span-policy", "63:3"),
+            vec!["otel-v1-apm-span-000001"]
+        );
+        // Already on the live version: nothing to move.
+        assert!(stale_indices(&e, "logs-policy", "65:3").is_empty());
+        // Another policy's indices are never touched, whatever the pattern hit.
+        assert!(stale_indices(&e, "velox-retention", "1:1").is_empty());
+    }
+
+    #[test]
+    fn an_uninitialized_or_unmanaged_index_is_not_stale() {
+        let e = serde_json::json!({
+            // ISM attached the policy but has not run yet: no version.
+            "otel-v2-apm-service-map-000002": {
+                "index.plugins.index_state_management.policy_id": "otel-v2-apm-service-map-policy"
+            },
+            // Not managed at all.
+            "otel-v1-apm-service-map": {
+                "index.plugins.index_state_management.policy_id": null
+            },
+            "total_managed_indices": 1
+        });
+        assert!(stale_indices(&e, "otel-v2-apm-service-map-policy", "67:3").is_empty());
+        assert!(stale_indices(&serde_json::json!({}), "p", "1:1").is_empty());
+    }
+
+    #[test]
+    fn refused_indices_are_reported_but_unmanaged_ones_are_not() {
+        let resp = serde_json::json!({
+            "updated_indices": 1,
+            "failures": true,
+            "failed_indices": [
+                { "index_name": "otel-v2-apm-service-map-000001", "index_uuid": "a",
+                  "reason": "Cannot change policy while transitioning to new state" },
+                { "index_name": "otel-v1-apm-span-000002", "index_uuid": "b",
+                  "reason": "version conflict, required seqNo [7], primary term [3]. current document has seqNo [8] and primary term [3]" },
+                { "index_name": "logs-otel-v1-000009", "index_uuid": "c",
+                  "reason": "This index is not being managed" }
+            ]
+        });
+        let f = change_policy_failures(&resp);
+        let names: Vec<&str> = f.iter().map(|(i, _)| i.as_str()).collect();
+        assert_eq!(
+            names,
+            ["otel-v2-apm-service-map-000001", "otel-v1-apm-span-000002"]
+        );
+        let ok =
+            serde_json::json!({ "updated_indices": 3, "failures": false, "failed_indices": [] });
+        assert!(change_policy_failures(&ok).is_empty());
+    }
 
     #[test]
     fn the_out_of_box_default_is_what_every_deployment_already_had() {

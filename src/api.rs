@@ -871,7 +871,7 @@ mod server {
                 Ok(o) if o == crate::retention::RetentionOutcome::Customized => {
                     (o.as_str().to_string(), None, String::new())
                 }
-                Ok(o) => (o.as_str().to_string(), Some(days), String::new()),
+                Ok(o) => (o.as_str().to_string(), Some(days), r.detail),
                 Err(e) => ("error".to_string(), None, e),
             };
             Self {

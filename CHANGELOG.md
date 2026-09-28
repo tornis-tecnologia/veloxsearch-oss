@@ -75,6 +75,30 @@ are called out explicitly.
 - The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
   e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
   answered, and records nothing when none did.
+- Installing the OTel observability stack on a platform where no log recipe
+  was ever enabled left all five components at 0 ready: their pods run as
+  `velox-agents/velox-agent`, which only the log-agent path created (#125).
+  The stack install now ensures that ServiceAccount and its RBAC through the
+  same `agents::ensure_rbac`. A stack already stuck on it recovers on the
+  next status read or re-install, which recreate only this stack's
+  ReplicaSets whose pod creation failed on that missing account.
+- Uninstalling the OTel stack returned HTTP 500 (#126). Reverting its
+  OpenSearch Dashboards keys was a server-side apply of an empty map. When
+  those were the last keys, that left `additionalConfig: null`, which the
+  CRD rejects (422). The revert is now a merge patch that deletes exactly the
+  keys the stack set, so an emptied map stays `{}`. Turning the
+  next-generation UI off reverts its own keys the same way.
+- After "restore default", an OTel stack index could stay on the old
+  version of its ISM policy (seen on the service map) while the policy
+  itself moved on (ADR-062 §6). The re-attach was a single `change_policy`
+  on the index pattern whose response was never read, so a per-index refusal
+  was lost. It now asks `explain` which indices each policy governs, under
+  its pattern and, for the service map, its physical index name too, and
+  moves the ones on an older version by name. It reads the response and
+  retries refused indices a bounded number of times. It also runs when the
+  policy was already current, so a later pass catches up an index an earlier
+  one missed. Whatever is still refused shows in that policy's row of the
+  apply report.
 - **Upgrading reset the operator's settings (#128):** applying a release's
   `upgrade.yaml` re-applied the `veloxsearch-env` ConfigMap with the shipped
   defaults, so values the operator had set there (`VELOX_PG_ENABLED`,
