@@ -63,6 +63,9 @@ const API = {
   listDeployments: () => call("list_deployments", null, "GET"),
   // Host-cluster capacity & health (Capacidade panel). -> ClusterCapacity
   clusterCapacity: () => call("cluster_capacity", null, "GET"),
+  // Read-only cluster profile (ADR-060). `names` opts real deployment and
+  // index-family names in; off, identities are pseudonyms. -> ClusterProfile
+  clusterProfile: (names) => call(names ? "cluster_profile?names=true" : "cluster_profile", null, "GET"),
   getDeployment: (name) => call("get_deployment", { name }),
   createCluster: (p) => call("create_cluster", p), // -> final unique name (String)
   saveCluster: (p) => call("save_cluster", p),
