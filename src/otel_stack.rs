@@ -34,7 +34,7 @@
 //! second list, which is what makes the ADR-039 clean-install ⇒ clean-uninstall
 //! property hold by construction rather than by review.
 
-use crate::agents::AGENT_NS;
+use crate::agents::{AGENT_NS, AGENT_SA};
 use crate::scope::Deployment;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -1429,7 +1429,7 @@ fn deployment_obj(
                         "annotations": { "veloxsearch.ai/config-hash": hash }
                     },
                     "spec": {
-                        "serviceAccountName": "velox-agent",
+                        "serviceAccountName": AGENT_SA,
                         "initContainers": init_containers(dep, part, image),
                         "containers": [{
                             "name": part,
@@ -1920,6 +1920,11 @@ pub async fn install(dep: &Deployment, targets: ScrapeTargets) -> Result<()> {
             }
         }
     }
+    // The pods run as `AGENT_SA`, which only the agents path used to create —
+    // so on a platform with no log recipe every pod create failed (#125).
+    crate::agents::ensure_rbac(&client)
+        .await
+        .context("ensuring the ServiceAccount the stack's pods run as")?;
     // Flexible default storage (ADR-061): pin the stack's PVCs to `longhorn`
     // only when that class exists; classification failure degrades to riding
     // the cluster default rather than naming a class that may not be there.
@@ -1940,6 +1945,11 @@ pub async fn install(dep: &Deployment, targets: ScrapeTargets) -> Result<()> {
         .await
         .with_context(|| format!("applying {} {}", o.kind, o.name))?;
     }
+
+    // 5b. A re-install over a stack that got stuck on the missing account: the
+    //     templates above are unchanged, so nothing would otherwise make those
+    //     ReplicaSets try again before their controller backoff runs out.
+    release_stuck_replicasets(&client, deployment).await;
 
     // 6. Turn on the Dashboards features the stack's screens are made of, and
     //    roll the pod so the new config is read. Everything after this point —
@@ -2299,6 +2309,15 @@ pub async fn status(dep: &Deployment) -> Result<StackState> {
         st.components
             .push(component_state(&client, deployment, part).await);
     }
+    // A stack installed before its install created `AGENT_SA` (#125) sits at
+    // 0 ready with nothing in the UI able to repair it: once installed, the
+    // panel only offers uninstall. Heal it here, only while something is short
+    // of ready, and only for the one failure that creating the account fixes.
+    if st.components.iter().any(|c| c.ready < c.desired)
+        && release_stuck_replicasets(&client, deployment).await > 0
+    {
+        st.error = "components were waiting on their ServiceAccount; restarting them".into();
+    }
 
     st.datasource = datasource_exists(dep).await;
     let ws = workspace_id(dep).await.unwrap_or_default();
@@ -2341,6 +2360,90 @@ async fn component_state(client: &kube::Client, deployment: &str, part: &str) ->
         ready,
         desired,
     }
+}
+
+/// Is this ReplicaSet one of `owners`' and stuck on the missing `AGENT_SA`?
+///
+/// Deliberately narrow. `FailedCreate` alone also covers quota and admission
+/// denials that recreating the ReplicaSet cannot fix, and matching those would
+/// turn the status poll into a delete loop. The missing-account denial is the
+/// one [`crate::agents::ensure_rbac`] cures, so it is the only one released.
+fn stuck_on_missing_sa(
+    rs: &k8s_openapi::api::apps::v1::ReplicaSet,
+    owners: &BTreeSet<String>,
+) -> bool {
+    let owned = rs
+        .metadata
+        .owner_references
+        .iter()
+        .flatten()
+        .any(|o| o.kind == "Deployment" && owners.contains(&o.name));
+    let missing_sa = format!("serviceaccount \"{AGENT_SA}\" not found");
+    owned
+        && rs
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_ref())
+            .into_iter()
+            .flatten()
+            .any(|c| {
+                c.type_ == "ReplicaFailure"
+                    && c.status == "True"
+                    && c.reason.as_deref() == Some("FailedCreate")
+                    && c.message
+                        .as_deref()
+                        .is_some_and(|m| m.contains(&missing_sa))
+            })
+}
+
+/// Delete this stack's ReplicaSets that are stuck on the missing `AGENT_SA`,
+/// after making sure it exists; their Deployments recreate them at once, with
+/// the same template. Returns how many were released.
+///
+/// Bounded to one pass over one deployment's stack (its `part-of` label, then
+/// ownership by one of its five Deployments). Best-effort: an error here is
+/// logged, never a failed install or a failed status read.
+async fn release_stuck_replicasets(client: &kube::Client, deployment: &str) -> usize {
+    use k8s_openapi::api::apps::v1::ReplicaSet;
+    use kube::api::{DeleteParams, ListParams};
+    use kube::Api;
+    let api: Api<ReplicaSet> = Api::namespaced(client.clone(), AGENT_NS);
+    let selector = format!("app.kubernetes.io/part-of=velox-otel-{deployment}");
+    let list = match api.list(&ListParams::default().labels(&selector)).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("otel stack: listing ReplicaSets for {deployment}: {e}");
+            return 0;
+        }
+    };
+    let owners: BTreeSet<String> = COMPONENTS.iter().map(|p| obj_name(deployment, p)).collect();
+    let stuck: Vec<String> = list
+        .items
+        .iter()
+        .filter(|rs| stuck_on_missing_sa(rs, &owners))
+        .filter_map(|rs| rs.metadata.name.clone())
+        .collect();
+    if stuck.is_empty() {
+        return 0;
+    }
+    // Releasing them without the account would only reproduce the failure.
+    if let Err(e) = crate::agents::ensure_rbac(client).await {
+        tracing::warn!("otel stack: ServiceAccount for {deployment} still not ensured: {e:#}");
+        return 0;
+    }
+    let mut released = 0;
+    for name in stuck {
+        match api.delete(&name, &DeleteParams::default()).await {
+            Ok(_) => {
+                tracing::info!(
+                    "otel stack: released ReplicaSet {name} (was waiting on {AGENT_SA})"
+                );
+                released += 1;
+            }
+            Err(e) => tracing::warn!("otel stack: releasing ReplicaSet {name}: {e}"),
+        }
+    }
+    released
 }
 
 /// Poll a component's Deployment until it reports at least one available
@@ -4326,6 +4429,99 @@ mod tests {
                 "no Service for component {part}"
             );
         }
+    }
+
+    #[test]
+    fn stack_pods_run_as_the_account_ensure_rbac_creates() {
+        // #125: the pods named an account only the agents path created. The
+        // install now calls `agents::ensure_rbac`, which creates `AGENT_SA`;
+        // this pins every stack Deployment to that exact name.
+        let objs = manifests(
+            &d(),
+            "u",
+            "p",
+            &ScrapeTargets::default(),
+            &EndpointAccess::default(),
+        );
+        let deployments: Vec<_> = objs.iter().filter(|o| o.kind == "Deployment").collect();
+        assert_eq!(deployments.len(), COMPONENTS.len());
+        for o in deployments {
+            assert_eq!(
+                o.manifest["spec"]["template"]["spec"]["serviceAccountName"],
+                serde_json::json!(AGENT_SA),
+                "{} runs as an account ensure_rbac does not create",
+                o.name
+            );
+        }
+    }
+
+    /// A ReplicaSet as the controller reports it, owned by `owner`, with one
+    /// `ReplicaFailure` condition carrying `message`.
+    fn replica_set(owner: &str, message: &str) -> k8s_openapi::api::apps::v1::ReplicaSet {
+        serde_json::from_value(serde_json::json!({
+            "metadata": {
+                "name": format!("{owner}-6887cd7f5d"),
+                "namespace": AGENT_NS,
+                "ownerReferences": [{
+                    "apiVersion": "apps/v1", "kind": "Deployment",
+                    "name": owner, "uid": "u", "controller": true
+                }]
+            },
+            "status": {
+                "replicas": 0,
+                "conditions": [{
+                    "type": "ReplicaFailure", "status": "True", "reason": "FailedCreate",
+                    "message": message
+                }]
+            }
+        }))
+        .unwrap()
+    }
+
+    const SA_MISSING: &str =
+        "pods \"velox-otel-d-cortex-6887cd7f5d-\" is forbidden: error looking \
+        up service account velox-agents/velox-agent: serviceaccount \"velox-agent\" not found";
+
+    #[test]
+    fn only_this_stacks_replica_sets_stuck_on_the_account_are_released() {
+        let owners: BTreeSet<String> = COMPONENTS.iter().map(|p| obj_name(D, p)).collect();
+        let cortex = obj_name(D, "cortex");
+        // The live failure: released.
+        assert!(stuck_on_missing_sa(
+            &replica_set(&cortex, SA_MISSING),
+            &owners
+        ));
+        // Same failure on another deployment's stack, or on a Fluent Bit agent
+        // sharing the namespace: not ours to touch.
+        assert!(!stuck_on_missing_sa(
+            &replica_set(&obj_name("other", "cortex"), SA_MISSING),
+            &owners
+        ));
+        assert!(!stuck_on_missing_sa(
+            &replica_set("velox-agent-d-k8s-events", SA_MISSING),
+            &owners
+        ));
+        // A FailedCreate that recreating cannot fix (quota): left alone, or
+        // the status poll would delete it on every refresh.
+        assert!(!stuck_on_missing_sa(
+            &replica_set(&cortex, "exceeded quota: compute-resources"),
+            &owners
+        ));
+        // Healthy ReplicaSet, no conditions at all.
+        let mut healthy = replica_set(&cortex, SA_MISSING);
+        healthy.status.as_mut().unwrap().conditions = None;
+        assert!(!stuck_on_missing_sa(&healthy, &owners));
+        // Condition resolved (status False): nothing to do.
+        let mut resolved = replica_set(&cortex, SA_MISSING);
+        resolved
+            .status
+            .as_mut()
+            .unwrap()
+            .conditions
+            .as_mut()
+            .unwrap()[0]
+            .status = "False".into();
+        assert!(!stuck_on_missing_sa(&resolved, &owners));
     }
 
     #[test]

@@ -44,6 +44,13 @@ are called out explicitly.
 - The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
   e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
   answered, and records nothing when none did.
+- Installing the OTel observability stack on a platform where no log recipe
+  was ever enabled left all five components at 0 ready: their pods run as
+  `velox-agents/velox-agent`, which only the log-agent path created (#125).
+  The stack install now ensures that ServiceAccount and its RBAC through the
+  same `agents::ensure_rbac`. A stack already stuck on it recovers on the
+  next status read or re-install, which recreate only this stack's
+  ReplicaSets whose pod creation failed on that missing account.
 
 ## [0.11.0] - 2026-09-27
 
