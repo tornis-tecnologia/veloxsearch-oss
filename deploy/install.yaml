@@ -287,9 +287,15 @@ subjects:
     name: veloxsearch
     namespace: veloxsearch-system
 ---
-# Pod environment (ADR-034): non-secret runtime knobs live here, owned by this
-# manifest. (The app's own runtime config — access mode, base domain — lives in
-# the app-managed `veloxsearch-config` ConfigMap, created in-app; ADR-027.)
+# Pod environment (ADR-034): non-secret runtime knobs live here. This manifest
+# creates the ConfigMap with the defaults below; after that it is YOURS. The
+# release's upgrade.yaml does not carry it, so upgrades keep what you set (#128,
+# ADR-057). Change a value with `kubectl -n veloxsearch-system edit configmap
+# veloxsearch-env`, then `kubectl -n veloxsearch-system rollout restart
+# deploy/veloxsearch`. A key missing here runs with the same default the binary
+# ships, so a release that adds a key needs no change to this ConfigMap.
+# (The app's own runtime config — access mode, base domain — lives in the
+# app-managed `veloxsearch-config` ConfigMap, created in-app; ADR-027.)
 # Secrets never go here: credentials are app-managed K8s Secrets (ADR-023/030)
 # or, for operator-provisioned ones, sourced from a vault — see deploy/secrets/.
 apiVersion: v1

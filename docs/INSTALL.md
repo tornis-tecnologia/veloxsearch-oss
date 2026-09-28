@@ -406,8 +406,10 @@ Three places serve an install manifest. They are not equivalent:
 | `https://get.veloxsearch.ai/install.yml` | A convenience redirect to `releases/latest/download/install.yaml`. The daily `Mirror watch` workflow fails if it stops redirecting there or its bytes differ from the release asset (#37) |
 
 Each release also ships `upgrade.yaml`: the same manifest without the one-time
-`veloxsearch-bootstrap` cluster-admin binding. It is for upgrading an existing
-install, never for a first install (bootstrap needs the binding) — see
+`veloxsearch-bootstrap` cluster-admin binding and without the `veloxsearch-env`
+ConfigMap, so an upgrade keeps your settings. It is for upgrading an existing
+install, never for a first install (bootstrap needs the binding, the Pod needs
+the ConfigMap) — see
 [DEPLOY.md, "Rolling out an upgrade"](DEPLOY.md#rolling-out-an-upgrade).
 
 ### Verifying the image
