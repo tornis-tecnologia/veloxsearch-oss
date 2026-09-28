@@ -348,7 +348,7 @@ spec:
           # not Cargo.toml's `version` (ci.yml, `manifest-version`), so applying
           # this file from `main` can never roll an install back (#54); the
           # release job pins its published copy to the image digest.
-          image: docker.io/tornistecnologia/veloxsearch-oss:0.10.5
+          image: docker.io/tornistecnologia/veloxsearch-oss:0.11.0
           imagePullPolicy: IfNotPresent
           # Container hardening (#118). The image already runs as uid 10001, but
           # an image USER is a default a cluster can override; this makes it a

@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-27
+
 ### Fixed
 - **The stuck-recovery remediation could still bounce a node that only
   receives (#27/#96):** when its per-index lookup of the recovery source
@@ -100,6 +102,15 @@ are called out explicitly.
   lower than the previous release.
 
 ### Added
+- **Default retention per purpose (ADR-062):** Settings has an admin-only
+  "Default retention" block (observability and security days; out-of-box 30
+  and 90, the previous fixed values). The create wizard shows the effective
+  default for the chosen purpose and accepts a per-deployment override, stamped
+  on the CR together with whether it inherits the default or was chosen for
+  that deployment. An admin action applies the default to the existing
+  deployments that inherit it (never to one given its own value) and reports
+  per deployment what happened. Each deployment's Edit tab shows its
+  retention, whether the policy was customized, and a "restore default" button.
 - **`upgrade.yaml` release asset (ADR-057):** the release's `install.yaml`
   without the one-time `veloxsearch-bootstrap` cluster-admin binding, derived
   by `deploy/upgrade-manifest.sh`. Use it to upgrade; `install.yaml` stays the
@@ -113,16 +124,6 @@ are called out explicitly.
   `OpenSearchCluster` specs are unchanged and no cluster-admin was granted —
   plus a variant that scales the operator to 0 and re-applies the full
   `install.yaml`.
-- Default retention per purpose (ADR-062). Settings has an admin-only
-  "Default retention" block (observability and security days; out-of-box 30
-  and 90, the previous fixed values). The create wizard shows the effective
-  default for the chosen purpose and accepts a per-deployment override, stamped
-  on the CR together with whether it inherits the default or was chosen for
-  that deployment. An admin action applies the default to the existing
-  deployments that inherit it (never to one given its own value) and reports
-  per deployment what happened. Each deployment's Edit tab shows its
-  retention, whether the policy was customized, and a "restore default" button.
-
 ### Changed
 - velox no longer overwrites a `velox-retention` ISM policy that the user
   edited inside OpenSearch. Saves, retries and upgrades leave a customized
