@@ -73,6 +73,8 @@ const STR = {
     boot_waiting: "Aguardando componente já instalado ficar pronto:",
     boot_drift_title: "Versão do operador diferente da desta versão do VeloxSearch",
     boot_drift: "Em execução: {0}. Esta versão traz: {1}. O VeloxSearch não altera o operador em execução; atualizá-lo é um passo separado e explícito (docs/DEPLOY.md, \"Operator version drift\").",
+    boot_isolation_title: "Tenants sem isolamento",
+    boot_isolation: "Estes tenants não têm ResourceQuota, LimitRange nem NetworkPolicies no seu namespace: {0}. O VeloxSearch tenta de novo ao iniciar e periodicamente; se persistir, verifique se as permissões do deploy/install.yaml desta versão foram aplicadas.",
     // create wizard
     name_err_chars: "use apenas letras minúsculas, números e hífen; comece e termine com letra ou número",
     name_err_long: "no máximo 40 caracteres",
@@ -697,6 +699,8 @@ const STR = {
     boot_waiting: "Waiting for an already-installed component to become ready:",
     boot_drift_title: "OpenSearch operator differs from this VeloxSearch release",
     boot_drift: "Running: {0}. This release vendors: {1}. VeloxSearch leaves the running operator alone; upgrading it is a separate, explicit step (docs/DEPLOY.md, \"Operator version drift\").",
+    boot_isolation_title: "Tenants without isolation",
+    boot_isolation: "These tenants have no ResourceQuota, LimitRange or NetworkPolicies in their namespace: {0}. VeloxSearch retries at startup and periodically; if this persists, check that this release's deploy/install.yaml permissions were applied.",
     // create wizard
     name_err_chars: "use lowercase letters, digits and hyphens; start and end with a letter or digit",
     name_err_long: "40 characters at most",
@@ -1315,6 +1319,8 @@ const STR = {
     boot_waiting: "Esperando que un componente ya instalado esté listo:",
     boot_drift_title: "El operador de OpenSearch difiere de esta versión de VeloxSearch",
     boot_drift: "En ejecución: {0}. Esta versión incluye: {1}. VeloxSearch no modifica el operador en ejecución; actualizarlo es un paso aparte y explícito (docs/DEPLOY.md, \"Operator version drift\").",
+    boot_isolation_title: "Tenants sin aislamiento",
+    boot_isolation: "Estos tenants no tienen ResourceQuota, LimitRange ni NetworkPolicies en su namespace: {0}. VeloxSearch lo reintenta al iniciar y periódicamente; si persiste, verifique que se aplicaron los permisos del deploy/install.yaml de esta versión.",
     // asistente de creación
     name_err_chars: "usa solo letras minúsculas, números y guiones; empieza y termina con letra o número",
     name_err_long: "40 caracteres como máximo",

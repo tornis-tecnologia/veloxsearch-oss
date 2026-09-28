@@ -45,6 +45,24 @@ function OperatorDriftNotice({ status, t, style }) {
   );
 }
 
+// #122: tenants whose signup could not provision their isolation. The backend
+// retries them; this makes sure the admin knows until it succeeds.
+function TenantIsolationNotice({ status, t, style }) {
+  const slugs = status?.unisolated_tenants || [];
+  if (slugs.length === 0) return null;
+  return (
+    <div className="card pad" role="status" data-testid="tenant-isolation"
+      style={{ borderColor: "var(--warn-soft)", ...style }}>
+      <div style={{ color: "var(--warn)", fontWeight: 600, marginBottom: 4 }}>
+        <span aria-hidden="true">⚠ </span>{t.boot_isolation_title}
+      </div>
+      <div style={{ color: "var(--text-2)", fontSize: 13 }}>
+        {t.boot_isolation.replace("{0}", slugs.join(", "))}
+      </div>
+    </div>
+  );
+}
+
 function BootPrefs({ lang, setLang, theme, setTheme }) {
   return (
     <div className="prefs" style={{ position: "absolute", top: 16, right: 16, display: "flex", gap: 8, alignItems: "center" }}>
@@ -210,4 +228,4 @@ function BootstrapView({ lang, setLang, theme, setTheme, onReady }) {
   );
 }
 
-export { BootstrapView, OperatorDriftNotice };
+export { BootstrapView, OperatorDriftNotice, TenantIsolationNotice };

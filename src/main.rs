@@ -68,6 +68,10 @@ async fn main() {
     // without a manual Save. Best-effort; never blocks serving.
     tokio::spawn(veloxsearch::access::backfill_on_startup());
 
+    // Re-provision tenants whose isolation is missing (#122): at startup, then
+    // on a slowing schedule. Inert unless multi-tenancy is on; never blocks.
+    tokio::spawn(veloxsearch::tenants::run_isolation_reconcile());
+
     // Hourly upstream version check (ADR-048 rev. 2): discovers the newest
     // OpenSearch release so a deployment can show an "Upgrade v3.8.0" tag.
     // Suggestion only — it writes nothing and every upgrade still goes through
