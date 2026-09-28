@@ -3,19 +3,24 @@ name: Upgrade (N-1 -> N)
 # The upgrade contract (ADR-057, #54): rolling out a new VeloxSearch changes the
 # VeloxSearch control plane and nothing it manages — not the operator
 # Deployment, not the operator or cert-manager CRDs, not an OpenSearchCluster
-# spec — and never re-grants cluster-admin.
+# spec — and never re-grants cluster-admin. It also keeps the operator's own
+# settings: `veloxsearch-env` comes out of an upgrade exactly as it went in (#128).
 #
 # The lane installs the PREVIOUS release on minikube, drives a real first run to
 # a green deployment, rolls the candidate built from this commit out over it,
 # and asserts the contract (tests/upgrade_check.py). Two variants:
 #   operator-ready  the documented upgrade (DEPLOY.md): apply the UPGRADE
 #                   manifest (deploy/upgrade-manifest.sh), which carries no
-#                   bootstrap binding — the lane asserts none ever appears.
+#                   bootstrap binding — the lane asserts none ever appears —
+#                   and no veloxsearch-env, so a setting made before the
+#                   upgrade must reach the new Pod unchanged.
 #   operator-down   the worst case: the operator scaled to 0 AND the full
 #                   install.yaml re-applied, so bootstrap holds cluster-admin
 #                   while the operator is not Ready — the exact state that used
 #                   to make it force-apply its bundle. It must apply nothing,
 #                   and the running app must revoke the binding afterwards.
+#                   install.yaml DOES carry veloxsearch-env, so this variant
+#                   resets the setting; its compares skip that one object.
 #
 # Storage: minikube's default StorageClass is node-local, which deployments ride
 # with a warning (ADR-061), so the lane installs no Longhorn.
@@ -54,6 +59,12 @@ env:
   # A throwaway admin on a throwaway cluster that exists for this job only.
   ADMIN_USER: admin
   ADMIN_PW: upgrade-lane-${{ github.run_id }}
+  # An operator setting made before the upgrade (#128). VELOX_PUBLIC_URL only
+  # shapes the links in account mail, which this lane never sends, and it is
+  # not the shipped default ("").
+  SETTING_KEY: VELOX_PUBLIC_URL
+  SETTING_VALUE: https://upgrade-lane.invalid
+  ENV_SNAPSHOT_KEY: configmap/veloxsearch-system/veloxsearch-env
 
 jobs:
   candidate:
@@ -147,6 +158,9 @@ jobs:
         timeout-minutes: 75
         run: python3 tests/upgrade_check.py prepare "$BASE" "$ADMIN_USER" "$ADMIN_PW" "$RUNNER_TEMP/$STATE_NAME"
 
+      - name: "N-1: the operator changes a setting in veloxsearch-env"
+        run: python3 tests/upgrade_check.py env set "$SETTING_KEY" "$SETTING_VALUE"
+
       - name: "N-1: baseline snapshot"
         run: |
           kubectl get clusterrolebinding veloxsearch-bootstrap || echo "N-1 left no bootstrap binding (expected)"
@@ -200,6 +214,15 @@ jobs:
         if: matrix.variant == 'operator-ready'
         run: python3 tests/upgrade_check.py binding gone --timeout 0
 
+      - name: "operator-ready: the operator's setting survived and reached the new Pod"
+        if: matrix.variant == 'operator-ready'
+        run: |
+          set -euo pipefail
+          python3 tests/upgrade_check.py env expect "$SETTING_KEY" "$SETTING_VALUE"
+          got=$(kubectl -n veloxsearch-system exec deploy/veloxsearch -- printenv "$SETTING_KEY")
+          [ "$got" = "$SETTING_VALUE" ] || { echo "FAIL: the new Pod sees $SETTING_KEY='$got'"; exit 1; }
+          echo "  ok: the candidate Pod runs with $SETTING_KEY=$got"
+
       - name: "operator-down: bootstrap waits and applies nothing"
         if: matrix.variant == 'operator-down'
         run: |
@@ -207,7 +230,9 @@ jobs:
           python3 tests/upgrade_check.py ensure-noop "$BASE" "$ADMIN_USER" "$ADMIN_PW" --observe 180
           python3 tests/upgrade_check.py binding present
           python3 tests/upgrade_check.py snapshot "$RUNNER_TEMP/down-after.json"
-          python3 tests/upgrade_check.py compare "$RUNNER_TEMP/down.json" "$RUNNER_TEMP/down-after.json"
+          # install.yaml owns veloxsearch-env; re-applying it resets the setting (#128).
+          python3 tests/upgrade_check.py compare "$RUNNER_TEMP/down.json" "$RUNNER_TEMP/down-after.json" \
+            --skip "$ENV_SNAPSHOT_KEY"
           kubectl -n veloxsearch-system scale deploy/opensearch-operator --replicas=1
           kubectl -n veloxsearch-system rollout status deploy/opensearch-operator --timeout=300s
 
@@ -217,19 +242,25 @@ jobs:
       - name: "N: no bootstrap binding left behind"
         run: python3 tests/upgrade_check.py binding gone --timeout 420
 
-      - name: "N: operator, CRDs and OpenSearchCluster unchanged"
+      - name: "N: operator, CRDs, OpenSearchCluster and veloxsearch-env unchanged"
         # Give anything the new binary might do on its own a couple of minutes
         # (the revoke watch ticks every 60s, the sampler every 60s).
         run: |
           sleep 120
           python3 tests/upgrade_check.py snapshot "$RUNNER_TEMP/after.json"
-          python3 tests/upgrade_check.py compare "$RUNNER_TEMP/baseline.json" "$RUNNER_TEMP/after.json"
+          skip=()
+          if [ "${{ matrix.variant }}" = operator-down ]; then
+            # It re-applied install.yaml, which owns veloxsearch-env.
+            skip=(--skip "$ENV_SNAPSHOT_KEY")
+          fi
+          python3 tests/upgrade_check.py compare "$RUNNER_TEMP/baseline.json" "$RUNNER_TEMP/after.json" "${skip[@]}"
 
       - name: Diagnostics
         if: failure()
         run: |
           kubectl get pods -A -o wide || true
           kubectl -n veloxsearch-system logs deploy/veloxsearch --tail=300 || true
+          kubectl -n veloxsearch-system get configmap veloxsearch-env -o yaml || true
           kubectl get events -A --sort-by=.lastTimestamp | tail -80 || true
           cat "$RUNNER_TEMP/port-forward.log" || true
           for f in baseline down down-after after; do

@@ -8,6 +8,16 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Upgrade notes
+- **GitOps with pruning (Argo CD, Flux): own `veloxsearch-env` BEFORE you
+  bump to this release, or the sync DELETES it.** `upgrade.yaml` no longer
+  carries the `veloxsearch-env` ConfigMap (#128). A tool that renders
+  `upgrade.yaml` and prunes will remove the ConfigMap; the next Pod then
+  cannot start and your settings are gone. Add the ConfigMap, with the values
+  you run today, to your own overlay (or annotate it
+  `argocd.argoproj.io/sync-options: Prune=false`) first. See DEPLOY.md,
+  "GitOps installs". `kubectl apply -f upgrade.yaml` users need do nothing.
+
 ### Added
 - Release notes now open with an **Upgrade:** line that says whether
   `kubectl set image` is enough or `upgrade.yaml` has to be applied, with the
@@ -65,6 +75,17 @@ are called out explicitly.
 - The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
   e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
   answered, and records nothing when none did.
+- **Upgrading reset the operator's settings (#128):** applying a release's
+  `upgrade.yaml` re-applied the `veloxsearch-env` ConfigMap with the shipped
+  defaults, so values the operator had set there (`VELOX_PG_ENABLED`,
+  `VELOX_MULTITENANT_AUTH`, SMTP, …) reverted on every upgrade; turning
+  multitenancy off broke tenant sign-in. `upgrade.yaml` now leaves the
+  ConfigMap out: `install.yaml` creates it once and it is the operator's from
+  then on. Every key has a default in the binary equal to the shipped value,
+  so a release that adds a key needs no ConfigMap change; a test fails the
+  build if a shipped key lacks one or if an env var would need a ConfigMap key
+  to exist. The N-1 → N upgrade lane sets a non-default value before the
+  upgrade and asserts it reaches the new Pod unchanged (ADR-057).
 
 ## [0.11.0] - 2026-09-27
 
