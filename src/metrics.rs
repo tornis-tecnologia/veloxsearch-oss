@@ -214,11 +214,21 @@ fn metrics_alias(deployment: &Deployment) -> String {
 pub struct Sample {
     /// Epoch milliseconds (UTC).
     pub ts: i64,
-    pub cpu_percent: f64,
-    pub heap_percent: f64,
+    /// Mean over the nodes that reported a reading; `None` when none did.
+    /// OpenSearch answers `-1` for "unavailable" (cgroup-confined CPU, e.g.
+    /// under kind), and that sentinel must never be averaged in (#59).
+    pub cpu_percent: Option<f64>,
+    pub heap_percent: Option<f64>,
     pub disk_used_bytes: u64,
     pub docs: u64,
     pub index_total: u64,
+    /// `indices.search.query_total`, summed across nodes — monotonic like
+    /// `index_total` (ADR-060 decision 7).
+    pub query_total: u64,
+    /// `jvm.gc.collectors.old.collection_time_in_millis`, summed across nodes.
+    pub gc_old_millis: u64,
+    /// `jvm.gc.collectors.young.collection_time_in_millis`, summed across nodes.
+    pub gc_young_millis: u64,
 }
 
 fn now_ms() -> i64 {
@@ -296,27 +306,29 @@ async fn collect_sample(deployment: &Deployment) -> Result<Sample> {
         .await
         .context("parsing _nodes/stats")?;
 
-    let (mut cpu_sum, mut heap_sum) = (0i64, 0i64);
-    let (mut n, mut disk_used, mut docs, mut index_total) = (0u64, 0u64, 0u64, 0u64);
+    Ok(sample_from_nodes_stats(&body, now_ms()))
+}
+
+/// Fold one `_nodes/stats/os,jvm,fs,indices` response into a cluster-aggregate
+/// sample: CPU/heap are meaned across nodes; disk used, docs and the monotonic
+/// counters are summed. Pure, so the sampler and the cluster profile (ADR-060)
+/// read the same payload the same way.
+pub fn sample_from_nodes_stats(body: &serde_json::Value, ts: i64) -> Sample {
+    let (mut cpu, mut heap) = (Vec::new(), Vec::new());
+    let mut out = Sample {
+        ts,
+        ..Sample::default()
+    };
     if let Some(map) = body.get("nodes").and_then(|v| v.as_object()) {
         for node in map.values() {
-            n += 1;
-            cpu_sum += node
-                .pointer("/os/cpu/percent")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            heap_sum += node
-                .pointer("/jvm/mem/heap_used_percent")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            docs += node
-                .pointer("/indices/docs/count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            index_total += node
-                .pointer("/indices/indexing/index_total")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let u = |path: &str| node.pointer(path).and_then(|v| v.as_u64()).unwrap_or(0);
+            cpu.extend(percent(node.pointer("/os/cpu/percent")));
+            heap.extend(percent(node.pointer("/jvm/mem/heap_used_percent")));
+            out.docs += u("/indices/docs/count");
+            out.index_total += u("/indices/indexing/index_total");
+            out.query_total += u("/indices/search/query_total");
+            out.gc_old_millis += u("/jvm/gc/collectors/old/collection_time_in_millis");
+            out.gc_young_millis += u("/jvm/gc/collectors/young/collection_time_in_millis");
             // Disk used = data-path total − available (ADR-031: the PVC mount,
             // not the node fs). Summed across nodes for a cluster figure.
             if let Some(arr) = node.pointer("/fs/data").and_then(|v| v.as_array()) {
@@ -329,20 +341,25 @@ async fn collect_sample(deployment: &Deployment) -> Result<Sample> {
                         .get("available_in_bytes")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    disk_used += t.saturating_sub(a);
+                    out.disk_used_bytes += t.saturating_sub(a);
                 }
             }
         }
     }
-    let nf = n.max(1) as f64;
-    Ok(Sample {
-        ts: now_ms(),
-        cpu_percent: cpu_sum as f64 / nf,
-        heap_percent: heap_sum as f64 / nf,
-        disk_used_bytes: disk_used,
-        docs,
-        index_total,
-    })
+    out.cpu_percent = mean(&cpu);
+    out.heap_percent = mean(&heap);
+    out
+}
+
+/// A percentage reading, or `None` for OpenSearch's `-1` "unavailable"
+/// sentinel (and anything else outside 0–100).
+pub fn percent(v: Option<&serde_json::Value>) -> Option<f64> {
+    v.and_then(|v| v.as_f64())
+        .filter(|x| (0.0..=100.0).contains(x))
+}
+
+fn mean(v: &[f64]) -> Option<f64> {
+    (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
 /// Append a sample through the rollover alias. Dynamic mapping is pinned by the
@@ -361,6 +378,9 @@ async fn record_sample(deployment: &Deployment, s: &Sample) -> Result<()> {
             "disk_used_bytes": s.disk_used_bytes,
             "docs": s.docs,
             "index_total": s.index_total,
+            "query_total": s.query_total,
+            "gc_old_millis": s.gc_old_millis,
+            "gc_young_millis": s.gc_young_millis,
         }))
         .send()
         .await
@@ -422,6 +442,22 @@ async fn ensure_metrics_index(deployment: &Deployment) -> Result<()> {
                     "disk_used_bytes": { "type": "long" },
                     "docs": { "type": "long" },
                     "index_total": { "type": "long" },
+                    // ADR-060 decision 7 — additive: a template applies at the
+                    // next rollover, so older backing indices simply lack these.
+                    "query_total": { "type": "long" },
+                    "gc_old_millis": { "type": "long" },
+                    "gc_young_millis": { "type": "long" },
+                    // `stall` marks an ADR-060 stall-episode document; samples
+                    // carry no `kind`, which is how every sample reader
+                    // excludes episodes.
+                    "kind": { "type": "keyword" },
+                    "stage": { "type": "keyword" },
+                    "component": { "type": "keyword" },
+                    "component_status": { "type": "keyword" },
+                    "recovery_stage": { "type": "keyword" },
+                    "recovery_index_class": { "type": "keyword" },
+                    "recovery_secs": { "type": "long" },
+                    "remediation": { "type": "keyword" },
                 }},
             },
         }))
@@ -510,16 +546,16 @@ pub async fn series(
                 Some(s) => s,
                 None => continue,
             };
-            let f = |k: &str| src.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
             let i = |k: &str| src.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
             let uu = |k: &str| src.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
             samples.push(Sample {
                 ts: i("@timestamp"),
-                cpu_percent: f("cpu_percent"),
-                heap_percent: f("heap_percent"),
+                cpu_percent: percent(src.get("cpu_percent")),
+                heap_percent: percent(src.get("heap_percent")),
                 disk_used_bytes: uu("disk_used_bytes"),
                 docs: uu("docs"),
                 index_total: uu("index_total"),
+                ..Sample::default()
             });
         }
     }
@@ -549,9 +585,13 @@ fn series_query(window_minutes: i64) -> serde_json::Value {
         "sort": [{ "@timestamp": "desc" }],
         "_source": ["@timestamp", "cpu_percent", "heap_percent",
                     "disk_used_bytes", "docs", "index_total"],
-        "query": { "range": { "@timestamp": {
-            "gte": format!("now-{window_minutes}m"), "format": "epoch_millis"
-        }}},
+        "query": { "bool": {
+            "filter": [{ "range": { "@timestamp": {
+                "gte": format!("now-{window_minutes}m"), "format": "epoch_millis"
+            }}}],
+            // ADR-060 stall episodes share the alias; they are not samples.
+            "must_not": [{ "term": { "kind": STALL_KIND } }],
+        }},
     })
 }
 
@@ -576,9 +616,8 @@ pub fn downsample(samples: &[Sample], bucket_ms: i64) -> Vec<MetricPoint> {
     struct Raw {
         start: i64,
         last_ts: i64,
-        sum_cpu: f64,
-        sum_heap: f64,
-        n: u64,
+        cpu: Vec<f64>,
+        heap: Vec<f64>,
         disk: u64,
         docs: u64,
         idx: u64,
@@ -588,9 +627,8 @@ pub fn downsample(samples: &[Sample], bucket_ms: i64) -> Vec<MetricPoint> {
         let start = s.ts.div_euclid(bucket_ms) * bucket_ms;
         match raws.last_mut() {
             Some(r) if r.start == start => {
-                r.sum_cpu += s.cpu_percent;
-                r.sum_heap += s.heap_percent;
-                r.n += 1;
+                r.cpu.extend(s.cpu_percent);
+                r.heap.extend(s.heap_percent);
                 r.last_ts = s.ts;
                 r.disk = s.disk_used_bytes;
                 r.docs = s.docs;
@@ -599,9 +637,8 @@ pub fn downsample(samples: &[Sample], bucket_ms: i64) -> Vec<MetricPoint> {
             _ => raws.push(Raw {
                 start,
                 last_ts: s.ts,
-                sum_cpu: s.cpu_percent,
-                sum_heap: s.heap_percent,
-                n: 1,
+                cpu: s.cpu_percent.into_iter().collect(),
+                heap: s.heap_percent.into_iter().collect(),
                 disk: s.disk_used_bytes,
                 docs: s.docs,
                 idx: s.index_total,
@@ -613,21 +650,16 @@ pub fn downsample(samples: &[Sample], bucket_ms: i64) -> Vec<MetricPoint> {
     let mut points = Vec::with_capacity(raws.len());
     let mut prev: Option<(i64, u64)> = None; // (last_ts, index_total)
     for r in &raws {
-        let indexing_rate = match prev {
-            Some((pt, pidx)) if r.last_ts > pt && r.idx >= pidx => {
-                let dt = (r.last_ts - pt) as f64 / 1000.0;
-                if dt > 0.0 {
-                    (r.idx - pidx) as f64 / dt
-                } else {
-                    0.0
-                }
-            }
-            _ => 0.0,
-        };
+        let indexing_rate = prev
+            .map(|p| counter_rate(p, (r.last_ts, r.idx)))
+            .unwrap_or(0.0);
+        // Means over the valid readings only. A bucket with none reads 0 on
+        // the chart, as a missing field always has (`MetricPoint` is the UI's
+        // DTO and keeps its shape).
         points.push(MetricPoint {
             ts: r.start,
-            cpu_percent: r.sum_cpu / r.n as f64,
-            heap_percent: r.sum_heap / r.n as f64,
+            cpu_percent: mean(&r.cpu).unwrap_or(0.0),
+            heap_percent: mean(&r.heap).unwrap_or(0.0),
             disk_used_bytes: r.disk,
             docs: r.docs,
             indexing_rate,
@@ -636,6 +668,21 @@ pub fn downsample(samples: &[Sample], bucket_ms: i64) -> Vec<MetricPoint> {
     }
     points
 }
+
+/// Per-second rate of a monotonic counter between two `(epoch_ms, value)`
+/// readings, clamped to 0 across a counter reset (a node restart zeroes its
+/// share) or a non-advancing clock. The one rule every rate here uses —
+/// `downsample`'s indexing rate and the ADR-060 profile's rates alike.
+pub fn counter_rate(prev: (i64, u64), cur: (i64, u64)) -> f64 {
+    let ((pt, pv), (ct, cv)) = (prev, cur);
+    if ct <= pt || cv < pv {
+        return 0.0;
+    }
+    (cv - pv) as f64 / ((ct - pt) as f64 / 1000.0)
+}
+
+/// `kind` value of an ADR-060 stall-episode document in `velox-metrics-*`.
+pub const STALL_KIND: &str = "stall";
 
 #[cfg(test)]
 mod tests {
@@ -647,7 +694,12 @@ mod tests {
         let q = series_query(7 * 24 * 60);
         assert_eq!(q["sort"][0]["@timestamp"], "desc");
         assert_eq!(q["size"], SERIES_MAX_SAMPLES);
-        assert_eq!(q["query"]["range"]["@timestamp"]["gte"], "now-10080m");
+        assert_eq!(
+            q["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gte"],
+            "now-10080m"
+        );
+        // ADR-060: stall episodes share the alias and are never samples.
+        assert_eq!(q["query"]["bool"]["must_not"][0]["term"]["kind"], "stall");
     }
 
     #[test]
@@ -668,11 +720,36 @@ mod tests {
     fn s(ts: i64, cpu: f64, heap: f64, disk: u64, docs: u64, idx: u64) -> Sample {
         Sample {
             ts,
-            cpu_percent: cpu,
-            heap_percent: heap,
+            cpu_percent: Some(cpu),
+            heap_percent: Some(heap),
             disk_used_bytes: disk,
             docs,
             index_total: idx,
+            ..Sample::default()
+        }
+    }
+
+    /// #59: OpenSearch reports `-1` when a reading is unavailable (CPU under
+    /// cgroups, e.g. kind). It is excluded, never averaged in.
+    #[test]
+    fn unavailable_readings_are_none_not_minus_one() {
+        let body = serde_json::json!({ "nodes": {
+            "a": { "os": { "cpu": { "percent": -1 } }, "jvm": { "mem": { "heap_used_percent": 40 } } },
+            "b": { "os": { "cpu": { "percent": -1 } }, "jvm": { "mem": { "heap_used_percent": -1 } } },
+        }});
+        let s = sample_from_nodes_stats(&body, 0);
+        assert_eq!(s.cpu_percent, None);
+        assert_eq!(s.heap_percent, Some(40.0));
+        let mixed = [s_opt(1_000, None), s_opt(2_000, Some(30.0))];
+        let pts = downsample(&mixed, 10_000);
+        assert!((pts[0].cpu_percent - 30.0).abs() < 1e-9);
+    }
+
+    fn s_opt(ts: i64, cpu: Option<f64>) -> Sample {
+        Sample {
+            ts,
+            cpu_percent: cpu,
+            ..Sample::default()
         }
     }
 

@@ -384,6 +384,25 @@ async fn read_quota(
     })
 }
 
+/// A tenant's quota row, for the ADR-060 cluster profile: a tenant's headroom
+/// is its quota, not the host's free capacity.
+pub async fn quota_of(tenant_id: &str) -> Result<crate::k8s::TenantQuota> {
+    let pg = crate::db::connect_app().await?;
+    read_quota(&pg, tenant_id).await
+}
+
+/// `tenants.id` → `tenants.slug` for every tenant — the names an installation
+/// admin may opt into on a cluster profile (ADR-060). Only called for the
+/// admin scope, and only with `?names=true`.
+pub async fn slugs() -> Result<std::collections::BTreeMap<String, String>> {
+    let pg = crate::db::connect_app().await?;
+    let rows = pg
+        .query("SELECT id::text, slug FROM tenants", &[])
+        .await
+        .context("reading tenant slugs")?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+}
+
 /// Provision the tenant's namespace, ResourceQuota, LimitRange and default-deny
 /// NetworkPolicy set (ADR-044/049), and record the outcome in the audit log.
 ///
