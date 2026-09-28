@@ -51,6 +51,12 @@ are called out explicitly.
   same `agents::ensure_rbac`. A stack already stuck on it recovers on the
   next status read or re-install, which recreate only this stack's
   ReplicaSets whose pod creation failed on that missing account.
+- Uninstalling the OTel stack returned HTTP 500 (#126). Reverting its
+  OpenSearch Dashboards keys was a server-side apply of an empty map. When
+  those were the last keys, that left `additionalConfig: null`, which the
+  CRD rejects (422). The revert is now a merge patch that deletes exactly the
+  keys the stack set, so an emptied map stays `{}`. Turning the
+  next-generation UI off reverts its own keys the same way.
 
 ## [0.11.0] - 2026-09-27
 

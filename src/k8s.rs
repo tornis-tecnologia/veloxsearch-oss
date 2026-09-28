@@ -2146,26 +2146,26 @@ pub async fn set_next_ui(dep: &Deployment, enable: bool, chosen: bool) -> Result
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
-    let mut cfg = serde_json::Map::new();
+    let keys = next_ui_config();
     if enable {
-        for (k, v) in next_ui_config() {
-            cfg.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-        }
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::apply(UI_FIELD_MANAGER).force(),
+                &Patch::Apply(&dashboards_config_apply(name, &keys)),
+            )
+            .await
+            .context("patching dashboards additionalConfig for the next-gen UI")?;
+    } else {
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(&dashboards_config_removal(keys.iter().map(|(k, _)| *k))),
+            )
+            .await
+            .context("removing the next-gen UI keys from dashboards additionalConfig")?;
     }
-    let manifest = serde_json::json!({
-        "apiVersion": "opensearch.org/v1",
-        "kind": "OpenSearchCluster",
-        "metadata": { "name": name },
-        "spec": { "dashboards": { "additionalConfig": serde_json::Value::Object(cfg) } },
-    });
-    os_api(&client, dep)
-        .patch(
-            name,
-            &PatchParams::apply(UI_FIELD_MANAGER).force(),
-            &Patch::Apply(&manifest),
-        )
-        .await
-        .context("patching dashboards additionalConfig for the next-gen UI")?;
 
     let marker = if enable && chosen {
         serde_json::Value::String("1".to_string())
@@ -2215,9 +2215,10 @@ pub async fn workspaces_enabled(dep: &Deployment) -> bool {
 
 /// Turn the ADR-053 Dashboards config keys on or off.
 ///
-/// Server-side apply under `OTEL_FIELD_MANAGER`, so `enable: false` is an apply
-/// with the keys absent — SSA then removes precisely the keys this manager owns
-/// and leaves anyone else's (an SSO deployment's `opensearch_security.*`) alone.
+/// On: server-side apply under `OTEL_FIELD_MANAGER`. Off: a merge patch that
+/// deletes exactly [`otel_dashboards_config`]'s keys, and leaves anyone else's
+/// (an SSO deployment's `opensearch_security.*`, the next-gen UI's) alone —
+/// see [`dashboards_config_removal`] for why it is not an apply of `{}`.
 ///
 /// ADR-048: touches `spec.dashboards.additionalConfig` only. It never
 /// constructs `spec.general` or `spec.dashboards.version`, so it cannot move a
@@ -2226,27 +2227,58 @@ pub async fn set_dashboards_otel_config(dep: &Deployment, enable: bool) -> Resul
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
-    let mut cfg = serde_json::Map::new();
+    let keys = otel_dashboards_config();
     if enable {
-        for (k, v) in otel_dashboards_config() {
-            cfg.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-        }
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::apply(OTEL_FIELD_MANAGER).force(),
+                &Patch::Apply(&dashboards_config_apply(name, &keys)),
+            )
+            .await
+            .context("patching dashboards additionalConfig")?;
+    } else {
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(&dashboards_config_removal(keys.iter().map(|(k, _)| *k))),
+            )
+            .await
+            .context("removing the observability keys from dashboards additionalConfig")?;
     }
-    let manifest = serde_json::json!({
+    Ok(())
+}
+
+/// The server-side-apply body that sets `keys` under
+/// `spec.dashboards.additionalConfig`, and nothing else.
+fn dashboards_config_apply(name: &str, keys: &[(&str, &str)]) -> serde_json::Value {
+    let cfg: serde_json::Map<String, serde_json::Value> = keys
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    serde_json::json!({
         "apiVersion": "opensearch.org/v1",
         "kind": "OpenSearchCluster",
         "metadata": { "name": name },
-        "spec": { "dashboards": { "additionalConfig": serde_json::Value::Object(cfg) } },
-    });
-    os_api(&client, dep)
-        .patch(
-            name,
-            &PatchParams::apply(OTEL_FIELD_MANAGER).force(),
-            &Patch::Apply(&manifest),
-        )
-        .await
-        .context("patching dashboards additionalConfig")?;
-    Ok(())
+        "spec": { "dashboards": { "additionalConfig": cfg } },
+    })
+}
+
+/// The merge patch that deletes `keys` from `spec.dashboards.additionalConfig`.
+///
+/// Not a server-side apply of an empty map, which is what this used to be:
+/// when the removed keys were the last ones in the map, the apply left
+/// `additionalConfig: null`, which the CRD rejects (`must be of type object`,
+/// 422), so every uninstall failed at this step (#126). In a JSON merge patch
+/// (RFC 7386) a `null` *member* deletes that key and an emptied map stays
+/// `{}`, so the map itself is never null.
+fn dashboards_config_removal<'a>(keys: impl IntoIterator<Item = &'a str>) -> serde_json::Value {
+    let cfg: serde_json::Map<String, serde_json::Value> = keys
+        .into_iter()
+        .map(|k| (k.to_string(), serde_json::Value::Null))
+        .collect();
+    serde_json::json!({ "spec": { "dashboards": { "additionalConfig": cfg } } })
 }
 
 /// The address the ingress controller answers on.
@@ -9388,5 +9420,99 @@ mod tests {
 
         // Unconfigured deployments report nothing at all.
         assert!(!snapshot_state_from(&SnapshotConfig::default(), None, true).configured);
+    }
+
+    // ── #126: reverting the Dashboards config keys ──────────────────────
+
+    /// RFC 7386 JSON merge patch, as the API server applies `Patch::Merge`.
+    fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+        let Some(p) = patch.as_object() else {
+            *target = patch.clone();
+            return;
+        };
+        if !target.is_object() {
+            *target = serde_json::json!({});
+        }
+        let t = target.as_object_mut().unwrap();
+        for (k, v) in p {
+            if v.is_null() {
+                t.remove(k);
+            } else {
+                merge_patch(t.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+            }
+        }
+    }
+
+    fn cr_with(keys: &[(&str, &str)]) -> serde_json::Value {
+        let cfg: serde_json::Map<String, serde_json::Value> = keys
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+            .collect();
+        serde_json::json!({ "spec": { "dashboards": { "enable": true, "additionalConfig": cfg } } })
+    }
+
+    #[test]
+    fn removing_the_last_stack_keys_leaves_an_object_never_null() {
+        // The live 422: the stack's keys were the only ones left, and the old
+        // empty-map apply turned the map itself into null. The CRD types it
+        // `object` without `nullable`, so the result must still be one.
+        let mut cr = cr_with(&otel_dashboards_config());
+        let patch = dashboards_config_removal(otel_dashboards_config().iter().map(|(k, _)| *k));
+        assert!(
+            patch["spec"]["dashboards"]["additionalConfig"].is_object(),
+            "the map itself must never be sent as null"
+        );
+        merge_patch(&mut cr, &patch);
+        assert_eq!(
+            cr["spec"]["dashboards"]["additionalConfig"],
+            serde_json::json!({})
+        );
+        assert_eq!(cr["spec"]["dashboards"]["enable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn removal_deletes_only_the_stack_keys() {
+        let theirs = [
+            ("opensearch_security.auth.type", "openid"),
+            ("workspace.enabled", "true"),
+        ];
+        let mut all: Vec<(&str, &str)> = otel_dashboards_config().to_vec();
+        all.extend(theirs);
+        let mut cr = cr_with(&all);
+        let patch = dashboards_config_removal(otel_dashboards_config().iter().map(|(k, _)| *k));
+        // Every member is a key deletion and nothing else rides along.
+        let members = patch["spec"]["dashboards"]["additionalConfig"]
+            .as_object()
+            .unwrap();
+        assert_eq!(members.len(), otel_dashboards_config().len());
+        assert!(members.values().all(serde_json::Value::is_null));
+        assert_eq!(patch["spec"]["dashboards"].as_object().unwrap().len(), 1);
+        merge_patch(&mut cr, &patch);
+        assert_eq!(
+            cr["spec"]["dashboards"]["additionalConfig"],
+            cr_with(&theirs)["spec"]["dashboards"]["additionalConfig"]
+        );
+    }
+
+    #[test]
+    fn install_and_revert_address_the_same_keys() {
+        // Revert matches install: whatever the apply sets, the removal deletes.
+        for keys in [otel_dashboards_config().to_vec(), next_ui_config().to_vec()] {
+            let applied = dashboards_config_apply("d", &keys);
+            let removed = dashboards_config_removal(keys.iter().map(|(k, _)| *k));
+            let a: std::collections::BTreeSet<&String> = applied["spec"]["dashboards"]
+                ["additionalConfig"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect();
+            let r: std::collections::BTreeSet<&String> = removed["spec"]["dashboards"]
+                ["additionalConfig"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect();
+            assert_eq!(a, r);
+        }
     }
 }
