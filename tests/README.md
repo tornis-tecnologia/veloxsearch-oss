@@ -65,6 +65,25 @@ assume a cluster that meets the full platform contract in
 [../docs/REQUIREMENTS.md](../docs/REQUIREMENTS.md), which a CI minikube
 deliberately does not.
 
+## Satellite services
+
+`tests/satellites/` holds two throwaway services to point a deployment at, for
+the surfaces that need something on the other end: OpenLDAP for the ADR-045
+auth-provider axis and MinIO for the ADR-049 snapshot repository. Plain
+manifests, `kubectl apply -f`, no distribution-specific objects.
+
+```sh
+kubectl apply -f tests/satellites/openldap.yaml
+kubectl apply -f tests/satellites/minio.yaml
+```
+
+Credentials are in the clear in those manifests on purpose — they are fixtures.
+See [satellites/README.md](satellites/README.md) for the values to paste into
+each form, and for the one thing that is not obvious: with
+`VELOX_MULTITENANT_AUTH` on, the ADR-044 tenant NetworkPolicy set has no LDAP
+egress hole, so the LDAP fixture needs `netpol-tenant-egress-ldap.yaml` applied
+to the tenant namespace.
+
 ## Fixtures
 
 `tests/fixtures/integrations/nginx/` is a complete integration package —
