@@ -239,8 +239,9 @@ pub struct Restarts {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Now {
-    pub cpu_percent: f64,
-    pub heap_percent: f64,
+    /// `null` when no node reported a reading (OpenSearch's `-1`).
+    pub cpu_percent: Option<f64>,
+    pub heap_percent: Option<f64>,
     pub indexing_per_sec: Option<f64>,
     pub query_per_sec: Option<f64>,
     pub gc_old_millis_per_min: Option<f64>,
@@ -268,6 +269,11 @@ pub struct Window {
 pub struct Percentiles {
     pub p50: f64,
     pub p95: f64,
+    /// Recorded samples that carried a valid reading of THIS metric — the
+    /// real coverage behind the two numbers, which can be far below
+    /// `window.samples` (older samples lack the counters; `-1` readings are
+    /// dropped).
+    pub samples: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -437,12 +443,20 @@ pub const FIELDS: &[Field] = &[
         "utilisation percentile",
     ),
     f(
+        "/deployments/[]/window/cpu_percent/samples",
+        "coverage count for this metric",
+    ),
+    f(
         "/deployments/[]/window/heap_percent/p50",
         "utilisation percentile",
     ),
     f(
         "/deployments/[]/window/heap_percent/p95",
         "utilisation percentile",
+    ),
+    f(
+        "/deployments/[]/window/heap_percent/samples",
+        "coverage count for this metric",
     ),
     f(
         "/deployments/[]/window/indexing_per_sec/p50",
@@ -453,12 +467,20 @@ pub const FIELDS: &[Field] = &[
         "rate percentile",
     ),
     f(
+        "/deployments/[]/window/indexing_per_sec/samples",
+        "coverage count for this metric",
+    ),
+    f(
         "/deployments/[]/window/query_per_sec/p50",
         "rate percentile",
     ),
     f(
         "/deployments/[]/window/query_per_sec/p95",
         "rate percentile",
+    ),
+    f(
+        "/deployments/[]/window/query_per_sec/samples",
+        "coverage count for this metric",
     ),
     f(
         "/deployments/[]/window/gc_old_millis_per_min/p50",
@@ -469,12 +491,20 @@ pub const FIELDS: &[Field] = &[
         "rate percentile",
     ),
     f(
+        "/deployments/[]/window/gc_old_millis_per_min/samples",
+        "coverage count for this metric",
+    ),
+    f(
         "/deployments/[]/window/gc_young_millis_per_min/p50",
         "rate percentile",
     ),
     f(
         "/deployments/[]/window/gc_young_millis_per_min/p95",
         "rate percentile",
+    ),
+    f(
+        "/deployments/[]/window/gc_young_millis_per_min/samples",
+        "coverage count for this metric",
     ),
     f("/deployments/[]/window/disk_used_bytes/first", "quantity"),
     f("/deployments/[]/window/disk_used_bytes/last", "quantity"),
@@ -972,8 +1002,8 @@ fn now_of(live: &Sample, newest: Option<&Value>) -> Now {
         Some(round2(counter_rate((ts, c[i]?), (live.ts, cur)) * per))
     };
     Now {
-        cpu_percent: round2(live.cpu_percent),
-        heap_percent: round2(live.heap_percent),
+        cpu_percent: live.cpu_percent.map(round2),
+        heap_percent: live.heap_percent.map(round2),
         indexing_per_sec: rate(0, live.index_total, 1.0),
         query_per_sec: rate(1, live.query_total, 1.0),
         gc_old_millis_per_min: rate(2, live.gc_old_millis, 60.0),
@@ -986,7 +1016,21 @@ fn now_of(live: &Sample, newest: Option<&Value>) -> Now {
 /// apply. Stall episodes share the alias and are excluded.
 pub fn window_query() -> Value {
     let max = |f: &str| serde_json::json!({ "max": { "field": f } });
-    let avg = |f: &str| serde_json::json!({ "avg": { "field": f } });
+    // Each metric counts and folds only the samples carrying a valid reading:
+    // percentages in 0–100 (OpenSearch's `-1` "unavailable" is dropped, and
+    // older samples may have recorded it), counters where present.
+    let pct = |f: &str| {
+        serde_json::json!({
+            "filter": { "range": { f: { "gte": 0, "lte": 100 } } },
+            "aggs": { "v": { "avg": { "field": f } } },
+        })
+    };
+    let counter = |f: &str| {
+        serde_json::json!({
+            "filter": { "exists": { "field": f } },
+            "aggs": { "v": { "max": { "field": f } } },
+        })
+    };
     serde_json::json!({
         "size": 0,
         "query": { "bool": {
@@ -1001,13 +1045,13 @@ pub fn window_query() -> Value {
             },
             "aggs": {
                 "last_ts": max("@timestamp"),
-                "cpu": avg("cpu_percent"),
-                "heap": avg("heap_percent"),
+                "cpu": pct("cpu_percent"),
+                "heap": pct("heap_percent"),
                 "disk": max("disk_used_bytes"),
-                "idx": max("index_total"),
-                "qry": max("query_total"),
-                "gc_old": max("gc_old_millis"),
-                "gc_young": max("gc_young_millis"),
+                "idx": counter("index_total"),
+                "qry": counter("query_total"),
+                "gc_old": counter("gc_old_millis"),
+                "gc_young": counter("gc_young_millis"),
             },
         }},
     })
@@ -1034,15 +1078,16 @@ pub fn stalls_query() -> Value {
     })
 }
 
-/// One histogram bucket, reduced.
+/// One histogram bucket, reduced. Each metric is `(value, samples carrying
+/// it)`; `None` when no sample in the bucket carried a valid reading.
 struct Bucket {
     key: i64,
     last_ts: i64,
     docs: u64,
-    cpu: Option<f64>,
-    heap: Option<f64>,
+    cpu: Option<(f64, u64)>,
+    heap: Option<(f64, u64)>,
     disk: Option<u64>,
-    counters: [Option<u64>; 4],
+    counters: [Option<(u64, u64)>; 4],
 }
 
 fn buckets_of(v: &Value) -> Vec<Bucket> {
@@ -1059,15 +1104,27 @@ fn buckets_of(v: &Value) -> Vec<Bucket> {
                     .and_then(|x| x.get("value"))
                     .and_then(Value::as_f64)
             };
-            let cnt = |k: &str| val(k).filter(|x| *x >= 0.0).map(|x| x as u64);
+            // A filtered metric: its own doc count and inner value.
+            let metric = |k: &str| {
+                let m = b.get(k)?;
+                let n = m.get("doc_count").and_then(Value::as_u64)?;
+                let v = m.pointer("/v/value").and_then(Value::as_f64)?;
+                (n > 0).then_some((v, n))
+            };
+            let pct = |k: &str| metric(k).filter(|(v, _)| (0.0..=100.0).contains(v));
+            let cnt = |k: &str| {
+                metric(k)
+                    .filter(|(v, _)| *v >= 0.0)
+                    .map(|(v, n)| (v as u64, n))
+            };
             let key = b.get("key").and_then(Value::as_i64)?;
             Some(Bucket {
                 key,
                 last_ts: val("last_ts").map(|x| x as i64).unwrap_or(key),
                 docs: b.get("doc_count").and_then(Value::as_u64).unwrap_or(0),
-                cpu: val("cpu"),
-                heap: val("heap"),
-                disk: cnt("disk"),
+                cpu: pct("cpu"),
+                heap: pct("heap"),
+                disk: val("disk").filter(|x| *x >= 0.0).map(|x| x as u64),
                 counters: [cnt("idx"), cnt("qry"), cnt("gc_old"), cnt("gc_young")],
             })
         })
@@ -1077,16 +1134,34 @@ fn buckets_of(v: &Value) -> Vec<Bucket> {
     out
 }
 
+/// Samples behind the buckets at `idx` (each counted once).
+fn samples_of(buckets: &[Bucket], i: usize, idx: &BTreeSet<usize>) -> u64 {
+    idx.iter()
+        .filter_map(|&b| buckets[b].counters[i].map(|(_, n)| n))
+        .sum()
+}
+
 /// Rates between consecutive buckets that both carry counter `i`, through
-/// the shared reset clamp.
-fn bucket_rates(buckets: &[Bucket], i: usize, per: f64) -> Vec<f64> {
-    buckets
-        .windows(2)
-        .filter_map(|w| {
-            let (a, b) = (w[0].counters[i]?, w[1].counters[i]?);
-            Some(counter_rate((w[0].last_ts, a), (w[1].last_ts, b)) * per)
+/// the shared reset clamp — with the samples behind them.
+fn bucket_rates(buckets: &[Bucket], i: usize, per: f64) -> Option<Percentiles> {
+    let mut used = BTreeSet::new();
+    let rates = (1..buckets.len())
+        .filter_map(|j| {
+            let (a, b) = (buckets[j - 1].counters[i]?, buckets[j].counters[i]?);
+            used.extend([j - 1, j]);
+            Some(counter_rate((buckets[j - 1].last_ts, a.0), (buckets[j].last_ts, b.0)) * per)
         })
-        .collect()
+        .collect();
+    percentiles(rates, samples_of(buckets, i, &used))
+}
+
+/// p50/p95 of a per-bucket reading, over the buckets that carry one.
+fn reading(buckets: &[Bucket], get: fn(&Bucket) -> Option<(f64, u64)>) -> Option<Percentiles> {
+    let vals: Vec<(f64, u64)> = buckets.iter().filter_map(get).collect();
+    percentiles(
+        vals.iter().map(|(v, _)| *v).collect(),
+        vals.iter().map(|(_, n)| n).sum(),
+    )
 }
 
 fn window_of(v: &Value) -> Window {
@@ -1095,16 +1170,17 @@ fn window_of(v: &Value) -> Window {
         return empty_window();
     }
     // Indexing rate through the existing `downsample` fold: one sample per
-    // bucket, each bucket its own slot. Its first point has no predecessor
-    // and is dropped rather than counted as a zero-rate bucket.
-    let as_samples: Vec<Sample> = buckets
+    // bucket carrying the counter, each bucket its own slot. Its first point
+    // has no predecessor and is dropped rather than counted as a zero rate.
+    let carrying: BTreeSet<usize> = (0..buckets.len())
+        .filter(|&j| buckets[j].counters[0].is_some())
+        .collect();
+    let as_samples: Vec<Sample> = carrying
         .iter()
-        .filter_map(|b| {
-            Some(Sample {
-                ts: b.last_ts,
-                index_total: b.counters[0]?,
-                ..Sample::default()
-            })
+        .map(|&j| Sample {
+            ts: buckets[j].last_ts,
+            index_total: buckets[j].counters[0].map(|(c, _)| c).unwrap_or(0),
+            ..Sample::default()
         })
         .collect();
     let indexing: Vec<f64> = downsample(&as_samples, WINDOW_BUCKET_SECS * 1000)
@@ -1112,6 +1188,11 @@ fn window_of(v: &Value) -> Window {
         .skip(1)
         .map(|p| p.indexing_rate)
         .collect();
+    let indexing_samples = if carrying.len() > 1 {
+        samples_of(&buckets, 0, &carrying)
+    } else {
+        0
+    };
     let first_disk = buckets.iter().find_map(|b| b.disk);
     let last_disk = buckets.iter().rev().find_map(|b| b.disk);
     Window {
@@ -1119,12 +1200,12 @@ fn window_of(v: &Value) -> Window {
         end: rfc3339(buckets[buckets.len() - 1].last_ts),
         samples: buckets.iter().map(|b| b.docs).sum(),
         bucket_secs: WINDOW_BUCKET_SECS,
-        cpu_percent: percentiles(buckets.iter().filter_map(|b| b.cpu).collect()),
-        heap_percent: percentiles(buckets.iter().filter_map(|b| b.heap).collect()),
-        indexing_per_sec: percentiles(indexing),
-        query_per_sec: percentiles(bucket_rates(&buckets, 1, 1.0)),
-        gc_old_millis_per_min: percentiles(bucket_rates(&buckets, 2, 60.0)),
-        gc_young_millis_per_min: percentiles(bucket_rates(&buckets, 3, 60.0)),
+        cpu_percent: reading(&buckets, |b| b.cpu),
+        heap_percent: reading(&buckets, |b| b.heap),
+        indexing_per_sec: percentiles(indexing, indexing_samples),
+        query_per_sec: bucket_rates(&buckets, 1, 1.0),
+        gc_old_millis_per_min: bucket_rates(&buckets, 2, 60.0),
+        gc_young_millis_per_min: bucket_rates(&buckets, 3, 60.0),
         disk_used_bytes: first_disk
             .zip(last_disk)
             .map(|(first, last)| FirstLast { first, last }),
@@ -1147,8 +1228,9 @@ fn empty_window() -> Window {
     }
 }
 
-/// Nearest-rank p50/p95; `None` over no values.
-fn percentiles(mut v: Vec<f64>) -> Option<Percentiles> {
+/// Nearest-rank p50/p95 over `v`, carrying the samples behind it; `None`
+/// over no values.
+fn percentiles(mut v: Vec<f64>, samples: u64) -> Option<Percentiles> {
     v.retain(|x| x.is_finite());
     if v.is_empty() {
         return None;
@@ -1158,6 +1240,7 @@ fn percentiles(mut v: Vec<f64>) -> Option<Percentiles> {
     Some(Percentiles {
         p50: round2(rank(0.50)),
         p95: round2(rank(0.95)),
+        samples,
     })
 }
 
@@ -1215,26 +1298,62 @@ pub fn index_class(name: &str) -> &'static str {
     }
 }
 
-/// An index name with its rollover counter (`-000001`) and a trailing date
-/// (`-2026.09.14`, `-2026-09-14`, `-2026.09`) stripped.
+/// An index name reduced to its family: a system index's generation
+/// (`.kibana_1`), a rollover counter (`-000001`, or any counter after a date:
+/// `top_queries-2026.09.28-04127`) and a trailing date or date-time
+/// (`-2026.09.14`, `-2026-09-14`, `-2026.09`, `-2026.09.14-10`) stripped.
 pub fn index_family(name: &str) -> &str {
     let mut s = name;
-    if let Some((head, tail)) = s.rsplit_once('-') {
-        if tail.len() == 6 && tail.bytes().all(|b| b.is_ascii_digit()) {
-            s = head;
-        }
-    }
-    for len in [10, 7] {
-        let cut = s.len().saturating_sub(len);
-        if s.len() > len + 1 && s.is_char_boundary(cut) && s.is_char_boundary(cut - 1) {
-            let (head, tail) = s.split_at(cut);
-            let sep = head.as_bytes()[head.len() - 1];
-            if matches!(sep, b'-' | b'.' | b'_') && is_date(tail) {
-                return &head[..head.len() - 1];
+    if s.starts_with('.') {
+        if let Some((head, tail)) = s.rsplit_once('_') {
+            if all_digits(tail) && head.len() > 1 {
+                s = head;
             }
         }
     }
-    s
+    if let Some((head, tail)) = s.rsplit_once('-') {
+        let counter = all_digits(tail) && tail.len() <= 6;
+        if counter && (tail.len() == 6 || strip_datetime(head).is_some()) {
+            s = head;
+        }
+    }
+    strip_datetime(s).unwrap_or(s)
+}
+
+fn all_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The name before a trailing date or date-time suffix, when it has one and
+/// something precedes it.
+fn strip_datetime(s: &str) -> Option<&str> {
+    s.char_indices()
+        .filter(|&(i, c)| i > 0 && matches!(c, '-' | '.' | '_'))
+        .find(|&(i, _)| is_datetime(&s[i + 1..]))
+        .map(|(i, _)| &s[..i])
+}
+
+/// A date, optionally followed by a time of day (`-10`, `T1030`, `-10:30:00`).
+fn is_datetime(t: &str) -> bool {
+    [10, 7].into_iter().any(|len| {
+        t.len() >= len
+            && t.is_char_boundary(len)
+            && is_date(&t[..len])
+            && (t.len() == len || is_time(&t[len..]))
+    })
+}
+
+fn is_time(r: &str) -> bool {
+    let b = r.as_bytes();
+    if b.len() < 3 || !matches!(b[0], b'-' | b'.' | b'_' | b'T') || !b[1].is_ascii_digit() {
+        return false;
+    }
+    let digits: Vec<u8> = b[1..]
+        .iter()
+        .copied()
+        .filter(|c| !matches!(c, b':' | b'.' | b'-'))
+        .collect();
+    matches!(digits.len(), 2 | 4 | 6) && digits.iter().all(u8::is_ascii_digit)
 }
 
 /// `YYYY.MM.DD` / `YYYY-MM-DD` / `YYYY.MM` / `YYYY-MM`.

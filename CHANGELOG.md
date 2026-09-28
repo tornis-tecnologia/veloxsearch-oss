@@ -24,6 +24,11 @@ are called out explicitly.
   `gc_young_millis`. These fields are additive, and older samples simply
   lack them.
 
+### Fixed
+- The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
+  e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
+  answered, and records nothing when none did.
+
 ## [0.11.0] - 2026-09-27
 
 ### Fixed

@@ -78,7 +78,7 @@ the name of a remediated pod (reduced to the kind of remediation).
 | `nodes[].ready`, `nodes[].pressures[]` | node conditions (`MemoryPressure`, `DiskPressure`, `PIDPressure`) |
 | `nodes[].kernel` | kernel release |
 | `nodes[].cpu_millis.{allocatable,requested,used}` | millicores; `used` is `null` without metrics-server |
-| `nodes[].memory_bytes.{allocatable,requested,used}` | bytes |
+| `nodes[].memory_bytes.{allocatable,requested,used}` | bytes; `used` is `null` without metrics-server, and is its working set (page cache included) when present |
 | `nodes[].host_disk_bytes.{total,used}` | kubelet root filesystem |
 | `nodes[].storage_bytes.{total,used}` | Longhorn disks on the node |
 | `storage.class` | `longhorn` \| `foreign_default` \| `node_local` \| `absent` \| `unknown` |
@@ -96,22 +96,26 @@ the name of a remediated pod (reduced to the kind of remediation).
 | `deployments[].memory_limit_bytes`, `.heap_declared_bytes`, `.disk_per_node_bytes` | declared per node |
 | `deployments[].heap_max_bytes_observed` | largest `heap_max` OpenSearch reports |
 | `deployments[].health`, `.settled` | `green` \| `yellow` \| `red` \| `unknown`; the ADR-050 predicate |
-| `deployments[].indices.{total,families}` | index count; distinct names after stripping rollover and date suffixes |
+| `deployments[].indices.{total,families}` | index count; distinct families: the name with a rollover counter (`-000001`, or any `-N` after a date), a trailing date or date-time, and a system index's `_N` generation (`.kibana_1`) stripped |
 | `deployments[].indices.by_class.{system,managed,user}` | dot-prefixed; written by VeloxSearch itself; the rest |
 | `deployments[].shards.{primaries,total,unassigned,largest_primary_bytes}` | shard counts and the largest primary |
 | `deployments[].store_bytes`, `.docs` | store size and doc count summed across nodes (replicas included) |
 | `deployments[].disk_watermark_headroom_bytes.{low,high,flood_stage}` | free bytes above each disk watermark on the tightest node; negative means the watermark is already crossed |
 | `deployments[].restarts.{node_containers,dashboards}` | container restarts since each pod was created |
-| `deployments[].now.{cpu_percent,heap_percent}` | mean across nodes, from one live `_nodes/stats` call |
+| `deployments[].now.{cpu_percent,heap_percent}` | mean across the nodes that report a reading, from one live `_nodes/stats` call; `null` when none does (OpenSearch answers `-1`, "unavailable", e.g. for cgroup-confined CPU) |
 | `deployments[].now.{indexing_per_sec,query_per_sec,gc_old_millis_per_min,gc_young_millis_per_min}` | that call's counters against the newest recorded sample; `null` when there is no sample from the last 15 minutes |
 | `deployments[].window.{start,end,samples,bucket_secs}` | coverage of the recorded history: at most 7 days, in 300-second buckets |
-| `deployments[].window.{cpu_percent,heap_percent,indexing_per_sec,query_per_sec,gc_old_millis_per_min,gc_young_millis_per_min}.{p50,p95}` | percentiles over the buckets; `null` when no bucket carries the field |
+| `deployments[].window.{cpu_percent,heap_percent,indexing_per_sec,query_per_sec,gc_old_millis_per_min,gc_young_millis_per_min}.{p50,p95}` | percentiles over the buckets that carry a valid reading (`-1` readings are dropped); `null` when none does |
+| `deployments[].window.<metric>.samples` | recorded samples behind that metric's percentiles, which can be far below `window.samples` |
 | `deployments[].window.disk_used_bytes.{first,last}` | data-path disk used at the start and end of the window |
 | `deployments[].stalls[].{at,stage,component,component_status,recovery_stage,recovery_index_class,secs,remediation}` | stall episodes: the current one plus any recorded in the window |
 | `deployments[].integrations[].{id,version}` | installed integrations |
 | `deployments[].warnings[]` | `stalled`, `provisioning_failed`, `metrics_unavailable`; for the admin also `storage_single_copy`, `storage_node_local`, `node_pressure`, `kernel_incompatible` |
 
 ## Coverage caveats
+
+Node `used` figures (CPU and memory) come from metrics-server. Without it they are `null`, and only `allocatable` and `requested` are known.
+
 
 The window only covers what the metrics sampler recorded. That history lives
 in each deployment's own `velox-metrics-<deployment>` index with no replica

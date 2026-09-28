@@ -98,20 +98,23 @@ fn os_node(i: u64) -> Value {
     })
 }
 
+/// One `window_query` bucket of 5 samples. A filtered metric carries its own
+/// doc count; `None` is a bucket where no sample carried the field.
 fn bucket(i: i64, cpu: f64, idx: u64, qry: Option<u64>, gc: Option<u64>, disk: u64) -> Value {
     let key = T0 - 7 * 24 * 60 * MIN + i * 5 * MIN;
-    let v = |x: Option<u64>| json!({ "value": x });
+    let m = |x: Option<f64>| json!({ "doc_count": if x.is_some() { 5 } else { 0 }, "v": { "value": x } });
+    let u = |x: Option<u64>| m(x.map(|x| x as f64));
     json!({
         "key": key,
         "doc_count": 5,
         "last_ts": { "value": key + 4 * MIN },
-        "cpu": { "value": cpu },
-        "heap": { "value": cpu + 30.0 },
+        "cpu": m(Some(cpu)),
+        "heap": m(Some(40.0 + 5.0 * i as f64)),
         "disk": { "value": disk },
-        "idx": { "value": idx },
-        "qry": v(qry),
-        "gc_old": v(gc),
-        "gc_young": v(gc.map(|g| g * 20)),
+        "idx": u(Some(idx)),
+        "qry": u(qry),
+        "gc_old": u(gc),
+        "gc_young": u(gc.map(|g| g * 20)),
     })
 }
 
@@ -196,7 +199,9 @@ fn maximal_deployment() -> DeploymentInputs {
             "hits": { "hits": [{ "_source": { "message": S_DOC_BODY } }] },
             "aggregations": { "b": { "buckets": [
                 // A pre-ADR-060 bucket: no query/GC counters yet.
-                bucket(0, 10.0, 1_000_000, None, None, 17_179_869_184),
+                // OpenSearch's `-1` "unavailable" CPU (kind/cgroups), as an
+                // unfiltered aggregation would average it: must be dropped.
+                bucket(0, -1.0, 1_000_000, None, None, 17_179_869_184),
                 bucket(1, 20.0, 1_120_000, Some(100_000), Some(1_000), 17_300_000_000),
                 bucket(2, 70.0, 1_480_000, Some(112_000), Some(1_090), 18_000_000_000),
                 bucket(3, 18.0, 1_600_000, Some(115_000), Some(1_100), 19_338_473_472),
@@ -446,6 +451,32 @@ fn index_names_reduce_to_classes_and_families() {
         "a short digit suffix is a name"
     );
     assert_eq!(index_family("2026.09.14"), "2026.09.14");
+    // #59, seen live on kind: a date plus a non-ISM counter, and a system
+    // index's generation suffix.
+    assert_eq!(index_family("top_queries-2026.09.28-04127"), "top_queries");
+    assert_eq!(index_family(".kibana_1"), ".kibana");
+    assert_eq!(
+        index_family(".kibana_task_manager_7"),
+        ".kibana_task_manager"
+    );
+    assert_eq!(index_family("logs-2026.09.28-000001"), "logs");
+    assert_eq!(index_family("velox-metrics-x-000003"), "velox-metrics-x");
+    assert_eq!(
+        index_family("security-auditlog-2026.09.28"),
+        "security-auditlog"
+    );
+    assert_eq!(index_family("logs-2026.09.28-10"), "logs");
+    assert_eq!(index_family("logs-2026-09-28T10:30"), "logs");
+    assert_eq!(
+        index_family("orders_2"),
+        "orders_2",
+        "a user index keeps its _N"
+    );
+    assert_eq!(
+        index_family("app-7"),
+        "app-7",
+        "a bare short counter is a name"
+    );
     assert_eq!(index_class(".kibana_1"), "system");
     assert_eq!(index_class("velox-metrics-x-000001"), "managed");
     assert_eq!(index_class("k8s-logs-000003"), "managed");
@@ -496,6 +527,7 @@ fn shards_watermarks_and_live_numbers() {
     assert_eq!(d["heap_max_bytes_observed"], 1_610_612_736u64);
     assert_eq!(d["sizing"], "preset");
     assert_eq!(d["now"]["cpu_percent"], 21.0);
+    assert_eq!(d["now"]["heap_percent"], 61.0);
     assert_eq!(d["now"]["indexing_per_sec"], 410.2);
     assert_eq!(d["now"]["query_per_sec"], 12.5);
     assert_eq!(d["now"]["gc_old_millis_per_min"], 40.0);
@@ -517,15 +549,22 @@ fn window_states_its_coverage_and_skips_fields_old_samples_lack() {
     assert_eq!(w["bucket_secs"], 300);
     assert_eq!(w["start"], "2026-09-07T12:00:00Z");
     assert_eq!(w["end"], "2026-09-07T12:19:00Z");
-    assert_eq!(w["cpu_percent"], json!({ "p50": 18.0, "p95": 70.0 }));
+    // Bucket 0's `-1` is not a reading: three buckets, 15 samples.
+    assert_eq!(
+        w["cpu_percent"],
+        json!({ "p50": 20.0, "p95": 70.0, "samples": 15 })
+    );
     // Four buckets → three indexing rates (the first bucket has no delta).
     // 120k, 360k, 120k over 300s.
     assert_eq!(
         w["indexing_per_sec"],
-        json!({ "p50": 400.0, "p95": 1200.0 })
+        json!({ "p50": 400.0, "p95": 1200.0, "samples": 20 })
     );
     // Only the three buckets carrying query_total count: 12k then 3k.
-    assert_eq!(w["query_per_sec"], json!({ "p50": 10.0, "p95": 40.0 }));
+    assert_eq!(
+        w["query_per_sec"],
+        json!({ "p50": 10.0, "p95": 40.0, "samples": 15 })
+    );
     assert_eq!(
         w["disk_used_bytes"],
         json!({ "first": 17179869184u64, "last": 19338473472u64 })
@@ -540,6 +579,27 @@ fn window_states_its_coverage_and_skips_fields_old_samples_lack() {
     assert_eq!(quiet["samples"], 0);
     assert_eq!(quiet["start"], Value::Null);
     assert_eq!(quiet["cpu_percent"], Value::Null);
+}
+
+/// #59, seen live on kind: every node answering `os.cpu.percent: -1`
+/// ("unavailable" under cgroups) is `null`, never `-1.0`.
+#[test]
+fn an_unavailable_reading_is_null_not_minus_one() {
+    let mut d = maximal_deployment();
+    let stats = d.nodes_stats.as_mut().unwrap();
+    for n in ["a", "b", "c"] {
+        stats["nodes"][n]["os"]["cpu"]["percent"] = json!(-1);
+    }
+    stats["nodes"]["a"]["jvm"]["mem"]["heap_used_percent"] = json!(-1);
+    let mut i = inputs(true);
+    i.deployments = vec![d];
+    let p = serde_json::to_value(build(i, &Redaction::new(KEY, false))).unwrap();
+    let now = &p["deployments"][0]["now"];
+    assert_eq!(now["cpu_percent"], Value::Null);
+    assert_eq!(
+        now["heap_percent"], 61.5,
+        "the mean of the nodes that answered"
+    );
 }
 
 #[test]
@@ -615,12 +675,13 @@ fn tokens_refuse_anything_that_is_not_their_shape() {
     assert_eq!(image_tag("reg.example:5000/op/opensearch-operator"), None);
     assert_eq!(jvm_bytes("-Xms1g -Xmx2g"), Some(2 << 30));
     assert_eq!(commit_token("not a sha"), "unknown");
-    assert_eq!(percentiles(vec![]), None);
+    assert_eq!(percentiles(vec![], 0), None);
     assert_eq!(
-        percentiles((1..=100).map(f64::from).collect()),
+        percentiles((1..=100).map(f64::from).collect(), 100),
         Some(Percentiles {
             p50: 50.0,
-            p95: 95.0
+            p95: 95.0,
+            samples: 100
         })
     );
 }
