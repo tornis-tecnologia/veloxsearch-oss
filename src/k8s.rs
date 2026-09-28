@@ -4104,6 +4104,41 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
     out
 }
 
+/// Container restarts of a deployment's node-pool pods and of its Dashboards
+/// pods, each summed across containers — for the ADR-060 cluster profile.
+/// Cumulative since each pod was created, so a roll resets it. The same `pods`
+/// read `dashboards_block_in`/`node_pod_block_in` make, but side-effect free:
+/// those two arm remediations, and a read-only export must never do that.
+/// `None` when the pods could not be listed.
+pub async fn pod_restarts(dep: &Deployment) -> Option<(i64, i64)> {
+    use k8s_openapi::api::core::v1::Pod;
+    let client = client().await.ok()?;
+    let pods: Api<Pod> = Api::namespaced(client, dep.namespace());
+    let list = pods.list(&ListParams::default()).await.ok()?;
+    let (nodes_prefix, dash_prefix) = (
+        format!("{}-nodes-", dep.name()),
+        format!("{}-dashboards", dep.name()),
+    );
+    let (mut nodes, mut dashboards) = (0i64, 0i64);
+    for pod in list {
+        let name = pod.metadata.name.as_deref().unwrap_or_default();
+        let slot = if name.starts_with(&nodes_prefix) {
+            &mut nodes
+        } else if name.starts_with(&dash_prefix) {
+            &mut dashboards
+        } else {
+            continue;
+        };
+        let statuses = pod.status.and_then(|s| s.container_statuses);
+        *slot += statuses
+            .unwrap_or_default()
+            .iter()
+            .map(|cs| i64::from(cs.restart_count))
+            .sum::<i64>();
+    }
+    Some((nodes, dashboards))
+}
+
 /// TTL cache for the node-pod half (#97), same contract as `diagnosis_cache`:
 /// the SSE loop asks every 3s, and the answer is only paid for by deployments
 /// that are actually stalled.
@@ -5205,6 +5240,11 @@ pub struct RetentionOnCr {
     pub stamp: Option<String>,
     /// `retention::SOURCE_ANNOTATION`, raw; `None` on CRs that predate it.
     pub source: Option<String>,
+    /// Whether the OTel stack is installed (ADR-053): its three policies then
+    /// follow this deployment's retention too.
+    pub otel_stack: bool,
+    /// `retention::OTEL_STAMP_ANNOTATION`, raw.
+    pub otel_stamps: Option<String>,
 }
 
 fn retention_from(
@@ -5217,6 +5257,12 @@ fn retention_from(
         stamp: annotations.get(crate::retention::STAMP_ANNOTATION).cloned(),
         source: annotations
             .get(crate::retention::SOURCE_ANNOTATION)
+            .cloned(),
+        otel_stack: annotations
+            .get(LABEL_OTEL_STACK)
+            .is_some_and(|v| !v.is_empty()),
+        otel_stamps: annotations
+            .get(crate::retention::OTEL_STAMP_ANNOTATION)
             .cloned(),
     }
 }
@@ -5264,6 +5310,21 @@ pub async fn set_retention(
         .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .context("patching the retention annotations")?;
+    Ok(())
+}
+
+/// Record what velox last wrote to the OTel stack's retention policies
+/// (`retention::OTEL_STAMP_ANNOTATION`). A merge patch on that one key, like
+/// `set_retention`: it cannot touch the spec.
+pub async fn set_otel_retention_stamps(dep: &Deployment, stamps: &str) -> Result<()> {
+    let client = client().await?;
+    let patch = serde_json::json!({
+        "metadata": { "annotations": { crate::retention::OTEL_STAMP_ANNOTATION: stamps } }
+    });
+    os_api(&client, dep)
+        .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("patching the OTel retention stamps")?;
     Ok(())
 }
 

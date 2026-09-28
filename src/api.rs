@@ -844,6 +844,43 @@ mod server {
         /// `unreachable` (OpenSearch did not answer; see `detail`).
         pub state: String,
         pub detail: String,
+        /// The OTel stack's own policies, one row each, when the stack is
+        /// installed; empty otherwise. They follow `days` too.
+        pub otel: Vec<OtelRetention>,
+    }
+
+    /// One of the OTel stack's ISM policies (ADR-062 §6). In a status,
+    /// `state` is `absent` / `managed` / `customized` / `unreachable` and
+    /// `days` is what the live policy deletes at; in an apply report, `state`
+    /// is the outcome (`installed` / `updated` / `unchanged` / `customized` /
+    /// `error`).
+    #[derive(Serialize)]
+    pub struct OtelRetention {
+        pub policy_id: String,
+        pub state: String,
+        pub days: Option<u32>,
+        pub detail: String,
+    }
+
+    impl OtelRetention {
+        fn applied(
+            r: crate::otel_stack::PolicyResult<crate::retention::RetentionOutcome>,
+            days: u32,
+        ) -> Self {
+            let (state, days, detail) = match r.outcome {
+                Ok(o) if o == crate::retention::RetentionOutcome::Customized => {
+                    (o.as_str().to_string(), None, String::new())
+                }
+                Ok(o) => (o.as_str().to_string(), Some(days), String::new()),
+                Err(e) => ("error".to_string(), None, e),
+            };
+            Self {
+                policy_id: r.policy_id.to_string(),
+                state,
+                days,
+                detail,
+            }
+        }
     }
 
     /// What the admin's "apply default to existing deployments" did, per
@@ -858,6 +895,9 @@ mod server {
         pub outcome: String,
         pub days: Option<u32>,
         pub detail: String,
+        /// The OTel stack's policies, when it is installed and the deployment
+        /// was not skipped.
+        pub otel: Vec<OtelRetention>,
     }
 
     #[derive(Deserialize)]
@@ -1509,6 +1549,27 @@ mod server {
     async fn cluster_capacity(scope: Scope) -> Result<Json<ClusterCapacity>, ApiError> {
         scope.require_admin()?;
         crate::capacity::cluster_capacity()
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
+
+    /// `?names=true` opts real deployment and index-family names (and, for the
+    /// admin, tenant slugs) into the profile. Absent or anything else: off.
+    #[derive(Deserialize)]
+    pub struct ClusterProfileQuery {
+        #[serde(default)]
+        names: bool,
+    }
+
+    /// The ADR-060 cluster profile: a bounded, derived, read-only document of
+    /// size, shape, load and health, for the caller's own scope. It leaves the
+    /// cluster only as this response — there is no other export path.
+    async fn cluster_profile(
+        scope: Scope,
+        axum::extract::Query(q): axum::extract::Query<ClusterProfileQuery>,
+    ) -> Result<Json<crate::profile::ClusterProfile>, ApiError> {
+        crate::profile::gather(&scope, q.names)
             .await
             .map(Json)
             .map_err(ApiError::internal)
@@ -2360,11 +2421,12 @@ mod server {
                 outcome: String::new(),
                 days: None,
                 detail: String::new(),
+                otel: Vec::new(),
             };
             let result = async {
                 let cr = crate::k8s::retention_of(&dep).await?;
                 let Some(days) = defaults.for_purpose(&cr.purpose) else {
-                    return Ok::<_, anyhow::Error>(("search", None));
+                    return Ok::<_, anyhow::Error>(("search", None, Vec::new()));
                 };
                 // Skipped rows report what the deployment keeps, not the
                 // default it did not get.
@@ -2376,13 +2438,39 @@ mod server {
                     &defaults,
                 );
                 if source == crate::retention::Source::Override {
-                    return Ok(("override", own));
+                    return Ok(("override", own, Vec::new()));
                 }
                 let outcome =
                     crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), false)
                         .await?;
-                if outcome == crate::profiles::RetentionOutcome::Customized {
-                    return Ok((outcome.as_str(), own));
+                // The stack's policies follow the same value, each skipped on
+                // its own if someone customized it (ADR-062 §6).
+                let otel = if cr.otel_stack {
+                    crate::otel_stack::ensure_retention(
+                        &dep,
+                        days,
+                        cr.otel_stamps.as_deref(),
+                        false,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                };
+                let customized = |o: &crate::retention::RetentionOutcome| {
+                    *o == crate::retention::RetentionOutcome::Customized
+                };
+                // The CR moves when any policy took the value; a deployment
+                // whose every policy is customized keeps its own, untouched.
+                let moved = !customized(&outcome)
+                    || otel
+                        .iter()
+                        .any(|r| r.outcome.as_ref().is_ok_and(|o| !customized(o)));
+                let otel = otel
+                    .into_iter()
+                    .map(|r| OtelRetention::applied(r, days))
+                    .collect();
+                if !moved {
+                    return Ok((outcome.as_str(), own, otel));
                 }
                 crate::k8s::set_retention(
                     &dep,
@@ -2390,13 +2478,14 @@ mod server {
                     None,
                 )
                 .await?;
-                Ok((outcome.as_str(), Some(days)))
+                Ok((outcome.as_str(), Some(days), otel))
             }
             .await;
             match result {
-                Ok((outcome, days)) => {
+                Ok((outcome, days, otel)) => {
                     row.outcome = outcome.to_string();
                     row.days = days;
+                    row.otel = otel;
                 }
                 Err(e) => {
                     row.outcome = "error".to_string();
@@ -2446,6 +2535,26 @@ mod server {
                 Err(e) => ("unreachable".to_string(), format!("{e:#}")),
             }
         };
+        let otel = if cr.otel_stack {
+            crate::otel_stack::retention_state(dep, cr.otel_stamps.as_deref())
+                .await
+                .into_iter()
+                .map(|r| {
+                    let (state, days, detail) = match r.outcome {
+                        Ok((s, d)) => (s.to_string(), d, String::new()),
+                        Err(e) => ("unreachable".to_string(), None, e),
+                    };
+                    OtelRetention {
+                        policy_id: r.policy_id.to_string(),
+                        state,
+                        days,
+                        detail,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(RetentionStatus {
             purpose: cr.purpose,
             days,
@@ -2453,6 +2562,7 @@ mod server {
             source: source.to_string(),
             state,
             detail,
+            otel,
         })
     }
 
@@ -2477,11 +2587,26 @@ mod server {
         crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), true)
             .await
             .map_err(ApiError::internal)?;
+        // The stack's policies too: "restore default" is the one path that
+        // overwrites them when customized, as it does `velox-retention`.
+        let otel = if cr.otel_stack {
+            crate::otel_stack::ensure_retention(&dep, days, cr.otel_stamps.as_deref(), true).await
+        } else {
+            Vec::new()
+        };
         // Restoring the default also turns an override back into inheriting,
         // so the next "apply default" moves this deployment again.
         crate::k8s::set_retention(&dep, Some((days, crate::retention::Source::Default)), None)
             .await
             .map_err(ApiError::internal)?;
+        if let Some(e) = otel.iter().find_map(|r| {
+            r.outcome
+                .as_ref()
+                .err()
+                .map(|e| format!("ISM policy {}: {e}", r.policy_id))
+        }) {
+            return Err(ApiError::internal(e));
+        }
         Ok(Json(retention_status_of(&dep).await?))
     }
 
@@ -2795,6 +2920,7 @@ mod server {
         RoutePolicy { path: "/plan_snapshot_config", policy: TenantScoped, note: "dry run over the STORED config — unscoped it would leak whether a bucket is set." },
         RoutePolicy { path: "/save_snapshot_config", policy: TenantScoped, note: "writes the repository slice, its Secret and the policy CR; resolve-before-mutate." },
         RoutePolicy { path: "/verify_snapshot_repo", policy: TenantScoped, note: "makes the deployment's nodes reach the bucket with its stored credentials." },
+        RoutePolicy { path: "/cluster_profile", policy: TenantScoped, note: "ADR-060 read-only capacity export. Takes no deployment name: its only list is k8s::scoped_deployments(&scope). Installation sections (kubernetes/nodes/storage/fit) only for the admin; a tenant gets its own deployments plus its quota row as headroom." },
         RoutePolicy { path: "/retention_status", policy: TenantScoped, note: "reads the deployment's retention off its CR and its ISM policy out of its OpenSearch (ADR-062)." },
         RoutePolicy { path: "/reset_retention", policy: TenantScoped, note: "overwrites the deployment's ISM retention policy; resolve-before-mutate (ADR-062)." },
         RoutePolicy { path: "/deployment_activity_log", policy: TenantScoped, note: "Events, pod state and componentsStatus OF that deployment (ADR-050)." },
@@ -2890,6 +3016,8 @@ mod server {
             .route(p("/plan_snapshot_config"), post(plan_snapshot_config))
             .route(p("/save_snapshot_config"), post(save_snapshot_config))
             .route(p("/verify_snapshot_repo"), post(verify_snapshot_repo))
+            // -- cluster profile export (ADR-060)
+            .route(p("/cluster_profile"), get(cluster_profile))
             // -- deployment activity (ADR-050)
             .route(p("/deployment_activity_log"), post(deployment_activity_log))
             // -- OTel observability stack (ADR-053)

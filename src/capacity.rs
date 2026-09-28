@@ -374,7 +374,7 @@ fn parse_cpu_millis(s: &str) -> u64 {
 
 /// Parse a K8s memory/storage quantity to **bytes**: binary (`Ki`/`Mi`/`Gi`/
 /// `Ti`/`Pi`/`Ei`) and decimal (`k`/`M`/`G`/`T`/`P`/`E`) suffixes, else plain.
-fn parse_qty_bytes(s: &str) -> u64 {
+pub(crate) fn parse_qty_bytes(s: &str) -> u64 {
     let s = s.trim();
     if s.is_empty() {
         return 0;

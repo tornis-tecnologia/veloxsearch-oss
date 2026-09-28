@@ -8,6 +8,38 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- `GET /api/cluster_profile[?names=true]`: a read-only cluster profile
+  (ADR-060, #59). It is one bounded JSON document covering size, shape, load
+  and health: host nodes and storage for the admin, per-deployment indices,
+  shards, disk-watermark headroom and restarts, live rates, and p50/p95 over
+  the sampler's retained window. Tenants get their own deployments plus
+  their quota. Node, deployment and tenant identities are keyed pseudonyms,
+  and real names are added only on opt-in. The fields come from a single
+  allowlist (`profile::FIELDS`) that tests enforce in both directions, and a
+  canary test asserts that no credential, host, address, URL, document body
+  or free text can appear. The profile is only ever sent as that response;
+  nothing is pushed. Schema: `docs/cluster-profile.md`.
+- Capacity view: **Download cluster profile**. It previews the exact JSON,
+  offers a names on/off toggle that refetches, and saves the previewed bytes
+  from the browser with no second request. Strings are translated into
+  pt/en/es, and `tests/profile_dialog_check.py` covers the dialog.
+- The metrics sampler also records `query_total`, `gc_old_millis` and
+  `gc_young_millis`. These fields are additive, and older samples simply
+  lack them.
+
+### Changed
+- **The OTel observability stack's retention follows the deployment's
+  (ADR-062 §6):** its three ISM policies used a hardcoded 30/90 days and
+  ignored the retention default. They now take the deployment's value (the
+  CR annotation, else the installation default, else the built-in), use the
+  same apply-once rule as `velox-retention` (a policy edited inside
+  OpenSearch is left alone), and are covered by "apply default to existing
+  deployments" and "restore default". The deployment's retention panel and
+  the apply report show one row per stack policy. An upgrade does not rewrite
+  existing stack policies. They change only on a stack install or through
+  those two actions.
+
 ### Fixed
 - **Self-serve signup never provisioned tenant isolation (#122):** the
   runtime ClusterRole in `deploy/install.yaml` had no grant for
@@ -24,6 +56,9 @@ are called out explicitly.
   startup, then after 5 min, 15 min, 1 h and every 6 h. Existing tenants
   created before this fix are provisioned on the first start of the new
   release. Signup itself is unchanged.
+- The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
+  e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
+  answered, and records nothing when none did.
 
 ## [0.11.0] - 2026-09-27
 
