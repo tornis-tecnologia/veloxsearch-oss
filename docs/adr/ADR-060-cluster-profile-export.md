@@ -410,10 +410,25 @@ listed here.
 14. **The canary covers more** than the seven sentinels: namespace, tenant id,
     StorageClass name, node-role label, remediated pod name and the
     pseudonym key are all seeded and asserted absent in every mode.
-15. **Rule 8, precisely:** besides the Kubernetes API and each deployment's
+15. **OpenSearch's `-1` is not a reading** (live e2e on kind, 2026-09-28:
+    46 of 47 samples reported `os.cpu.percent: -1` under cgroups). The
+    sampler averages CPU and heap only over nodes that report a value in
+    0–100, and records `null` when none does. The profile's `now` fields are
+    then `null`, and the window aggregation filters each metric to its valid
+    samples. Every percentile object carries its own `samples`, so the
+    coverage of each metric is stated rather than implied by
+    `window.samples`. The filesystem and heap-size figures are read as
+    unsigned integers and a `-1` there reads as absent. The chart DTO
+    (`MetricPoint`) keeps its shape: a bucket with no valid reading draws 0,
+    as a missing field always has.
+16. **Index families** also strip a counter that follows a date
+    (`top_queries-2026.09.28-04127`), a date-time suffix, and a system
+    index's `_N` generation (`.kibana_1`). All three were seen raw on a live
+    run.
+17. **Rule 8, precisely:** besides the Kubernetes API and each deployment's
     own OpenSearch, the handler reads the installation's own control-plane
     datastore (the tenant's quota row, and tenant slugs for an admin with
     `names=true`). Every tenant-scoped request already reads it to resolve
     the scope. Nothing leaves the installation.
-16. Still open, as the ADR left it: whether a tenant session also needs the
+18. Still open, as the ADR left it: whether a tenant session also needs the
     `owner` role.
