@@ -98,12 +98,16 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-052 | Deferred provisioning re-runs: profile and monitors re-applied to an existing CR |
 | ADR-053 | The four-step create wizard (purpose → size → backup → review) and the opt-in next-generation Dashboards UI |
 | ADR-054 | Registry and signing live on GitHub and Docker Hub — the public `veloxsearch-registry` repo, cosign-keyless Docker Hub image, signing key held outside the repo (supersedes the internal-registry plan) |
-| ADR-055 | VeloxSearch may surgically patch the operator's Dashboards Deployment — survivability fields under a dedicated field manager, one-shot `.kibana_1` remediation, container logs stay unread |
+| ADR-055 | *(decision 1 superseded by ADR-063)* VeloxSearch may surgically patch the operator's Dashboards Deployment — survivability fields under a dedicated field manager, one-shot `.kibana_1` remediation, container logs stay unread |
 | ADR-056 | A healed dependency re-arms one exhausted provisioning wave — the metrics sampler triggers it, the CR counter still bounds it (amends ADR-052 rule 4) |
+| ADR-057 | The upgrade contract: an upgrade changes the VeloxSearch control plane (and ADR-055's fields), never the operator, its CRDs or `OpenSearchCluster` specs — bootstrap installs only what is absent, operator drift is reported (R9), upgrades apply `upgrade.yaml` (no bootstrap binding) and a re-applied binding is revoked again |
 | ADR-058 | Multiple integration catalog sources — sources as Secret-backed config, per-source key pinning with admin-approved keys, `source/id` provenance, install records so uninstall outlives a source, collector configs confined (proposed) |
 | ADR-059 | *Proposed.* Collector configuration for sources outside the cluster — optional `collectors` manifest section (schema 1.1), a write-only `_bulk` ingest route per deployment, one ingest-only OpenSearch principal per integration, never admin credentials |
 | ADR-060 | A bounded cluster profile (`GET /api/cluster_profile`): derived facts only, one field allowlist enforced by test, tenant-scoped, workload percentiles over the sampler's retained window, exported only by download — never pushed (accepted 2026-09-26, #59) |
 | ADR-061 | Flexible default storage — Longhorn when present; otherwise the cluster's default StorageClass (foreign CSI durable, node-local warned); Longhorn auto-bootstrap only when no default exists (amends ADR-043, #88) |
+| ADR-062 | Default retention per purpose — installation default in `veloxsearch-config` (admin), stamped per deployment on the CR at create with its source (default/override), apply-once: a `velox-retention` policy the user edited in OpenSearch is never rewritten except by an explicit reset; existing deployments that inherit the default move only through an explicit admin action |
+| ADR-063 | The Dashboards first-boot fix goes through the CR: `spec.dashboards.replicas` held at 0 until the cluster settles, remediation holds the same way, no write on the operator's Deployment (supersedes ADR-055 decision 1, #46) |
+| ADR-064 | *(proposed)* Admin-password reset safety — refused (409) unless the deployment is settled and no reset is pending; a failed operator nudge rolls the Secret back (or says the password changed); a failed securityconfig Job restores the previous password (#115) |
 
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and

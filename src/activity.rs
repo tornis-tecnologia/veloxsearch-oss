@@ -469,6 +469,10 @@ pub struct Activity {
     pub detail: String,
     /// **The predicate.** Everything else on this struct is presentation.
     pub settled: bool,
+    /// [`nodes_settled_of`]: settled apart from Dashboards. Not rendered —
+    /// it is the #46 hold's release gate (ADR-063), carried here so the
+    /// hold asks the same evaluation the panel does.
+    pub nodes_settled: bool,
     /// Whether mutating controls for THIS deployment should refuse. Distinct
     /// from `!settled` on purpose: a future activity might be worth showing
     /// without locking anything.
@@ -515,6 +519,7 @@ impl Activity {
             percent: 100,
             detail: String::new(),
             settled: true,
+            nodes_settled: true,
             locks_edits: false,
             nodes_ready: 0,
             nodes_total: 0,
@@ -540,12 +545,19 @@ impl Activity {
 ///     whose UI is down is not done coming up.
 ///   * no upgrade in flight, no non-terminal component.
 pub fn settled_of(i: &ActivityInput) -> bool {
+    nodes_settled_of(i) && i.dashboards_ready
+}
+
+/// [`settled_of`] without its Dashboards clause: the cluster Dashboards boots
+/// against has finished everything else. This is what the #46 Dashboards
+/// hold waits for (ADR-063) — the whole predicate would wait on the very
+/// Dashboards the hold keeps at zero.
+pub fn nodes_settled_of(i: &ActivityInput) -> bool {
     i.health == "green"
         && i.nodes_desired > 0
         && i.nodes_ready == i.nodes_desired
         && i.nodes_updated == i.nodes_desired
         && i.initialized
-        && i.dashboards_ready
         && !i.upgrade.in_flight()
         && !i
             .components
@@ -731,6 +743,7 @@ pub fn evaluate(i: &ActivityInput) -> Activity {
         percent: percent.min(99),
         detail,
         settled,
+        nodes_settled: nodes_settled_of(i),
         // Everything that is not settled involves nodes coming or going, which
         // is exactly when a configuration write would race a restart.
         locks_edits: true,
@@ -773,6 +786,42 @@ mod tests {
             dashboards: None,
             nodes: None,
         }
+    }
+
+    #[test]
+    fn a_held_dashboards_is_nodes_settled_but_not_settled() {
+        // #46 / ADR-063: the hold's release gate must not wait on the
+        // Dashboards it is holding back.
+        let held = ActivityInput {
+            dashboards_ready: false,
+            ..steady()
+        };
+        let a = evaluate(&held);
+        assert!(!a.settled);
+        assert!(a.nodes_settled);
+        assert_eq!(a.stage, "dashboards");
+        // …and every node-side clause still gates it.
+        for unsettled in [
+            ActivityInput {
+                health: "yellow".into(),
+                ..held.clone()
+            },
+            ActivityInput {
+                nodes_ready: 2,
+                ..held.clone()
+            },
+            ActivityInput {
+                nodes_updated: 2,
+                ..held.clone()
+            },
+            ActivityInput {
+                initialized: false,
+                ..held.clone()
+            },
+        ] {
+            assert!(!evaluate(&unsettled).nodes_settled, "{unsettled:?}");
+        }
+        assert!(evaluate(&steady()).nodes_settled);
     }
 
     /// The production deployment of issue #131, at hour sixteen: the operator

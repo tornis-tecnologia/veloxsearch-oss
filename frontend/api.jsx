@@ -218,6 +218,17 @@ const API = {
   // `pending`/`failed` — "monitores não aplicados". Accepted is 202; the
   // outcome rides the deployment's `provisioning` field on the next frame.
   retryProvisioning: (name) => call("retry_provisioning", { name }),
+
+  // ── default retention per purpose (ADR-062) ──────────────────
+  // -> { observability_days, security_days }
+  retentionDefaults: () => call("retention_defaults", null, "GET"),
+  saveRetentionDefaults: (observability_days, security_days) =>
+    call("save_retention_defaults", { observability_days, security_days }),
+  // Admin: rewrite every non-customized deployment. -> [RetentionApplyResult]
+  applyDefaultRetention: () => call("apply_default_retention", {}),
+  // -> RetentionStatus { purpose, days, default_days, source, state, detail }
+  retentionStatus: (name) => call("retention_status", { name }),
+  resetRetention: (name) => call("reset_retention", { name }),
 };
 
 // ─────────────────────────── adapters ──────────────────────────

@@ -13,7 +13,7 @@ use kube::api::{Api, ListParams, Patch, PatchParams};
 
 use crate::k8s::ns;
 
-const CONFIG_MAP: &str = "veloxsearch-config";
+pub(crate) const CONFIG_MAP: &str = "veloxsearch-config";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccessConfig {
