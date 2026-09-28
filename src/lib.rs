@@ -62,6 +62,11 @@ pub mod access;
 #[cfg(feature = "ssr")]
 pub mod profiles;
 
+// ADR-062: the installation's default retention per purpose, and the
+// per-deployment value stamped on the CR.
+#[cfg(feature = "ssr")]
+pub mod retention;
+
 #[cfg(feature = "ssr")]
 pub mod metrics;
 
@@ -110,6 +115,11 @@ pub mod upgrade;
 // the predicate that replaces `health == "green"` everywhere.
 #[cfg(feature = "ssr")]
 pub mod activity;
+
+// #115 (ADR-064): the admin-password reset's gate, its applied-or-not verdict,
+// and the backstop that undoes a reset whose securityconfig Job failed.
+#[cfg(feature = "ssr")]
+pub mod admin_reset;
 
 // ADR-049: pure renderers and rules for the snapshot repository + the scheduled
 // snapshot policy. `k8s.rs` owns the writes.

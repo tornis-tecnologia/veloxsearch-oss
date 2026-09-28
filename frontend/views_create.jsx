@@ -30,11 +30,22 @@ function nameError(raw, t) {
   return "";
 }
 
-function PurposeCard({ p, selected, lang, onSelect }) {
+// ADR-062: the installation's defaults, until the server's arrive. These are
+// the built-in values, so an offline wizard still tells the truth by default.
+const BUILTIN_RETENTION = { observability_days: 30, security_days: 90 };
+
+// Days a purpose keeps its data by default; null for search (kept forever).
+function defaultDays(purpose, defaults) {
+  if (purpose === "search") return null;
+  return purpose === "security" ? defaults.security_days : defaults.observability_days;
+}
+
+function PurposeCard({ p, selected, lang, onSelect, retention }) {
   const t = STR[lang];
+  const days = (s, d) => s.replaceAll("{0}", String(d));
   const meta = {
-    observability: { icon: "activity", title: t.p_obs_t, desc: t.p_obs_d, keep: t.p_obs_keep, col: t.p_obs_col, set: t.p_obs_set, best: t.p_obs_best },
-    security: { icon: "shield", title: t.p_sec_t, desc: t.p_sec_d, keep: t.p_sec_keep, col: t.p_sec_col, set: t.p_sec_set, best: t.p_sec_best },
+    observability: { icon: "activity", title: t.p_obs_t, desc: t.p_obs_d, keep: days(t.p_obs_keep, retention.observability_days), col: t.p_obs_col, set: days(t.p_obs_set, retention.observability_days), best: t.p_obs_best },
+    security: { icon: "shield", title: t.p_sec_t, desc: t.p_sec_d, keep: days(t.p_sec_keep, retention.security_days), col: t.p_sec_col, set: days(t.p_sec_set, retention.security_days), best: t.p_sec_best },
     search: { icon: "search", title: t.p_search_t, desc: t.p_search_d, keep: t.p_search_keep, col: t.p_search_col, set: t.p_search_set, best: t.p_search_best },
   }[p];
   const rows = [
@@ -113,6 +124,11 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   // Snapshot repository (ADR-049). `null` = the step was skipped, which is the
   // default and costs nothing: the Backup tab configures it later just as well.
   const [snapshot, setSnapshot] = useState(null);
+  // Default retention per purpose (ADR-062) and this deployment's override.
+  // An empty override means "the installation default" — the backend stamps
+  // whichever applies onto the new deployment.
+  const [retention, setRetention] = useState(BUILTIN_RETENTION);
+  const [retOverride, setRetOverride] = useState("");
 
   // The data-sources step stays gone (day-2 integrations live in their tab);
   // `sources` is decided on Review via the K3S toggle above (#52).
@@ -132,6 +148,15 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
         setSizes(m);
       })
       .catch(() => { /* offline / pre-auth: bundled SIZES stand in */ });
+    return () => { live = false; };
+  }, []);
+
+  // The installation's retention defaults, once. Offline keeps the built-ins.
+  useEffect(() => {
+    let live = true;
+    API.retentionDefaults()
+      .then((d) => { if (live && d && d.observability_days) setRetention(d); })
+      .catch(() => { /* offline / pre-auth: built-in defaults stand in */ });
     return () => { live = false; };
   }, []);
 
@@ -190,7 +215,11 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   // as a version, it must fall back to the default.
   const chosenVersion = version === OTHER_VERSION ? customVersion.trim() : version;
   const nameErr = nameError(name, t);
-  const valid = name.trim().length > 0 && !nameErr
+  const effDefault = defaultDays(purpose, retention);
+  const retTrim = retOverride.trim();
+  const retErr = retTrim && !(/^\d+$/.test(retTrim) && +retTrim >= 1 && +retTrim <= 3650) ? t.ret_days_err : "";
+  const retDays = purpose === "search" ? null : (retTrim && !retErr ? +retTrim : effDefault);
+  const valid = name.trim().length > 0 && !nameErr && !retErr
     && (version !== OTHER_VERSION || !!chosenVersion);
 
   // Only when the cluster has NO default StorageClass at all does creating
@@ -221,6 +250,9 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
         // Optional (ADR-049). The backend registers the repository only after the
         // cluster goes green — the operator's reconciler needs it running.
         snapshot,
+        // Only an explicit override travels; otherwise the backend stamps the
+        // installation default (ADR-062).
+        retentionDays: purpose !== "search" && retTrim && !retErr ? +retTrim : null,
       });
     } catch (e) {
       // The parent already toasted the reason. Re-arm so the user can fix it
@@ -288,9 +320,22 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
             <div className="section-title" style={{ marginTop: 22 }}>{t.purpose_q}</div>
             <div className="purpose-grid">
               {PURPOSES.map(p => (
-                <PurposeCard key={p} p={p} selected={purpose === p} lang={lang} onSelect={setPurpose} />
+                <PurposeCard key={p} p={p} selected={purpose === p} lang={lang} retention={retention}
+                  onSelect={(np) => { setPurpose(np); setRetOverride(""); }} />
               ))}
             </div>
+            {/* ADR-062: the default is visible and overridable per deployment.
+                Afterwards the policy is the user's, inside OpenSearch. */}
+            {purpose !== "search" && (
+              <div style={{ marginTop: 16, maxWidth: 360 }}>
+                <Field label={t.ret_label} htmlFor="create-retention" error={retErr}
+                  hint={fmt(t.ret_wizard_hint, effDefault)}>
+                  <input id="create-retention" className={`input${retErr ? " invalid" : ""}`} inputMode="numeric"
+                    data-testid="create-retention" placeholder={String(effDefault)} value={retOverride}
+                    onChange={e => setRetOverride(e.target.value)} />
+                </Field>
+              </div>
+            )}
           </div>
         )}
 
@@ -391,6 +436,9 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
                 <span className="v">{name.trim() || "—"}<span style={{ color: "var(--text-3)" }}> · {t.review_suffix}</span></span>
               </div>
               <div className="kvrow"><span className="k">{t.review_purpose}</span><span className="v">{STR[lang]["p_" + (purpose === "observability" ? "obs" : purpose === "security" ? "sec" : "search") + "_t"]}</span></div>
+              <div className="kvrow"><span className="k">{t.ret_label}</span>
+                <span className="v" data-testid="review-retention">{retDays ? fmt(t.ret_days_value, retDays) : t.ret_forever}</span>
+              </div>
               <div className="kvrow"><span className="k">{t.version_label}</span><span className="v">{chosenVersion || "—"}</span></div>
               <div className="kvrow"><span className="k">{t.review_size}</span><span className="v">{advanced ? (lang === "pt" ? "Personalizado" : lang === "es" ? "Personalizado" : "Custom") : sz.label} · {sz.nodes} {t.nodes} · {(advanced && customHeap) || sz.heap} · {(advanced && customDisk) || sz.disk}</span></div>
               <div className="kvrow">
