@@ -9,6 +9,12 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Added
+- Release notes now open with an **Upgrade:** line that says whether
+  `kubectl set image` is enough or `upgrade.yaml` has to be applied, with the
+  RBAC, config and other manifest changes listed. `deploy/manifest-changes.sh`
+  compares the previous release's `install.yaml` with the new one, ignoring
+  the image reference, and CI writes the same verdict for every PR to its job
+  summary. See "When is an image-only upgrade enough?" in `docs/DEPLOY.md`.
 - `GET /api/cluster_profile[?names=true]`: a read-only cluster profile
   (ADR-060, #59). It is one bounded JSON document covering size, shape, load
   and health: host nodes and storage for the admin, per-deployment indices,
