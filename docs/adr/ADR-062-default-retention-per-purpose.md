@@ -1,6 +1,7 @@
 # ADR-062 — Default retention per purpose: an installation default, stamped per deployment, applied once
 
-**Status:** accepted (requested by the operator, 2026-09-25)
+**Status:** accepted (requested by the operator, 2026-09-25); amended
+2026-09-28 (§6: the OTel stack's policies follow it too)
 **Date:** 2026-09-26
 
 ## Context
@@ -136,6 +137,48 @@ OpenSearch governs only the indices OpenSearch itself attaches it to (its
 re-attaches indices to a policy it does not own. The Edit tab says so in one
 line.
 
+### 6. The OTel stack's policies follow the same value (amendment, 2026-09-28)
+
+The OTel observability stack (ADR-053) writes three ISM policies of its own,
+`raw-span-policy`, `logs-policy` and `otel-v2-apm-service-map-policy`, one per
+index family (they override Data Prepper's rollover-only policies by id). As
+first shipped, this ADR left them on a hardcoded 30/90 days, so the knob did
+not reach the stack's indices. They now follow the deployment's retention,
+under the same rules as `velox-retention`:
+
+- **The age.** The CR annotation, else the installation default, else the
+  built-in 30/90 (`retention::otel_days`). This chain differs from §2 on
+  purpose: §2 guards a policy the deployment already runs, while the stack's
+  policies are written only by an explicit action, and an explicit action
+  takes the default. So on a CR from before this ADR, a new stack install uses
+  the installation default while `velox-retention` keeps its built-in value.
+  The telemetry is observability data whatever the deployment is for, so a
+  `search` deployment's stack uses the observability value.
+- **Apply once, per policy.** One rule for all four policies,
+  `retention::apply_once` / `retention::is_customized`, with the table in §3.
+  Each OTel policy has its own stamp, kept together in one annotation,
+  `veloxsearch.ai/otel-retention-stamps` (`<id>=<seq>:<term>,…`). Without a
+  stamp, velox recognizes its own description, `OTel telemetry retention
+  (<n>d)`, which is unchanged from every earlier install, so an existing stack
+  reads as velox's and not as customized. A policy velox rewrites is
+  re-attached to the indices it already manages (`change_policy`), because ISM
+  keeps a managed index on the policy version it started with.
+- **When they are written.** Only on the stack install, the admin's "apply
+  default to existing deployments", and the per-deployment "restore default".
+  A VeloxSearch upgrade and a deployment save never touch them (ADR-057). On
+  install they are still written before any workload (ADR-053's ordering: an
+  `ism_template` only attaches to indices created after the policy exists).
+  Both properties are pinned by source-order tests in `otel_stack.rs`.
+- **The actions.** "Apply default" moves the stack's policies of every
+  inheriting deployment where the stack is installed, skipping each customized
+  one on its own. The CR's value moves when at least one of the deployment's
+  policies took the default. If every policy was customized, the CR keeps its
+  value, as in §4. "Restore default" overwrites all four. Each report row
+  carries one sub-row per OTel policy, and `/retention_status` returns each
+  policy's live state and delete age.
+- **Search deployments** are still skipped by both actions (§4). Their stack
+  policies change only on a stack reinstall.
+
 ## Consequences
 
 - The purpose cards, the wizard and the review step show the effective days.
@@ -146,7 +189,10 @@ line.
 - `the_profile_is_planned_before_any_monitor` is unchanged. The ISM policy is
   still installed before the indices that it auto-attaches to.
 - **Known limit:** anything that rewrites the policy document other than a
-  user also reads as "customized". One example would be an OpenSearch upgrade
+  user also reads as "customized". For the OTel stack this includes a Data
+  Prepper rollover-only policy left under one of the three ids (for example
+  after an interrupted uninstall): velox leaves it alone, and "restore
+  default" adopts it. One example would be an OpenSearch upgrade
   that migrates ISM policy documents, if one ever does. The effect is
   conservative, because velox stops touching the policy, and restoring the
   default re-adopts it. This has not been observed on a live cluster.
