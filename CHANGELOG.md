@@ -41,6 +41,21 @@ are called out explicitly.
   those two actions.
 
 ### Fixed
+- **Self-serve signup never provisioned tenant isolation (#122):** the
+  runtime ClusterRole in `deploy/install.yaml` had no grant for
+  `resourcequotas`, `limitranges` or `networkpolicies`, so the server-side
+  apply of every tenant's ResourceQuota, LimitRange and default-deny
+  NetworkPolicy set was forbidden. Tenants got a namespace and no walls, and
+  signup still reported success. The ClusterRole now grants `get`, `create`
+  and `patch` on those three resources (no `update`, no `delete`), and
+  `upgrade.yaml` carries it. A test fails the build if a tenant template kind
+  is not appliable by the shipped ClusterRole.
+- **A failed tenant provisioning was only a log line (#122):** tenants whose
+  latest provisioning outcome is not a success are now listed to the admin
+  as a notice (`bootstrap_status.unisolated_tenants`) and re-provisioned at
+  startup, then after 5 min, 15 min, 1 h and every 6 h. Existing tenants
+  created before this fix are provisioned on the first start of the new
+  release. Signup itself is unchanged.
 - The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
   e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
   answered, and records nothing when none did.

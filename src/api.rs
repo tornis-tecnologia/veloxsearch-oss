@@ -642,6 +642,10 @@ pub struct BootstrapStatus {
     /// Both images are known and differ — the R9 warning the UI renders.
     #[serde(default)]
     pub operator_drift: bool,
+    /// Slugs of tenants whose isolation (namespace quota, limits, default-deny
+    /// NetworkPolicy) is not in place (#122). Empty unless multi-tenancy is on.
+    #[serde(default)]
+    pub unisolated_tenants: Vec<String>,
 }
 
 /// Read-only storage classification for the create flow (ADR-031/043, flexible
@@ -1225,6 +1229,7 @@ mod server {
             operator_image_running: s.operator_images.running,
             operator_image_vendored: s.operator_images.vendored.map(str::to_string),
             operator_drift: s.operator_images.drift,
+            unisolated_tenants: Vec::new(),
         }
     }
 
@@ -1475,11 +1480,14 @@ mod server {
 
     async fn bootstrap_status(scope: Scope) -> Result<Json<BootstrapStatus>, ApiError> {
         scope.require_admin()?;
-        crate::bootstrap::status()
+        let mut dto = crate::bootstrap::status()
             .await
             .map(bootstrap_dto)
-            .map(Json)
-            .map_err(ApiError::internal)
+            .map_err(ApiError::internal)?;
+        // The admin notice for #122. Read here, not in `bootstrap::status()`,
+        // which is the cluster probe and knows nothing of Postgres.
+        dto.unisolated_tenants = crate::tenants::unisolated_slugs().await;
+        Ok(Json(dto))
     }
 
     /// Build identity (#55). Installation-level: the image digest and operator

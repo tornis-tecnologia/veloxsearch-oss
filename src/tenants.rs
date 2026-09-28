@@ -40,6 +40,9 @@
 //! whose namespace is missing is refused at their first deployment with an
 //! actionable message rather than silently landing in someone else's namespace.
 //! Losing the account because a cluster call failed would be the worse trade.
+//! A failed provisioning is not left at a log line (#122): the admin sees the
+//! tenant in a notice (`bootstrap_status.unisolated_tenants`) and
+//! [`run_isolation_reconcile`] retries it at startup and on a schedule.
 
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -211,9 +214,14 @@ pub async fn signup(
         return Ok(SignupOutcome::Accepted);
     };
     // The cluster-level walls (#81). After the commit, never inside it: a K8s
-    // round-trip must not hold a Postgres transaction open.
+    // round-trip must not hold a Postgres transaction open. A failure is
+    // audited, shown to the admin and retried by `run_isolation_reconcile`
+    // (#122) — it does not undo the account.
     if let Err(e) = provision_isolation(&mut pg, &tenant).await {
-        tracing::error!(tenant = %tenant.slug, "tenant isolation was NOT provisioned: {e:#}");
+        tracing::error!(
+            tenant = %tenant.slug,
+            "tenant isolation was NOT provisioned (the background reconcile retries it): {e:#}"
+        );
     }
     // Best-effort: a relay outage must not undo an account. The user can ask
     // for a new link; a rolled-back signup would be far worse.
@@ -431,6 +439,115 @@ async fn provision_isolation(
         .await
         .context("committing the provisioning audit")?;
     outcome
+}
+
+// ─────────────────── isolation reconcile (#122) ───────────────────
+//
+// Signup's provisioning call is best-effort, so a tenant can end up with an
+// account and no walls (#122: a missing RBAC grant refused every document on
+// every install). The audit log already records each outcome; this reads it
+// back, retries on a schedule, and tells the admin which tenants are still
+// exposed. Same shape as the startup ingress backfill (#83).
+
+/// Tenants whose isolation is not known to be in place: the most recent
+/// provisioning outcome in the audit log is a failure, or there is none (a
+/// tenant created before #81, or one whose process died between the signup
+/// commit and the provisioning call).
+async fn unisolated_on(pg: &tokio_postgres::Client) -> Result<Vec<crate::k8s::TenantIdentity>> {
+    let rows = pg
+        .query(
+            "SELECT t.id::text, t.slug, t.namespace
+             FROM tenants t
+             LEFT JOIN LATERAL (
+                 SELECT a.action FROM audit a
+                 WHERE a.tenant_id = t.id
+                   AND a.action IN ('tenant.provisioned', 'tenant.provision_failed')
+                 ORDER BY a.at DESC, a.id DESC
+                 LIMIT 1
+             ) last ON true
+             WHERE last.action IS DISTINCT FROM 'tenant.provisioned'
+             ORDER BY t.slug",
+            &[],
+        )
+        .await
+        .context("listing tenants without isolation")?;
+    Ok(rows
+        .iter()
+        .map(|r| crate::k8s::TenantIdentity {
+            id: r.get(0),
+            slug: r.get(1),
+            namespace: r.get(2),
+        })
+        .collect())
+}
+
+/// Slugs of tenants running without isolation, for the admin notice. Empty
+/// when multi-tenancy is off; a datastore error is logged and reads as empty,
+/// because this feeds a notice, not a gate.
+pub async fn unisolated_slugs() -> Vec<String> {
+    if !enabled() {
+        return Vec::new();
+    }
+    let found = async {
+        let pg = crate::db::connect_app().await?;
+        unisolated_on(&pg).await
+    }
+    .await;
+    match found {
+        Ok(tenants) => tenants.into_iter().map(|t| t.slug).collect(),
+        Err(e) => {
+            tracing::warn!("could not list tenants without isolation: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
+/// Pause before reconcile pass `pass` (0 runs at startup). Quick early retries
+/// cover an API or datastore that is still coming up with the pod; after that
+/// a few passes a day, because the usual cause — missing RBAC — is fixed by
+/// applying a release's manifest, which restarts the pod and runs pass 0.
+fn reconcile_delay(pass: u32) -> std::time::Duration {
+    const MIN: u64 = 60;
+    std::time::Duration::from_secs(match pass {
+        0 => 0,
+        1 => 5 * MIN,
+        2 => 15 * MIN,
+        3 => 60 * MIN,
+        _ => 6 * 60 * MIN,
+    })
+}
+
+/// One pass: re-provision every tenant whose isolation is missing. Each
+/// attempt is audited by [`provision_isolation`], so the next pass — and the
+/// admin notice — see its outcome.
+async fn reconcile_isolation_once() -> Result<()> {
+    let mut pg = crate::db::connect_app().await?;
+    let missing = unisolated_on(&pg).await?;
+    for tenant in &missing {
+        match provision_isolation(&mut pg, tenant).await {
+            Ok(()) => tracing::info!(tenant = %tenant.slug, "tenant isolation reconciled"),
+            Err(e) => {
+                tracing::error!(tenant = %tenant.slug, "tenant isolation still NOT provisioned: {e:#}")
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Background reconcile of tenant isolation (#122), spawned once at startup.
+/// Inert while multi-tenancy is off; never blocks serving.
+pub async fn run_isolation_reconcile() {
+    if !enabled() {
+        return;
+    }
+    let mut pass = 0u32;
+    loop {
+        tokio::time::sleep(reconcile_delay(pass)).await;
+        if let Err(e) = reconcile_isolation_once().await {
+            tracing::warn!("tenant isolation reconcile pass failed: {e:#}");
+        }
+        pass = pass.saturating_add(1);
+    }
 }
 
 // ─────────────────────────── tokens ───────────────────────────
@@ -827,6 +944,18 @@ mod tests {
         assert!(!bcrypt::verify("anything", DUMMY_HASH).unwrap());
     }
 
+    /// #122: the reconcile runs at startup, backs off, and settles at a
+    /// steady rate — never a tight loop against an API that keeps refusing.
+    #[test]
+    fn isolation_reconcile_starts_now_backs_off_and_stays_bounded() {
+        assert_eq!(reconcile_delay(0), std::time::Duration::ZERO);
+        let delays: Vec<_> = (0..10).map(reconcile_delay).collect();
+        assert!(delays.windows(2).all(|w| w[0] <= w[1]), "{delays:?}");
+        assert!(reconcile_delay(1) >= std::time::Duration::from_secs(60));
+        assert_eq!(reconcile_delay(10), reconcile_delay(1_000));
+        assert!(reconcile_delay(u32::MAX) <= std::time::Duration::from_secs(24 * 3600));
+    }
+
     /// The flag is the whole safety story for shipping this on `develop`: with
     /// it off, no entry point may reach the datastore or create anything.
     #[test]
@@ -849,6 +978,9 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none());
+            // #122: the admin notice and the reconcile loop return at once.
+            assert!(unisolated_slugs().await.is_empty());
+            run_isolation_reconcile().await;
         });
     }
 
@@ -1180,6 +1312,55 @@ mod tests {
                 .unwrap()
                 .get(0);
             assert_eq!(live, 1, "spent/expired rows are pruned at issue time");
+        });
+    }
+
+    /// #122: which tenants the reconcile retries and the admin is told about.
+    /// Decided by the LATEST provisioning outcome, so a failure followed by a
+    /// success is healed and a success followed by a failure is not.
+    #[test]
+    #[ignore = "needs a live Postgres (set VELOX_PG_TEST_URL)"]
+    fn tenants_without_a_successful_latest_provisioning_are_unisolated() {
+        let url = live_url().expect("VELOX_PG_TEST_URL not set");
+        rt().block_on(async {
+            let mut pg = fresh_db(&url).await;
+            let hash = bcrypt::hash("longenough", 4).unwrap();
+            let mut ids = std::collections::HashMap::new();
+            for (email, name) in [
+                ("ops@never.com", "never"),
+                ("ops@failed.com", "failed"),
+                ("ops@healed.com", "healed"),
+                ("ops@regressed.com", "regressed"),
+                ("ops@fine.com", "fine"),
+            ] {
+                let (_, t) = create_user_and_tenant(&mut pg, email, &hash, Some(name))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                ids.insert(name, t.id);
+            }
+            let tx = pg.transaction().await.unwrap();
+            for (name, action) in [
+                ("failed", "tenant.provision_failed"),
+                ("healed", "tenant.provision_failed"),
+                ("healed", "tenant.provisioned"),
+                ("regressed", "tenant.provisioned"),
+                ("regressed", "tenant.provision_failed"),
+                ("fine", "tenant.provisioned"),
+            ] {
+                audit(&tx, None, Some(&ids[name]), action, None)
+                    .await
+                    .unwrap();
+            }
+            tx.commit().await.unwrap();
+
+            let slugs: Vec<String> = unisolated_on(&pg)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|t| t.slug)
+                .collect();
+            assert_eq!(slugs, vec!["failed", "never", "regressed"]);
         });
     }
 }
