@@ -32,18 +32,24 @@ Open one pull request containing exactly three things:
    a minor version may break, and the changelog is the only place that says so.
    The release notes are lifted verbatim from this section, so write it for the
    person reading the release page.
-3. **`deploy/install.yaml`** — the image tag, to the new version.
+3. **`deploy/install.yaml`** — the image tag, to the new version. CI's
+   `manifest-version` job fails the PR if you forget: the tag must equal
+   `Cargo.toml`'s version on every commit, so applying the file from a checkout
+   can never roll an install back.
 
-Get it reviewed and merge it. That is the release.
+Get it reviewed and merge it. That is the release. A release PR also runs the
+**upgrade lane** (`.github/workflows/upgrade.yml`): the previous release is
+installed on minikube, a deployment is brought to green, and the candidate is
+rolled out over it under the contract in [ADR-057](adr/ADR-057-upgrade-contract.md).
 
 ### What the workflow then does
 
 | Step | |
 | --- | --- |
-| `gate` | Confirms the version actually changed, and refuses if a tag for it already exists |
+| `gate` | Confirms the version actually changed and moved forward, and refuses if a tag for it already exists |
 | `verify` | Re-runs every CI gate **on the release commit**. `main` having been green earlier is a different claim from this tree being green |
 | `publish` | Builds and pushes `<image>:<version>`, then signs it with cosign **keyless** — an OIDC identity and a ten-minute certificate, so there is no signing key to leak or rotate |
-| `release` | Rewrites the manifest's image to the published **digest**, tags `v<version>`, and publishes the release with `install.yaml`, `velox-linux-amd64` and `SHA256SUMS` attached |
+| `release` | Rewrites the manifest's image to the published **digest**, tags `v<version>`, and publishes the release with `install.yaml`, `upgrade.yaml` (the same manifest without the bootstrap binding, ADR-057), `velox-linux-amd64` and `SHA256SUMS` attached |
 
 ### Why the digest lives in the release, not in `main`
 
@@ -88,10 +94,65 @@ repository holds registry credentials, and nothing should.
 
 ## Rolling out an upgrade
 
+An upgrade changes the VeloxSearch Pod — its image, RBAC and non-secret config —
+and, through migrations, its database. It does not change the OpenSearch
+operator, its CRDs, cert-manager, or your `OpenSearchCluster`s
+([ADR-057](adr/ADR-057-upgrade-contract.md)).
+
+Apply the **upgrade manifest of the version you are moving to** — never
+`install.yaml`, never `deploy/install.yaml` from a checkout, and never an older
+release than the one running:
+
 ```sh
-kubectl apply -f deploy/install.yaml
+VERSION=0.11.0   # the release you are upgrading TO
+kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/v$VERSION/upgrade.yaml
 kubectl -n veloxsearch-system rollout status deploy/veloxsearch
 ```
+
+`upgrade.yaml` is the release's `install.yaml` — the same digest-pinned image,
+the same runtime RBAC — minus two documents. One is the `veloxsearch-env`
+ConfigMap, so **your settings survive the upgrade** (see
+[below](#your-settings-survive-the-upgrade); **GitOps users with pruning on must
+read [the GitOps note](#gitops-installs-argo-cd-flux-own-veloxsearch-env-before-you-bump)
+before bumping**). The other is the `veloxsearch-bootstrap`
+ClusterRoleBinding to `cluster-admin`. That binding exists only for the first
+bootstrap, which an upgrade does not repeat, so **an upgrade never grants
+cluster-admin**. Confirm it:
+
+```sh
+kubectl get clusterrolebinding veloxsearch-bootstrap   # expect: NotFound
+```
+
+To see what runs before you pick `VERSION`:
+`kubectl -n veloxsearch-system get deploy/veloxsearch -o jsonpath='{..image}'`
+prints a digest for a release-artifact install; `docker buildx imagetools inspect
+docker.io/tornistecnologia/veloxsearch-oss:<version>` prints the digest a version
+points at.
+
+The whole manifest is applied, not just the image (`kubectl set image`), because
+a release can need RBAC the previous one did not have — ADR-055 added `patch` on
+`apps/deployments`, for example — and an image-only upgrade would start the new
+binary without it.
+
+**When is an image-only upgrade enough?** When the release notes say so. Every
+release opens with an **Upgrade:** line produced by
+`deploy/manifest-changes.sh`, which compares the release's `install.yaml` with
+the previous release's, image reference ignored. "image-only ✓" means nothing
+but the image moved and gives the exact `kubectl set image` command; otherwise
+the line names what changed (`rbac`, `config`, `other`) with the details in a
+collapsible block, and `upgrade.yaml` is the way. Skipping releases means
+checking every release in between. Each pull request's CI summary shows the
+same verdict for the tree against the latest release.
+
+**Releases published before `upgrade.yaml` existed** ship only `install.yaml`.
+Applying one of those re-creates the binding. From this release on, the running
+app deletes a re-created binding again within about a minute once bootstrap is
+complete (ADR-027, ADR-057); on older releases, delete it by hand after the
+rollout — the day-to-day `veloxsearch-runtime` role does not need it.
+
+**An operator that is restarting during the rollout is left alone.** Bootstrap
+installs only what is absent. A component that is installed but not Ready is
+waited on and reported, never re-installed over.
 
 The Deployment is a single replica by design: the control plane holds no
 in-memory state that a second replica could serve, and two replicas racing on
@@ -103,6 +164,55 @@ failure. A rollout that fails to migrate therefore fails closed: the old Pod
 keeps serving until the new one is ready, and the new one never becomes ready
 with a half-applied store.
 
+### Your settings survive the upgrade
+
+`upgrade.yaml` leaves out the `veloxsearch-env` ConfigMap, the Pod's
+non-secret settings (`VELOX_PG_ENABLED`, `VELOX_MULTITENANT_AUTH`, the SMTP
+relay, `VELOX_PUBLIC_URL`, …). `install.yaml` creates it once with the shipped
+defaults; after that it is yours, and an upgrade does not touch it (#128). A
+release that introduces a new key needs nothing from you: a key missing from
+the ConfigMap runs with the same default the release ships.
+
+To change a setting, edit the ConfigMap and restart the Pod — the Pod reads it
+only at start:
+
+```sh
+kubectl -n veloxsearch-system edit configmap veloxsearch-env
+kubectl -n veloxsearch-system rollout restart deploy/veloxsearch
+```
+
+To see a key a newer release added, with its comment, read that release's
+`install.yaml`. Re-applying `install.yaml` over an existing install resets every
+setting to the shipped default — one more reason to upgrade with `upgrade.yaml`.
+
+### GitOps installs (Argo CD, Flux): own `veloxsearch-env` before you bump
+
+> **Warning.** If your GitOps source renders a release's `upgrade.yaml` and
+> **pruning is on**, the first sync to a release whose `upgrade.yaml` leaves the
+> ConfigMap out (every release after 0.11.0) **deletes the `veloxsearch-env`
+> ConfigMap**, because the manifest no longer declares it. The
+> running Pod keeps working, but the next Pod cannot start
+> (`CreateContainerConfigError`: the Deployment requires the ConfigMap), and
+> whatever you had set there is gone.
+
+Before you bump to such a release, do one of these:
+
+- **Own the ConfigMap in your repository** (recommended). Add a
+  `veloxsearch-env` ConfigMap in namespace `veloxsearch-system` to your overlay,
+  with the values you run today (`kubectl -n veloxsearch-system get configmap
+  veloxsearch-env -o yaml`, without the server-set metadata). Git is then the
+  source of truth for your settings, which is what GitOps wants anyway, and the
+  upgrade manifest never competes with it.
+- **Or exclude it from pruning.** Annotate the live ConfigMap with
+  `argocd.argoproj.io/sync-options: Prune=false` (Argo CD) or
+  `kustomize.toolkit.fluxcd.io/prune: disabled` (Flux). It then stays, outside
+  git; Argo CD shows it as needing pruning and leaves it alone.
+
+A GitOps source that renders `install.yaml` instead is not affected — it keeps
+declaring the ConfigMap, with the shipped defaults, exactly as before (and a
+second `veloxsearch-env` in your overlay would collide with it: patch the
+rendered one instead).
+
 ## Rolling back
 
 ```sh
@@ -113,13 +223,42 @@ Migrations are forward-only. Rolling the image back to a version that predates a
 migration is not supported and is not tested — if a release needs to be undone
 after its migrations ran, cut a forward release that reverses the change.
 
+## Operator version drift
+
+Each release vendors one OpenSearch operator (`deploy/bootstrap/operator.yaml`).
+Bootstrap installs it on a cluster that has no operator. On a cluster that
+already runs one, it never replaces it: not during an upgrade, and not while that
+operator is restarting (ADR-057).
+
+When the running operator's image differs from the vendored one, the conformity
+report shows **R9 ⚠**, and a notice appears above the main navigation. Nothing is
+changed. What to do depends on why:
+
+- **You run a different operator on purpose.** Nothing to do. R9 is
+  informational and never blocks anything.
+- **You want the operator this release vendors.** That is an operator upgrade,
+  and you own it. Read the operator's release notes for CRD changes, take a
+  snapshot, then apply the bundle from the release tag, retargeted from the
+  namespace it was rendered into to the app namespace:
+
+  ```sh
+  VERSION=0.11.0
+  curl -fsSL https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/v$VERSION/deploy/bootstrap/operator.yaml \
+    | sed 's/veloxsearch-test/veloxsearch-system/g' \
+    | kubectl apply --server-side --field-manager=veloxsearch-bootstrap --force-conflicts -f -
+  ```
+
+  This is the same apply bootstrap does on a fresh cluster. CI does not
+  exercise it as an upgrade, so treat it as the operator upgrade it is.
+
 ## Air-gapped and side-loaded installs
 
 Build once, carry the tarball, import per platform:
 
 ```sh
-deploy/build-image.sh --tag veloxsearch:0.7.0
-docker save veloxsearch:0.7.0 -o veloxsearch.tar
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)   # what deploy/install.yaml pins
+deploy/build-image.sh --tag veloxsearch:$VERSION
+docker save veloxsearch:$VERSION -o veloxsearch.tar
 ```
 
 | Platform | Import command |
@@ -170,8 +309,8 @@ Everything below the line is the workflow's job. Yours is the pull request.
 
 - [ ] `Cargo.toml` version bumped, `Cargo.lock` updated
 - [ ] `CHANGELOG.md` section written for a reader, breaking changes called out
-- [ ] `deploy/install.yaml` image tag bumped to the new version
-- [ ] CI green on the release PR
+- [ ] `deploy/install.yaml` image tag bumped to the new version (CI enforces it)
+- [ ] CI green on the release PR, including the N-1 → N upgrade lane
 
 ---
 

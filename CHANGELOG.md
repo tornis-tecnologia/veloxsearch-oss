@@ -8,6 +8,54 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Upgrade notes
+- **GitOps with pruning (Argo CD, Flux): own `veloxsearch-env` BEFORE you
+  bump to this release, or the sync DELETES it.** `upgrade.yaml` no longer
+  carries the `veloxsearch-env` ConfigMap (#128). A tool that renders
+  `upgrade.yaml` and prunes will remove the ConfigMap; the next Pod then
+  cannot start and your settings are gone. Add the ConfigMap, with the values
+  you run today, to your own overlay (or annotate it
+  `argocd.argoproj.io/sync-options: Prune=false`) first. See DEPLOY.md,
+  "GitOps installs". `kubectl apply -f upgrade.yaml` users need do nothing.
+
+### Added
+- Release notes now open with an **Upgrade:** line that says whether
+  `kubectl set image` is enough or `upgrade.yaml` has to be applied, with the
+  RBAC, config and other manifest changes listed. `deploy/manifest-changes.sh`
+  compares the previous release's `install.yaml` with the new one, ignoring
+  the image reference, and CI writes the same verdict for every PR to its job
+  summary. See "When is an image-only upgrade enough?" in `docs/DEPLOY.md`.
+- `GET /api/cluster_profile[?names=true]`: a read-only cluster profile
+  (ADR-060, #59). It is one bounded JSON document covering size, shape, load
+  and health: host nodes and storage for the admin, per-deployment indices,
+  shards, disk-watermark headroom and restarts, live rates, and p50/p95 over
+  the sampler's retained window. Tenants get their own deployments plus
+  their quota. Node, deployment and tenant identities are keyed pseudonyms,
+  and real names are added only on opt-in. The fields come from a single
+  allowlist (`profile::FIELDS`) that tests enforce in both directions, and a
+  canary test asserts that no credential, host, address, URL, document body
+  or free text can appear. The profile is only ever sent as that response;
+  nothing is pushed. Schema: `docs/cluster-profile.md`.
+- Capacity view: **Download cluster profile**. It previews the exact JSON,
+  offers a names on/off toggle that refetches, and saves the previewed bytes
+  from the browser with no second request. Strings are translated into
+  pt/en/es, and `tests/profile_dialog_check.py` covers the dialog.
+- The metrics sampler also records `query_total`, `gc_old_millis` and
+  `gc_young_millis`. These fields are additive, and older samples simply
+  lack them.
+
+### Changed
+- **The OTel observability stack's retention follows the deployment's
+  (ADR-062 §6):** its three ISM policies used a hardcoded 30/90 days and
+  ignored the retention default. They now take the deployment's value (the
+  CR annotation, else the installation default, else the built-in), use the
+  same apply-once rule as `velox-retention` (a policy edited inside
+  OpenSearch is left alone), and are covered by "apply default to existing
+  deployments" and "restore default". The deployment's retention panel and
+  the apply report show one row per stack policy. An upgrade does not rewrite
+  existing stack policies. They change only on a stack install or through
+  those two actions.
+
 ### Fixed
 - The Kubernetes Events integration indexes events again (#104). Every event
   was rejected with `mapper_parsing_exception` ("field name cannot contain
@@ -19,6 +67,180 @@ are called out explicitly.
   Collectors created before this fix are repaired on the next start of the
   app; collectors the app does not manage are left alone. The
   `k8s-events` registry package needs the regenerated `agent.conf.tmpl`.
+- **Self-serve signup never provisioned tenant isolation (#122):** the
+  runtime ClusterRole in `deploy/install.yaml` had no grant for
+  `resourcequotas`, `limitranges` or `networkpolicies`, so the server-side
+  apply of every tenant's ResourceQuota, LimitRange and default-deny
+  NetworkPolicy set was forbidden. Tenants got a namespace and no walls, and
+  signup still reported success. The ClusterRole now grants `get`, `create`
+  and `patch` on those three resources (no `update`, no `delete`), and
+  `upgrade.yaml` carries it. A test fails the build if a tenant template kind
+  is not appliable by the shipped ClusterRole.
+- **A failed tenant provisioning was only a log line (#122):** tenants whose
+  latest provisioning outcome is not a success are now listed to the admin
+  as a notice (`bootstrap_status.unisolated_tenants`) and re-provisioned at
+  startup, then after 5 min, 15 min, 1 h and every 6 h. Existing tenants
+  created before this fix are provisioned on the first start of the new
+  release. Signup itself is unchanged.
+- The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
+  e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
+  answered, and records nothing when none did.
+- Installing the OTel observability stack on a platform where no log recipe
+  was ever enabled left all five components at 0 ready: their pods run as
+  `velox-agents/velox-agent`, which only the log-agent path created (#125).
+  The stack install now ensures that ServiceAccount and its RBAC through the
+  same `agents::ensure_rbac`. A stack already stuck on it recovers on the
+  next status read or re-install, which recreate only this stack's
+  ReplicaSets whose pod creation failed on that missing account.
+- Uninstalling the OTel stack returned HTTP 500 (#126). Reverting its
+  OpenSearch Dashboards keys was a server-side apply of an empty map. When
+  those were the last keys, that left `additionalConfig: null`, which the
+  CRD rejects (422). The revert is now a merge patch that deletes exactly the
+  keys the stack set, so an emptied map stays `{}`. Turning the
+  next-generation UI off reverts its own keys the same way.
+- After "restore default", an OTel stack index could stay on the old
+  version of its ISM policy (seen on the service map) while the policy
+  itself moved on (ADR-062 §6). The re-attach was a single `change_policy`
+  on the index pattern whose response was never read, so a per-index refusal
+  was lost. It now asks `explain` which indices each policy governs, under
+  its pattern and, for the service map, its physical index name too, and
+  moves the ones on an older version by name. It reads the response and
+  retries refused indices a bounded number of times. It also runs when the
+  policy was already current, so a later pass catches up an index an earlier
+  one missed. Whatever is still refused shows in that policy's row of the
+  apply report.
+- **Upgrading reset the operator's settings (#128):** applying a release's
+  `upgrade.yaml` re-applied the `veloxsearch-env` ConfigMap with the shipped
+  defaults, so values the operator had set there (`VELOX_PG_ENABLED`,
+  `VELOX_MULTITENANT_AUTH`, SMTP, …) reverted on every upgrade; turning
+  multitenancy off broke tenant sign-in. `upgrade.yaml` now leaves the
+  ConfigMap out: `install.yaml` creates it once and it is the operator's from
+  then on. Every key has a default in the binary equal to the shipped value,
+  so a release that adds a key needs no ConfigMap change; a test fails the
+  build if a shipped key lacks one or if an env var would need a ConfigMap key
+  to exist. The N-1 → N upgrade lane sets a non-default value before the
+  upgrade and asserts it reaches the new Pod unchanged (ADR-057).
+
+## [0.11.0] - 2026-09-27
+
+### Fixed
+- **The stuck-recovery remediation could still bounce a node that only
+  receives (#27/#96):** when its per-index lookup of the recovery source
+  failed or found no stalled row, it fell back to the node holding the
+  INITIALIZING replica, which is the receiver. Seen on OpenSearch 3.7.0: it
+  bounced `nodes-0` while every stalled recovery came from `nodes-1`, and the
+  stall stayed. The remediation now reads active recoveries cluster-wide,
+  bounces the node that is the source of the most recoveries stuck in `init`
+  at 0 bytes, checks that this node name is one of the deployment's node
+  pods, and logs the per-source counts it used. If there is no such source,
+  the top count is a tie, or the name matches no pod, it bounces nothing and
+  logs why.
+- **The stuck-recovery remediation bounces the recovery source, not the
+  target (#27/#96, #109).**
+- **The restart-wave watch could read a moving recovery as stuck (#96):**
+  without `bytes=b`, OpenSearch reports the recovered bytes as `208b`, which
+  was read as 0, the stuck signature. The watch now asks for raw bytes and
+  reads both forms. A byte count it cannot read no longer counts as zero.
+- **A recovery-throttle raise had no upper bound (#27/#96):** the raised
+  `node_concurrent_recoveries` was handed back only once every recovery had
+  settled. It is now also handed back when the remediation's 30-minute
+  episode ends. If the recoveries are still stuck by then, the next pass
+  starts a new episode.
+- **The Dashboards hold's 20-minute ceiling could release in the middle of a
+  rolling restart (#46, ADR-063):** a post-bootstrap roll that ran past 20
+  minutes had its hold released 19s after a node pod was re-created, and
+  Dashboards migrated on a red cluster. The ceiling now fires only once
+  every node is ready on the current revision and no node pod has been
+  created for two minutes. A cluster that stays yellow for good (for
+  example on single-copy storage) still gets its Dashboards at 20 minutes.
+- **The admin-reset backstop stopped watching after its restore (#115,
+  ADR-064):** it dropped the pending marker and the kept previous password
+  as soon as it restored, before the restore's own securityconfig Job had
+  run, so a failure of that Job went unseen. The backstop now watches the
+  restore until its Job succeeds and retries once (deleting the failed Job
+  so the operator runs it again, which needs a new namespaced `delete` on
+  `batch/jobs`). After that it marks the reset stalled on the CR, and a
+  new reset is refused with a 409 whose message says so (the SPA still
+  shows its generic "busy" text for every 409). The kept password is
+  dropped only on a confirmed success or an hour after the latest nudge.
+- **An admin-password reset during a rolling restart could take a deployment
+  down for good (#115, ADR-064):** the operator's one-shot securityconfig Job
+  failed against a cluster that was still rolling. The node probes had already
+  switched to the new password, so every node went unready, and the operator
+  never retries that Job. A reset is now refused with 409 unless the deployment
+  has settled (ADR-050) and no earlier reset is pending. If the operator cannot
+  be nudged, the Secret is rolled back and the error says the password was not
+  changed; before, the API returned 500 with the password already changed. If
+  the securityconfig Job fails anyway, the previous password (kept in the
+  credentials Secret for the reset window) is restored and the nodes recover.
+  `tests/day2_check.py` now waits for `settled`, not just `green`, before the
+  password step, and asserts the 409 during a roll.
+- **The Dashboards first-boot fix now sticks (#46):** the 0.10.5 run showed
+  the operator reverts the `Recreate` strategy and startup budget on its
+  Deployment within a second, and it reverted the remediation's 0/1 scale the
+  same way. The operator's CR has no probe or strategy field, so the fix now
+  goes through `spec.dashboards.replicas`.
+  - **First boot:** a new deployment's Dashboards is held at zero replicas.
+    The hold is released once velox's own verdict says everything but
+    Dashboards has settled and the node pool has been still for two
+    minutes, or once the cluster is 20 minutes old and initialized with its
+    nodes no longer rolling. It no longer uses the operator's lagging
+    `health`. The first migration
+    therefore runs on a settled cluster.
+  - **Enforcement:** the operator's first update of a new CR drops a zero
+    `replicas` (`omitempty` plus the CRD default of 1), so a post-create
+    watch and the metrics sampler write it again. A Dashboards that is
+    already serving is never scaled down, and a save never changes
+    Dashboards replicas.
+  - **Remediation:** the `.kibana_1` remediation holds and releases through
+    the CR, and it now actually arms. A deadlocked Dashboards is killed by
+    its startup probe, exits 0 and restarts at once, so it never showed the
+    `CrashLoopBackOff` the trigger required. On an otherwise settled
+    cluster, the stall that arms it was also never measured. The trigger is
+    now three restarts with the last one within 15 minutes.
+  - **Removed:** the Deployment patch, and the runtime `patch` grant on
+    Deployments (ADR-063).
+- **Upgrading could re-install the OpenSearch operator, grant cluster-admin
+  back, or downgrade (#54, ADR-057):** bootstrap applied its vendored operator
+  bundle (CRDs included, force-applied) whenever the operator was not Ready at
+  the moment it probed — which an operator restarting during a rollout is.
+  Bootstrap now installs only what is **absent**; an installed component that
+  is not Ready is waited on and reported, never re-applied. Upgrades no longer
+  grant cluster-admin: DEPLOY.md's upgrade applies the release's new
+  `upgrade.yaml` (below), and a `veloxsearch-bootstrap` binding re-created by
+  re-applying `install.yaml` is revoked again by the running app once bootstrap
+  is complete. `deploy/install.yaml` once pinned 0.8.1 while the crate was
+  0.9.0 (so did the 0.9.0 `velox` CLI, which embeds it); CI now fails when its
+  tag is not `Cargo.toml`'s version, and the release gate refuses a version
+  lower than the previous release.
+
+### Added
+- **Default retention per purpose (ADR-062):** Settings has an admin-only
+  "Default retention" block (observability and security days; out-of-box 30
+  and 90, the previous fixed values). The create wizard shows the effective
+  default for the chosen purpose and accepts a per-deployment override, stamped
+  on the CR together with whether it inherits the default or was chosen for
+  that deployment. An admin action applies the default to the existing
+  deployments that inherit it (never to one given its own value) and reports
+  per deployment what happened. Each deployment's Edit tab shows its
+  retention, whether the policy was customized, and a "restore default" button.
+- **`upgrade.yaml` release asset (ADR-057):** the release's `install.yaml`
+  without the one-time `veloxsearch-bootstrap` cluster-admin binding, derived
+  by `deploy/upgrade-manifest.sh`. Use it to upgrade; `install.yaml` stays the
+  first-install manifest.
+- **Operator drift is reported (R9, ADR-057):** the conformity report and a
+  notice above the main navigation show when the running operator's image
+  differs from the one this release vendors. Warn-only; nothing is changed.
+- **N-1 → N upgrade lane** (`.github/workflows/upgrade.yml`): installs the
+  previous release on minikube, brings a deployment to green, rolls the
+  candidate out with `upgrade.yaml`, and asserts the operator, CRDs and
+  `OpenSearchCluster` specs are unchanged and no cluster-admin was granted —
+  plus a variant that scales the operator to 0 and re-applies the full
+  `install.yaml`.
+### Changed
+- velox no longer overwrites a `velox-retention` ISM policy that the user
+  edited inside OpenSearch. Saves, retries and upgrades leave a customized
+  policy alone (ADR-062). Only "restore default" replaces it.
 
 ## [0.10.5] - 2026-09-24
 

@@ -902,6 +902,11 @@ pub struct CreateOverrides {
     /// version is preserved and moves solely through `upgrade_cluster`
     /// (ADR-048 invariant 1). `None` = `DEFAULT_VERSION`.
     pub version: Option<String>,
+    /// Retention days to stamp on the CR (ADR-062), and whether they inherit
+    /// the installation default or were chosen for this deployment. `None`
+    /// keeps whatever the CR already carries, so an unrelated save never
+    /// moves it.
+    pub retention: Option<(u32, crate::retention::Source)>,
 }
 
 /// The versions to write for a deployment: whatever the CR already carries, or
@@ -1061,12 +1066,63 @@ pub async fn create_cluster(
         general["additionalConfig"] = serde_json::Value::Object(ov.additional_config);
     }
 
+    // #46 (ADR-063): a NEW deployment's Dashboards is held at zero replicas
+    // until the cluster has settled — its first saved-objects migration must
+    // not run against a cluster that is still allocating. The zero does not
+    // survive the operator's first write, so `watch_new_dashboards_hold` and
+    // the sampler enforce it. A save of an existing deployment re-applies the
+    // replicas and the hold annotation exactly as the CR stores them: a save
+    // never moves Dashboards replicas, so it can neither start a held
+    // Dashboards early nor stop a running one.
+    let (dashboards_hold, dashboards_replicas) = match existing.as_ref() {
+        None => (Some(DASHBOARDS_HOLD_FIRST_BOOT.to_string()), 0),
+        Some(o) => (
+            dashboards_hold_of(o.metadata.annotations.as_ref()),
+            dashboards_replicas_of(&o.data),
+        ),
+    };
+
     let mut annotations = serde_json::Map::new();
+    if let Some(reason) = &dashboards_hold {
+        annotations.insert(
+            LABEL_DASHBOARDS_HOLD.to_string(),
+            serde_json::Value::String(reason.clone()),
+        );
+    }
     if !ov.monitors.is_empty() {
         annotations.insert(
             LABEL_MONITORS.to_string(),
             serde_json::Value::String(ov.monitors.join(",")),
         );
+    }
+    // ADR-062: carried through every apply. This manifest is server-side
+    // applied by one field manager, so omitting the key would prune it — the
+    // same trap the additionalConfig round-trip avoids. A save that does not
+    // name a value re-applies what the CR already says.
+    let carried = |key: &str| {
+        existing
+            .as_ref()
+            .and_then(|o| o.metadata.annotations.as_ref())
+            .and_then(|a| a.get(key))
+            .cloned()
+    };
+    let (retention, source) = match ov.retention {
+        Some((days, src)) => (
+            Some(crate::retention::render_age(days)),
+            Some(src.as_str().to_string()),
+        ),
+        None => (
+            carried(crate::retention::ANNOTATION),
+            carried(crate::retention::SOURCE_ANNOTATION),
+        ),
+    };
+    for (key, value) in [
+        (crate::retention::ANNOTATION, retention),
+        (crate::retention::SOURCE_ANNOTATION, source),
+    ] {
+        if let Some(v) = value {
+            annotations.insert(key.to_string(), serde_json::Value::String(v));
+        }
     }
 
     // Ownership is stamped at creation, in the same apply as the spec, so a CR
@@ -1093,15 +1149,7 @@ pub async fn create_cluster(
                 "tls": { "transport": { "generate": true }, "http": { "generate": true } },
                 "config": { "adminCredentialsSecret": { "name": admin_secret_name(name) } }
             },
-            "dashboards": {
-                "enable": true,
-                "version": dash_version,
-                "replicas": 1,
-                "resources": {
-                    "requests": { "memory": "512Mi", "cpu": "200m" },
-                    "limits": { "memory": "1Gi", "cpu": "500m" }
-                }
-            },
+            "dashboards": dashboards_spec(&dash_version, dashboards_replicas),
             "nodePools": [node_pool(replicas, &disk, &mem, s.cpu_req, s.cpu_lim, longhorn_sc)]
         }
     });
@@ -1109,14 +1157,12 @@ pub async fn create_cluster(
         .patch(name, &pp, &Patch::Apply(&manifest))
         .await
         .context("applying OpenSearchCluster CR")?;
-
-    // #46: the operator materializes the Dashboards Deployment asynchronously
-    // after the CR is accepted; make it survivable the moment it exists
-    // (probe budget + Recreate), off the create flow's critical path.
-    tokio::spawn(spawn_dashboards_survivability(
-        dep.namespace().to_string(),
-        name.to_string(),
-    ));
+    if existing.is_none() {
+        tokio::spawn(watch_new_dashboards_hold(
+            dep.namespace().to_string(),
+            name.to_string(),
+        ));
+    }
 
     // Public dashboards ingress at <name>.<base_domain> — ingress mode only
     // (ADR-027). In portforward mode no Ingress exists and the UI hands out a
@@ -2125,26 +2171,26 @@ pub async fn set_next_ui(dep: &Deployment, enable: bool, chosen: bool) -> Result
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
-    let mut cfg = serde_json::Map::new();
+    let keys = next_ui_config();
     if enable {
-        for (k, v) in next_ui_config() {
-            cfg.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-        }
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::apply(UI_FIELD_MANAGER).force(),
+                &Patch::Apply(&dashboards_config_apply(name, &keys)),
+            )
+            .await
+            .context("patching dashboards additionalConfig for the next-gen UI")?;
+    } else {
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(&dashboards_config_removal(keys.iter().map(|(k, _)| *k))),
+            )
+            .await
+            .context("removing the next-gen UI keys from dashboards additionalConfig")?;
     }
-    let manifest = serde_json::json!({
-        "apiVersion": "opensearch.org/v1",
-        "kind": "OpenSearchCluster",
-        "metadata": { "name": name },
-        "spec": { "dashboards": { "additionalConfig": serde_json::Value::Object(cfg) } },
-    });
-    os_api(&client, dep)
-        .patch(
-            name,
-            &PatchParams::apply(UI_FIELD_MANAGER).force(),
-            &Patch::Apply(&manifest),
-        )
-        .await
-        .context("patching dashboards additionalConfig for the next-gen UI")?;
 
     let marker = if enable && chosen {
         serde_json::Value::String("1".to_string())
@@ -2194,9 +2240,10 @@ pub async fn workspaces_enabled(dep: &Deployment) -> bool {
 
 /// Turn the ADR-053 Dashboards config keys on or off.
 ///
-/// Server-side apply under `OTEL_FIELD_MANAGER`, so `enable: false` is an apply
-/// with the keys absent — SSA then removes precisely the keys this manager owns
-/// and leaves anyone else's (an SSO deployment's `opensearch_security.*`) alone.
+/// On: server-side apply under `OTEL_FIELD_MANAGER`. Off: a merge patch that
+/// deletes exactly [`otel_dashboards_config`]'s keys, and leaves anyone else's
+/// (an SSO deployment's `opensearch_security.*`, the next-gen UI's) alone —
+/// see [`dashboards_config_removal`] for why it is not an apply of `{}`.
 ///
 /// ADR-048: touches `spec.dashboards.additionalConfig` only. It never
 /// constructs `spec.general` or `spec.dashboards.version`, so it cannot move a
@@ -2205,27 +2252,58 @@ pub async fn set_dashboards_otel_config(dep: &Deployment, enable: bool) -> Resul
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
-    let mut cfg = serde_json::Map::new();
+    let keys = otel_dashboards_config();
     if enable {
-        for (k, v) in otel_dashboards_config() {
-            cfg.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-        }
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::apply(OTEL_FIELD_MANAGER).force(),
+                &Patch::Apply(&dashboards_config_apply(name, &keys)),
+            )
+            .await
+            .context("patching dashboards additionalConfig")?;
+    } else {
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(&dashboards_config_removal(keys.iter().map(|(k, _)| *k))),
+            )
+            .await
+            .context("removing the observability keys from dashboards additionalConfig")?;
     }
-    let manifest = serde_json::json!({
+    Ok(())
+}
+
+/// The server-side-apply body that sets `keys` under
+/// `spec.dashboards.additionalConfig`, and nothing else.
+fn dashboards_config_apply(name: &str, keys: &[(&str, &str)]) -> serde_json::Value {
+    let cfg: serde_json::Map<String, serde_json::Value> = keys
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    serde_json::json!({
         "apiVersion": "opensearch.org/v1",
         "kind": "OpenSearchCluster",
         "metadata": { "name": name },
-        "spec": { "dashboards": { "additionalConfig": serde_json::Value::Object(cfg) } },
-    });
-    os_api(&client, dep)
-        .patch(
-            name,
-            &PatchParams::apply(OTEL_FIELD_MANAGER).force(),
-            &Patch::Apply(&manifest),
-        )
-        .await
-        .context("patching dashboards additionalConfig")?;
-    Ok(())
+        "spec": { "dashboards": { "additionalConfig": cfg } },
+    })
+}
+
+/// The merge patch that deletes `keys` from `spec.dashboards.additionalConfig`.
+///
+/// Not a server-side apply of an empty map, which is what this used to be:
+/// when the removed keys were the last ones in the map, the apply left
+/// `additionalConfig: null`, which the CRD rejects (`must be of type object`,
+/// 422), so every uninstall failed at this step (#126). In a JSON merge patch
+/// (RFC 7386) a `null` *member* deletes that key and an emptied map stays
+/// `{}`, so the map itself is never null.
+fn dashboards_config_removal<'a>(keys: impl IntoIterator<Item = &'a str>) -> serde_json::Value {
+    let cfg: serde_json::Map<String, serde_json::Value> = keys
+        .into_iter()
+        .map(|k| (k.to_string(), serde_json::Value::Null))
+        .collect();
+    serde_json::json!({ "spec": { "dashboards": { "additionalConfig": cfg } } })
 }
 
 /// The address the ingress controller answers on.
@@ -2612,7 +2690,7 @@ async fn status_from(
                 ..crate::activity::Activity::idle()
             }
         } else {
-            crate::activity::evaluate(&crate::activity::ActivityInput {
+            let mut input = crate::activity::ActivityInput {
                 phase: phase.clone(),
                 health: health.clone(),
                 initialized,
@@ -2624,13 +2702,29 @@ async fn status_from(
                 dashboards_ready: false,
                 upgrade: upgrade.clone(),
                 components: components.clone(),
-                // The one clause this path skipped is Dashboards, which is
-                // seconds-scale — not a stall worth two HTTP calls to explain.
-                since_secs: 0,
+                // Everything but Dashboards is settled, so the clock that
+                // matters is the Dashboards pod's own: a fresh boot is young
+                // and never a stall, a boot the kubelet keeps restarting in
+                // the same pod ages into one (#46). No pod — a held
+                // Dashboards (ADR-063) — measures nothing and is never
+                // accused.
+                since_secs: dashboards_pod_age_secs(client, &obj_ns, &name).await,
                 cluster: None,
                 dashboards: None,
                 nodes: None,
-            })
+            };
+            let first = crate::activity::evaluate(&input);
+            // #46: this is the path a Dashboards deadlock on an otherwise
+            // settled cluster takes, so the rung's diagnosis — and the
+            // remediation it arms — must be reachable from here too. Before,
+            // `since_secs: 0` kept it unreachable (observed live 2026-09-27:
+            // five probe-kill restarts, zero arms).
+            if first.stalled && first.stage == "dashboards" {
+                input.dashboards = Some(dashboards_block_in(&obj_ns, &name).await);
+                crate::activity::evaluate(&input)
+            } else {
+                first
+            }
         }
     } else {
         let pvcs = data_pvcs_in(&obj_ns, &name).await;
@@ -2704,6 +2798,13 @@ async fn status_from(
             crate::activity::evaluate(&input)
         }
     };
+
+    // #115: a reset still in its window gets its backstop looked at. The
+    // marker is on the CR we already hold, so every other deployment pays
+    // nothing for this.
+    if let Some(pending) = annotations.get(crate::admin_reset::PENDING_ANNOTATION) {
+        reset_backstop_in(client, &obj_ns, &name, pending).await;
+    }
 
     // Snapshot state (ADR-049). The repository lives on the CR we already have,
     // so the policy CR is only fetched for a deployment that actually
@@ -3229,26 +3330,110 @@ fn should_remediate(
         && last_fired_ago.is_none_or(|ago| ago >= REMEDIATE_COOLDOWN)
 }
 
-/// The node to bounce for a wedged peer recovery: the SOURCE of a row in
-/// `init` with nothing transferred. Pure, over a `_cat/recovery?format=json`
-/// payload; `None` when no row shows the wedge (or it names no source — a
-/// store/snapshot recovery has none to bounce).
-fn wedged_recovery_source(v: &serde_json::Value) -> Option<String> {
-    v.as_array()?
+/// Read a `_cat/recovery` byte cell. With `bytes=b` it is a plain number
+/// (`208`, sometimes as a JSON number); without it OpenSearch renders a size
+/// (`208b`, `12kb`). A plain byte count is read either way; anything else is
+/// `None` — an unknown count, never the zero a wedged `init` row reports.
+fn byte_cell(x: &serde_json::Value) -> Option<i64> {
+    x.as_i64().or_else(|| {
+        let s = x.as_str()?.trim();
+        s.strip_suffix('b').unwrap_or(s).parse().ok()
+    })
+}
+
+/// Why [`choose_bounce_pod`] refused to name a pod. Refusing is the safe
+/// answer: a bounce of the wrong node costs a JVM restart and fixes nothing
+/// (bouncing the TARGET only moves the stall), so no guess is ever made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BounceRefusal {
+    /// No active peer recovery sits in `init` at zero bytes with a source.
+    NoWedgedPeerRecovery,
+    /// Two or more sources serve the same, highest number of wedged
+    /// recoveries; the counts do not say which one holds the dead sessions.
+    AmbiguousSource(Vec<(String, usize)>),
+    /// The winning source node name is not the name of any node pod of this
+    /// deployment, so there is no pod to delete that is known to be it.
+    UnmappedSource(String),
+}
+
+/// The pod to bounce for a wedged peer recovery, and the tally that chose it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BounceChoice {
+    pod: String,
+    /// Wedged recoveries per source node, most first.
+    by_source: Vec<(String, usize)>,
+    /// How many wedged recoveries were counted in all.
+    wedged: usize,
+}
+
+/// Pick the node to bounce from a CLUSTER-WIDE
+/// `_cat/recovery?active_only=true&format=json&bytes=b` payload (#27/#96).
+///
+/// The wedge's signature is a PEER recovery in `init` with nothing
+/// transferred. Its SOURCE is the node whose dead outgoing sessions hold the
+/// recovery slots, so the pick is the source of the most such rows. A node
+/// that only receives is never a candidate: it has no count. Store, snapshot
+/// and empty-store recoveries have no source and are not counted.
+///
+/// The winner must be the name of one of `node_pods`. The operator names
+/// each OpenSearch node after its pod, but that is checked here, never
+/// assumed: an unknown name, a tie, or no wedge at all is a refusal.
+fn choose_bounce_pod(
+    v: &serde_json::Value,
+    node_pods: &[String],
+) -> Result<BounceChoice, BounceRefusal> {
+    let text = |r: &serde_json::Value, k: &str| {
+        r.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for r in v.as_array().map(Vec::as_slice).unwrap_or_default() {
+        // `bytes=b` renders the cell as a plain number; without it the cell
+        // reads `0b`, `12kb`. A cell that is neither is not evidence of a
+        // wedge, so it does not count.
+        let bytes = r.get("bytes_recovered").and_then(byte_cell);
+        let source = text(r, "source_node");
+        let is_peer = text(r, "type").is_empty() || text(r, "type").eq_ignore_ascii_case("peer");
+        if is_peer
+            && text(r, "stage").eq_ignore_ascii_case("init")
+            && bytes == Some(0)
+            && !source.is_empty()
+            && source != "n/a"
+            && source != "-"
+        {
+            *counts.entry(source).or_default() += 1;
+        }
+    }
+    let wedged = counts.values().sum();
+    let mut by_source: Vec<(String, usize)> = counts.into_iter().collect();
+    // Most first; the BTreeMap already ordered equal counts by name.
+    by_source.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    let Some((top, n)) = by_source.first().cloned() else {
+        return Err(BounceRefusal::NoWedgedPeerRecovery);
+    };
+    if by_source.get(1).is_some_and(|(_, m)| *m == n) {
+        return Err(BounceRefusal::AmbiguousSource(by_source));
+    }
+    if !node_pods.contains(&top) {
+        return Err(BounceRefusal::UnmappedSource(top));
+    }
+    Ok(BounceChoice {
+        pod: top,
+        by_source,
+        wedged,
+    })
+}
+
+/// Render a per-source tally for the logs: `d-nodes-1=5, d-nodes-2=1`.
+fn fmt_source_counts(by_source: &[(String, usize)]) -> String {
+    by_source
         .iter()
-        .find(|r| {
-            let stage = r.get("stage").and_then(|s| s.as_str()).unwrap_or("");
-            let bytes = r
-                .get("bytes_recovered")
-                .and_then(|b| b.as_i64().or_else(|| b.as_str()?.trim().parse().ok()))
-                .unwrap_or(0);
-            stage.eq_ignore_ascii_case("init") && bytes == 0
-        })?
-        .get("source_node")
-        .and_then(|n| n.as_str())
-        .map(str::trim)
-        .filter(|n| !n.is_empty() && *n != "n/a" && *n != "-")
-        .map(str::to_string)
+        .map(|(node, n)| format!("{node}={n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Break a wedged rolling restart, the sequence proven live on the
@@ -3290,53 +3475,101 @@ async fn remediate_wedged_recovery(namespace: &str, name: &str, index: &str) -> 
         tracing::warn!("#27 throttle raise for {namespace}/{name} failed: {e:#}");
     }
 
-    // 2. Name the SOURCE of the wedged recovery (see step 2 above). Node
-    //    names ARE pod names (network.publish_host is the pod name by
-    //    operator convention). Fall back to the INITIALIZING replica's node
-    //    only when the recovery row cannot be read.
+    // 2. Name the SOURCE of the wedged recoveries (see step 2 above). The
+    //    question is asked of the WHOLE cluster, not of the one index that
+    //    armed the pass: the wedge holds a node's outgoing slots, so every
+    //    recovery queued behind it — whatever its index — votes for the same
+    //    source. `bytes=b` keeps the byte cell a plain number.
     let recovery = auth(http.get(format!(
-        "{base}/_cat/recovery/{index}?active_only=true&h=stage,bytes_recovered,source_node,target_node&format=json"
+        "{base}/_cat/recovery?active_only=true&format=json&bytes=b\
+         &h=index,shard,type,stage,bytes_recovered,source_node,target_node"
     )))
     .send()
-    .await
-    .ok();
-    let source = match recovery {
-        Some(r) => r
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| wedged_recovery_source(&v)),
-        None => None,
+    .await;
+    let rows = match recovery {
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "#27 remediation for {namespace}/{name}: unreadable _cat/recovery: {e:#}; \
+                     not bouncing anything"
+                );
+                return None;
+            }
+        },
+        Ok(r) => {
+            tracing::warn!(
+                "#27 remediation for {namespace}/{name}: _cat/recovery answered {}; \
+                 not bouncing anything",
+                r.status()
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "#27 remediation for {namespace}/{name}: _cat/recovery failed: {e:#}; \
+                 not bouncing anything"
+            );
+            return None;
+        }
     };
-    let node = match source {
-        Some(n) => n,
-        None => auth(http.get(format!(
-            "{base}/_cat/shards/{index}?h=state,node&format=json"
-        )))
-        .send()
-        .await
-        .ok()?
-        .json::<serde_json::Value>()
-        .await
-        .ok()?
-        .as_array()?
-        .iter()
-        .find(|r| {
-            r.get("state")
-                .and_then(|s| s.as_str())
-                .is_some_and(|s| s.eq_ignore_ascii_case("initializing"))
-        })?
-        .get("node")
-        .and_then(|n| n.as_str())?
-        .to_string(),
+
+    //    Node names must be pod names for the delete to hit the right JVM.
+    //    The operator sets `node.name` from the pod name; checked against
+    //    the live pod list, never assumed.
+    let client = client().await.ok()?;
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    let prefix = format!("{name}-nodes-");
+    let node_pods: Vec<String> = match pods.list(&ListParams::default()).await {
+        Ok(list) => list
+            .into_iter()
+            .filter_map(|p| p.metadata.name)
+            .filter(|n| n.starts_with(&prefix))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                "#27 remediation for {namespace}/{name}: cannot list node pods: {e:#}; \
+                 not bouncing anything"
+            );
+            return None;
+        }
+    };
+    let node = match choose_bounce_pod(&rows, &node_pods) {
+        Ok(c) => {
+            tracing::info!(
+                "#27 remediation for {namespace}/{name}: bouncing {}, the source of {} of \
+                 {} wedged peer recoveries (by source: {})",
+                c.pod,
+                c.by_source.first().map_or(0, |(_, n)| *n),
+                c.wedged,
+                fmt_source_counts(&c.by_source)
+            );
+            c.pod
+        }
+        Err(refusal) => {
+            let why = match refusal {
+                BounceRefusal::NoWedgedPeerRecovery => {
+                    "no active peer recovery is in init at 0 bytes".to_string()
+                }
+                BounceRefusal::AmbiguousSource(by) => format!(
+                    "no single source holds the most wedged recoveries ({})",
+                    fmt_source_counts(&by)
+                ),
+                BounceRefusal::UnmappedSource(node) => format!(
+                    "source node {node} is not a node pod of this deployment \
+                     (pods: {})",
+                    node_pods.join(", ")
+                ),
+            };
+            tracing::warn!("#27 remediation for {namespace}/{name}: not bouncing anything: {why}");
+            return None;
+        }
     };
 
     // 3. The bounce. Best-effort by design: the operator owns the pod's
     //    lifecycle and will recreate it; our job was to clear the dead
     //    sessions, and a failed delete is loud, logged, and retried only
     //    after the cooldown.
-    let client = client().await.ok()?;
-    let pods: Api<Pod> = Api::namespaced(client, namespace);
     match pods.delete(&node, &DeleteParams::default()).await {
         Ok(_) => {
             tracing::warn!(
@@ -3409,9 +3642,11 @@ fn parse_cat_duration(s: &str) -> Option<i64> {
 
 /// Narrow a `_cat/recovery?format=json` payload to [`RecoveryRow`]s. Cells
 /// the cluster renders oddly (absent, `-`, stringified numbers) degrade
-/// toward "not evidence": a row without a readable stage or duration can
-/// neither arm a bounce nor hold the throttle back, and an unreadable byte
-/// count reads as the zero an `init` row honestly reports.
+/// toward "not evidence": a row without a readable stage, duration or byte
+/// count can neither arm a bounce nor hold the throttle back. An unreadable
+/// byte count used to read as zero, so a moving recovery rendered as `208b`
+/// looked wedged; the query now asks for `bytes=b` and [`byte_cell`] reads
+/// both spellings.
 fn parse_recovery_rows(v: &serde_json::Value) -> Vec<RecoveryRow> {
     let cell = |row: &serde_json::Value, name: &str| {
         row.get(name).map(|x| {
@@ -3420,24 +3655,17 @@ fn parse_recovery_rows(v: &serde_json::Value) -> Vec<RecoveryRow> {
                 .unwrap_or_else(|| x.to_string())
         })
     };
-    let num = |row: &serde_json::Value, name: &str| -> i64 {
-        row.get(name)
-            .and_then(|x| {
-                x.as_i64()
-                    .or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))
-            })
-            .unwrap_or(0)
-    };
     v.as_array()
         .map(|rows| {
             rows.iter()
                 .filter_map(|row| {
                     let stage = cell(row, "stage")?;
                     let secs = cell(row, "time").and_then(|t| parse_cat_duration(&t))?;
+                    let bytes_recovered = row.get("bytes_recovered").and_then(byte_cell)?;
                     Some(RecoveryRow {
                         index: cell(row, "index").unwrap_or_default(),
                         stage,
-                        bytes_recovered: num(row, "bytes_recovered"),
+                        bytes_recovered,
                         secs,
                     })
                 })
@@ -3484,6 +3712,24 @@ fn wave_settled(rows: &[RecoveryRow]) -> bool {
     !rows
         .iter()
         .any(|r| r.stage.eq_ignore_ascii_case("init") && r.bytes_recovered == 0)
+}
+
+/// The longest a throttle raise outlives its episode. The raise is handed
+/// back as soon as the recoveries settle; if they never do, it is handed
+/// back anyway once the episode's cooldown has run out, so no raise is
+/// permanent. A wedge still there by then is a new episode: the next pass
+/// may fire again, and that fire raises (and later hands back) its own.
+const THROTTLE_HANDBACK_AFTER: std::time::Duration = REMEDIATE_COOLDOWN;
+
+/// The pure hand-back decision for a raise fired `fired_ago` ago: the
+/// recoveries have settled, or the episode is over. Never in the same pass
+/// that just armed a new fire, whose raise would otherwise be undone at once.
+fn should_hand_back_throttle(
+    fired_ago: std::time::Duration,
+    settled: bool,
+    armed_this_pass: bool,
+) -> bool {
+    !armed_this_pass && (settled || fired_ago >= THROTTLE_HANDBACK_AFTER)
 }
 
 /// Is a restart wave walking right now? The operator's own account: a
@@ -3569,7 +3815,7 @@ async fn cat_recovery_rows(namespace: &str, name: &str) -> Option<Vec<RecoveryRo
         let (user, pass) = admin_creds_in(namespace, name).await;
         let resp = http
             .get(format!(
-                "{base}/_cat/recovery?format=json&h=index,stage,time,bytes_recovered&time=s"
+                "{base}/_cat/recovery?format=json&h=index,stage,time,bytes_recovered&time=s&bytes=b"
             ))
             .basic_auth(&user, Some(&pass))
             .timeout(DIAGNOSIS_TIMEOUT)
@@ -3669,7 +3915,9 @@ async fn restart_wave_watch(
     // stalled path: placeholder first (so a concurrent pass sees a
     // just-fired entry), then the bounce updates the log with the pod.
     let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    if let Some((index, secs)) = restart_wave_should_remediate(&rows, fired_ago) {
+    let armed = restart_wave_should_remediate(&rows, fired_ago);
+    let armed_this_pass = armed.is_some();
+    if let Some((index, secs)) = armed {
         if let Ok(mut log) = remediation_log().lock() {
             log.insert(key.clone(), (std::time::Instant::now(), None));
         }
@@ -3686,16 +3934,26 @@ async fn restart_wave_watch(
         });
     }
 
-    // Hand the throttle back once nothing sits in init at zero bytes. The
-    // guard reads the entry fetched before arming, so a fire this pass
-    // cannot be undone by its own restore clause — the rows still carry the
-    // wedge the fire just armed against.
-    if last.is_some() && wave_settled(&rows) && restore_throttle(namespace, name).await {
+    // Hand the throttle back once nothing sits in init at zero bytes, or
+    // once the episode is over (THROTTLE_HANDBACK_AFTER). This covers a
+    // raise from EITHER trigger: a #27 fire leaves its entry in the same
+    // log, and `throttle_still_raised` keeps the deployment on the slow path
+    // that runs this watch until the entry is gone. The guard reads the
+    // entry fetched before arming, and never restores in a pass that armed.
+    let settled = wave_settled(&rows);
+    if fired_ago.is_some_and(|ago| should_hand_back_throttle(ago, settled, armed_this_pass))
+        && restore_throttle(namespace, name).await
+    {
         if let Ok(mut log) = remediation_log().lock() {
             log.remove(&key);
         }
+        let why = if settled {
+            "recoveries drained"
+        } else {
+            "episode ended with recoveries still in init"
+        };
         tracing::info!(
-            "#96 restart-wave remediation for {namespace}/{name}: recoveries drained, \
+            "#27/#96 remediation for {namespace}/{name}: {why}, \
              node_concurrent_recoveries handed back"
         );
     }
@@ -3730,9 +3988,9 @@ async fn restart_wave_watch(
 // "another instance is migrating", waits forever, and is killed again — a
 // self-sustaining crash-loop that only ever ends by hand. Observed live:
 // 235 restarts over 17 hours on a cluster that was green in every other
-// respect. The fix has two halves: make the first boot survivable (below,
-// `ensure_dashboards_survivability`) and self-heal the deadlock if it happens
-// anyway (`remediate_kibana_deadlock`).
+// respect. The fix has two halves: hold the first boot until the cluster has
+// settled (the Dashboards hold below, ADR-063) and self-heal the deadlock if
+// it happens anyway (`remediate_kibana_deadlock`).
 
 /// #46: three full crash cycles is a pattern, not a flake. One restart is a
 /// slow cluster; three means the boot is deterministically dying, which is
@@ -3765,16 +4023,48 @@ fn dashboards_cache() -> &'static DashboardsCache {
     CACHE.get_or_init(Default::default)
 }
 
-/// The pure decision — crash-looping, budget of restarts, cooldown respected
-/// — split out so the policy is testable without a cluster, exactly like
+/// #46: the restart budget only counts while the container is still dying —
+/// its last termination is at most this old. A deadlocked boot is killed
+/// every ~210s by the startup probe and, under `CrashLoopBackOff`, waits at
+/// most 5 minutes between tries, so a live loop always has a death well
+/// inside the window; three restarts from long ago do not.
+const DASHBOARDS_RESTART_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long ago a container last terminated, from `lastState.terminated`;
+/// `None` when the cluster does not say.
+fn last_terminated_ago_of(
+    cs: &k8s_openapi::api::core::v1::ContainerStatus,
+    now: k8s_openapi::chrono::DateTime<k8s_openapi::chrono::Utc>,
+) -> Option<std::time::Duration> {
+    cs.last_state
+        .as_ref()
+        .and_then(|s| s.terminated.as_ref())
+        .and_then(|t| t.finished_at.as_ref())
+        .and_then(|t| (now - t.0).to_std().ok())
+}
+
+/// The pure decision — a restart budget spent recently, cooldown respected —
+/// split out so the policy is testable without a cluster, exactly like
 /// `should_remediate`.
+///
+/// The waiting reason is NOT required. The deadlock's own shape (observed
+/// live 2026-09-27, k8s 1.34): Dashboards logs "another instance appears to
+/// be migrating", the startup probe kills it, it exits 0 (`Completed`) on the
+/// SIGTERM and is restarted at once — `Running` with a growing restartCount,
+/// never `CrashLoopBackOff`. Requiring that reason armed zero times in five
+/// restarts. `CrashLoopBackOff` still counts as "dying now" when the last
+/// termination time is unreadable.
 fn should_remediate_dashboards(
     restarts: i32,
     waiting_reason: &str,
+    last_terminated_ago: Option<std::time::Duration>,
     last_fired_ago: Option<std::time::Duration>,
 ) -> bool {
-    waiting_reason == "CrashLoopBackOff"
-        && restarts >= DASHBOARDS_REMEDIATE_AFTER_RESTARTS
+    let dying_now = last_terminated_ago.map_or(waiting_reason == "CrashLoopBackOff", |ago| {
+        ago <= DASHBOARDS_RESTART_WINDOW
+    });
+    restarts >= DASHBOARDS_REMEDIATE_AFTER_RESTARTS
+        && dying_now
         && last_fired_ago.is_none_or(|ago| ago >= DASHBOARDS_REMEDIATE_COOLDOWN)
 }
 
@@ -3794,6 +4084,7 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
     }
 
     let mut out = crate::activity::DashboardsBlock::default();
+    let mut last_terminated_ago: Option<std::time::Duration> = None;
     let prefix = format!("{name}-dashboards");
     if let Ok(client) = client().await {
         use k8s_openapi::api::core::v1::Pod;
@@ -3814,6 +4105,9 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
                     // replica must not soften it.
                     if cs.restart_count > out.restarts {
                         out.restarts = cs.restart_count;
+                        // When it last died — the budget's window.
+                        last_terminated_ago =
+                            last_terminated_ago_of(&cs, k8s_openapi::chrono::Utc::now());
                     }
                     // The waiting reason of the crash-looping container, kept
                     // verbatim — the panel words it, the wire never does.
@@ -3834,7 +4128,12 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
         .ok()
         .and_then(|m| m.get(&key).cloned());
     let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    if should_remediate_dashboards(out.restarts, &out.waiting_reason, fired_ago) {
+    if should_remediate_dashboards(
+        out.restarts,
+        &out.waiting_reason,
+        last_terminated_ago,
+        fired_ago,
+    ) {
         if let Ok(mut log) = dashboards_remediation_log().lock() {
             log.insert(key.clone(), (std::time::Instant::now(), None));
         }
@@ -3860,6 +4159,41 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
         cache.insert(key, (std::time::Instant::now(), out.clone()));
     }
     out
+}
+
+/// Container restarts of a deployment's node-pool pods and of its Dashboards
+/// pods, each summed across containers — for the ADR-060 cluster profile.
+/// Cumulative since each pod was created, so a roll resets it. The same `pods`
+/// read `dashboards_block_in`/`node_pod_block_in` make, but side-effect free:
+/// those two arm remediations, and a read-only export must never do that.
+/// `None` when the pods could not be listed.
+pub async fn pod_restarts(dep: &Deployment) -> Option<(i64, i64)> {
+    use k8s_openapi::api::core::v1::Pod;
+    let client = client().await.ok()?;
+    let pods: Api<Pod> = Api::namespaced(client, dep.namespace());
+    let list = pods.list(&ListParams::default()).await.ok()?;
+    let (nodes_prefix, dash_prefix) = (
+        format!("{}-nodes-", dep.name()),
+        format!("{}-dashboards", dep.name()),
+    );
+    let (mut nodes, mut dashboards) = (0i64, 0i64);
+    for pod in list {
+        let name = pod.metadata.name.as_deref().unwrap_or_default();
+        let slot = if name.starts_with(&nodes_prefix) {
+            &mut nodes
+        } else if name.starts_with(&dash_prefix) {
+            &mut dashboards
+        } else {
+            continue;
+        };
+        let statuses = pod.status.and_then(|s| s.container_statuses);
+        *slot += statuses
+            .unwrap_or_default()
+            .iter()
+            .map(|cs| i64::from(cs.restart_count))
+            .sum::<i64>();
+    }
+    Some((nodes, dashboards))
 }
 
 /// TTL cache for the node-pod half (#97), same contract as `diagnosis_cache`:
@@ -3971,10 +4305,13 @@ async fn node_pod_block_in(namespace: &str, name: &str) -> crate::activity::Node
     out
 }
 
-/// Break the `.kibana_1` migration deadlock (#46): scale the Dashboards
-/// Deployment to zero, delete the dead index, scale it back. This is the
-/// exact sequence validated live against the incident cluster (recovered in
-/// 65 seconds after 17 hours of crash-looping).
+/// Break the `.kibana_1` migration deadlock (#46): hold Dashboards at zero
+/// replicas, delete the dead index, release the hold. The same sequence that
+/// recovered the incident cluster by hand (65 seconds after 17 hours of
+/// crash-looping), expressed through the CR (ADR-063): the operator renders
+/// the Dashboards Deployment from `spec.dashboards.replicas` and reverts any
+/// direct edit of the Deployment within a second, so a scale written to the
+/// Deployment itself would never quiesce anything.
 ///
 /// **Why deleting `.kibana_1` is always safe here.** The remediation only
 /// ever arms from `dashboards_block_in`, which `status_from` only calls on
@@ -3983,29 +4320,28 @@ async fn node_pod_block_in(namespace: &str, name: &str) -> crate::activity::Node
 /// hold anything but aborted migration state. It must never be reachable for
 /// a deployment past the rung.
 ///
-/// Best-effort by design: the operator owns the Deployment and reconciles
-/// replicas toward the CR; a failed step is loud, logged, and retried only
-/// after the cooldown.
+/// Best-effort by design: a failed step is loud, logged, and retried only
+/// after the cooldown. A backend that dies between the hold and the release
+/// leaves the hold annotation on the CR, and the sampler's
+/// `reconcile_dashboards_hold` releases it — the in-flight guard there only
+/// defers to a pass this process is still running.
 async fn remediate_kibana_deadlock(namespace: &str, name: &str) -> bool {
-    use k8s_openapi::api::apps::v1::Deployment;
-
     let Ok(client) = client().await else {
         return false;
     };
-    let deploy: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-    let object = format!("{name}-dashboards");
+    let api = cluster_api_in(&client, namespace);
 
     // 1. Quiesce: no Dashboards pod may be mid-boot against the index we are
     //    about to delete.
-    if let Err(e) = deploy
+    if let Err(e) = api
         .patch(
-            &object,
+            name,
             &PatchParams::default(),
-            &Patch::Merge(&serde_json::json!({ "spec": { "replicas": 0 } })),
+            &Patch::Merge(&dashboards_hold_patch(Some(DASHBOARDS_HOLD_REMEDIATION))),
         )
         .await
     {
-        tracing::warn!("#46 scale-to-zero of {namespace}/{object} failed: {e:#}");
+        tracing::warn!("#46 dashboards hold on {namespace}/{name} failed: {e:#}");
         return false;
     }
     for _ in 0..20 {
@@ -4038,29 +4374,60 @@ async fn remediate_kibana_deadlock(namespace: &str, name: &str) -> bool {
     .unwrap_or(false);
 
     // 3. Let it boot fresh: a clean migration on a settled cluster completes
-    //    in seconds, well inside any probe budget.
-    if let Err(e) = deploy
+    //    in seconds, well inside the operator's probe budget.
+    if let Err(e) = api
         .patch(
-            &object,
+            name,
             &PatchParams::default(),
-            &Patch::Merge(&serde_json::json!({ "spec": { "replicas": 1 } })),
+            &Patch::Merge(&dashboards_hold_patch(None)),
         )
         .await
     {
-        tracing::warn!("#46 scale-back of {namespace}/{object} failed: {e:#}");
+        tracing::warn!(
+            "#46 dashboards release on {namespace}/{name} failed: {e:#} \
+             (the sampler releases the hold on its next tick)"
+        );
         return false;
     }
     if deleted {
         tracing::warn!(
             "#46 remediation for {namespace}/{name}: deleted the dead .kibana_1 and \
-             restarted {object}"
+             restarted Dashboards"
         );
     } else {
         tracing::warn!(
-            "#46 index delete for {namespace}/{name} failed; {object} was restarted anyway"
+            "#46 index delete for {namespace}/{name} failed; Dashboards was restarted anyway"
         );
     }
     deleted
+}
+
+/// Seconds since the newest Dashboards pod was created; `0` when there is no
+/// pod or the list failed — the same "unmeasured is never a stall" contract
+/// as `node_pool_age_secs`.
+async fn dashboards_pod_age_secs(client: &Client, namespace: &str, name: &str) -> i64 {
+    use k8s_openapi::api::core::v1::Pod;
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let Ok(list) = pods.list(&ListParams::default()).await else {
+        return 0;
+    };
+    let prefix = format!("{name}-dashboards-");
+    let now = k8s_openapi::chrono::Utc::now();
+    list.into_iter()
+        .filter(|p| {
+            p.metadata
+                .name
+                .as_deref()
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .filter_map(|p| {
+            p.metadata
+                .creation_timestamp
+                .map(|t| (now - t.0).num_seconds())
+        })
+        .min()
+        .unwrap_or(0)
+        .max(0)
 }
 
 /// Dashboards pods currently existing for a deployment, `None` when the list
@@ -4082,107 +4449,340 @@ async fn dashboards_pod_count(client: &Client, namespace: &str, name: &str) -> O
     )
 }
 
-/// Make the Dashboards Deployment survive its own first boot (#46): the
-/// operator hardcodes a ~210s startup probe, and Dashboards does not bind
-/// :5601 until saved-objects migrations complete — so a boot that starts
-/// while the cluster is still settling can be killed mid-migration, which is
-/// what poisons `.kibana_1` in the first place. We claim two fields the
-/// operator does not fight over, under our own field manager:
-///
-/// * `strategy.type = Recreate` — a one-replica bootstrap service must not
-///   roll; a stuck rollout leaves two pods racing the same migration, which
-///   is what made the incident's deadlock perpetual.
-/// * `startupProbe.failureThreshold = 90` — a 30-minute budget instead of
-///   ~210 seconds, sized for a first migration on a cluster that is still
-///   allocating shards.
-///
-/// Idempotent (server-side apply only claims what changed) and best-effort:
-/// if the patch cannot land, the stall diagnosis + remediation above are the
-/// backstop.
-async fn ensure_dashboards_survivability(client: &Client, namespace: &str, name: &str) {
-    use k8s_openapi::api::apps::v1::Deployment;
+// ───────────── Dashboards first-boot hold (#46, ADR-063) ────────────────────
+//
+// What the Dashboards Deployment needs to survive its first boot — a longer
+// startup budget, a `Recreate` strategy — is not ours to set: operator
+// 3.0.x renders both as constants (probe 10s + 10 × 20s, `RollingUpdate`),
+// exposes neither on `spec.dashboards`, and reverts a patch of either within
+// a second of it landing. What the CR does expose is `spec.dashboards.replicas`,
+// so the intent is expressed there instead: the first boot does not happen
+// until the cluster has settled, where the migration takes seconds and the
+// fixed budget is ample. The `.kibana_1` remediation uses the same hold.
+//
+// A zero is not stored as sent. The operator's first write to a new CR (the
+// full-object update that adds its finalizers) serializes its Go type, where
+// `replicas` is `int32` with `omitempty` — so 0 is dropped, and the CRD's
+// `default: 1` puts a one back (observed live 2026-09-26, 3 of 3 creates).
+// The hold is therefore ENFORCED, not just written: a short watch right after
+// create re-asserts it once the operator has made that write, and the sampler
+// re-asserts it on every tick as the backstop for any later full update.
 
-    let deploy: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-    let object = format!("{name}-dashboards");
-    // Two patches, not one. The strategy CANNOT go through server-side apply:
-    // the API server defaults `strategy.rollingUpdate` at create time and
-    // attributes it to the operator's field manager, so an apply of
-    // `type: Recreate` merges next to it and the whole request is rejected
-    // ("spec.strategy.rollingUpdate: Forbidden: may not be specified when
-    // strategy `type` is 'Recreate'") — probe budget included. Observed on
-    // every deployment of the 2026-09-24 in-house e2e run. A JSON merge patch
-    // can null the defaulted block; the probe stays a field-managed apply.
-    if let Err(e) = deploy
-        .patch(
-            &object,
-            &PatchParams::default(),
-            &Patch::Merge(&survivability_strategy_patch()),
-        )
+/// Annotation carrying an active Dashboards hold; its value is the reason
+/// (`first-boot` or `remediation`), for whoever reads the CR by hand. Present
+/// means `spec.dashboards.replicas` should be 0 and is enforced to be.
+const LABEL_DASHBOARDS_HOLD: &str = "veloxsearch.ai/dashboards-hold";
+const DASHBOARDS_HOLD_FIRST_BOOT: &str = "first-boot";
+const DASHBOARDS_HOLD_REMEDIATION: &str = "remediation";
+
+/// Past this CR age an initialized cluster whose nodes have stopped moving
+/// gets its Dashboards even if it is not green. The hold exists to wait out
+/// settling, and a cluster that stays yellow (a replica that cannot be
+/// placed, e.g. single-copy storage) must not be left without Dashboards
+/// forever — booting on a yellow cluster is what happened before the hold,
+/// with the remediation as the backstop. It is NOT an escape from a roll:
+/// see [`should_release_dashboards`].
+const DASHBOARDS_HOLD_MAX_SECS: i64 = 20 * 60;
+
+/// The finalizer the operator adds in its first full update of a new CR —
+/// the write that drops a zero `replicas`. Once it is on the CR and the hold
+/// still reads 0, the post-create watch has done its job.
+const OPERATOR_FINALIZER: &str = "Opensearch";
+
+/// Post-create watch: poll this often, for at most this many polls. The
+/// operator's first write lands within seconds of the apply; the bound only
+/// covers a slow operator, and the sampler takes over after it.
+const HOLD_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const HOLD_WATCH_POLLS: u32 = 90;
+
+/// `spec.dashboards` as `create_cluster` applies it. Pure, so the rendering
+/// is testable without a cluster.
+fn dashboards_spec(version: &str, replicas: i64) -> serde_json::Value {
+    serde_json::json!({
+        "enable": true,
+        "version": version,
+        "replicas": replicas,
+        "resources": {
+            "requests": { "memory": "512Mi", "cpu": "200m" },
+            "limits": { "memory": "1Gi", "cpu": "500m" }
+        }
+    })
+}
+
+/// `spec.dashboards.replicas` as stored. Absent reads as the CRD default
+/// (1), which is exactly what the API server would store for it.
+fn dashboards_replicas_of(data: &serde_json::Value) -> i64 {
+    data.pointer("/spec/dashboards/replicas")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1)
+}
+
+/// The hold reason a CR carries, if any.
+fn dashboards_hold_of(
+    annotations: Option<&std::collections::BTreeMap<String, String>>,
+) -> Option<String> {
+    annotations
+        .and_then(|a| a.get(LABEL_DASHBOARDS_HOLD))
+        .filter(|r| !r.is_empty())
+        .cloned()
+}
+
+/// JSON merge patch that places (`Some(reason)`) or releases (`None`) the
+/// hold. Replicas and annotation move in ONE request, so a CR can never say
+/// "released" while still at zero. Merge rather than apply: the same idiom
+/// as the version bump (`patch_version`) — it touches exactly these fields.
+fn dashboards_hold_patch(reason: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "metadata": { "annotations": { LABEL_DASHBOARDS_HOLD: reason } },
+        "spec": { "dashboards": { "replicas": if reason.is_some() { 0 } else { 1 } } }
+    })
+}
+
+/// How long the node pool must have been still — no node pod created — before
+/// a settled verdict is trusted for the release. The operator restarts a node
+/// right after the security bootstrap, and the CR's `health` lags that
+/// restart: observed live 2026-09-27, a release on a CR "green" 18s after
+/// nodes-0 was re-created, while the real health went unknown → red →
+/// yellow. Two minutes covers the node's boot and its replica recovery on
+/// the sizes velox creates.
+const DASHBOARDS_RELEASE_QUIET_SECS: i64 = 120;
+
+/// The release decision. Normally: velox's own verdict says everything but
+/// Dashboards has settled (`activity::nodes_settled_of` — nodes ready and on
+/// their revision, security initialized, green, nothing rolling) AND the node
+/// pool has been still for [`DASHBOARDS_RELEASE_QUIET_SECS`].
+///
+/// As a ceiling: an initialized cluster past [`DASHBOARDS_HOLD_MAX_SECS`]
+/// gets Dashboards even if it never turns green — but only once its nodes
+/// have stopped moving (`nodes_steady`: every node ready and on the current
+/// revision) and have been still for the same quiet period. The ceiling is
+/// the escape for a cluster that is up and stays yellow, not for one that is
+/// still rolling: observed live 2026-09-27, a post-bootstrap rolling restart
+/// ran past 20 minutes and the age-only ceiling released 19s after a node
+/// pod was re-created, so Dashboards migrated on a red cluster (2/3 nodes).
+fn should_release_dashboards(
+    nodes_settled: bool,
+    nodes_steady: bool,
+    nodes_quiet_secs: i64,
+    initialized: bool,
+    cr_age_secs: i64,
+) -> bool {
+    let quiet = nodes_quiet_secs >= DASHBOARDS_RELEASE_QUIET_SECS;
+    (nodes_settled && quiet)
+        || (initialized && nodes_steady && quiet && cr_age_secs >= DASHBOARDS_HOLD_MAX_SECS)
+}
+
+/// No node is rolling: every node the CR asks for is ready and on the
+/// StatefulSet's current revision — [`should_release_dashboards`]'s ceiling
+/// precondition, read off the same `Status` the settled verdict comes from.
+fn nodes_steady(ready: i32, updated: i32, desired: i32) -> bool {
+    desired > 0 && ready == desired && updated == desired
+}
+
+/// One step of the hold, decided from what the cluster says now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldStep {
+    /// No hold, or a hold already in force.
+    Nothing,
+    /// The hold is on the CR but the stored replicas are not 0 (the
+    /// operator's full update dropped the zero): write 0 again.
+    Enforce,
+    /// The reason for the hold has passed: replicas 1, annotation removed.
+    Release,
+    /// A Dashboards replica is already Ready — the hold was lost and the
+    /// first boot happened anyway. Scaling a serving Dashboards to zero
+    /// would be an outage that protects nothing, so only the annotation goes.
+    ClearStale,
+}
+
+/// The pure decision behind every hold write. Order matters: a serving
+/// Dashboards is never scaled down, a released hold is never re-enforced.
+fn dashboards_hold_step(
+    held: bool,
+    stored_replicas: i64,
+    dashboards_serving: bool,
+    release_due: bool,
+) -> HoldStep {
+    if !held {
+        HoldStep::Nothing
+    } else if dashboards_serving {
+        HoldStep::ClearStale
+    } else if release_due {
+        HoldStep::Release
+    } else if stored_replicas != 0 {
+        HoldStep::Enforce
+    } else {
+        HoldStep::Nothing
+    }
+}
+
+/// The merge patch for one step, pinned to the `resourceVersion` the step was
+/// decided on: a concurrent write (a release by the sampler, a save) makes the
+/// API server refuse it with a conflict instead of letting a stale decision
+/// land — an `Enforce` racing a `Release` must never leave a zero behind
+/// without the annotation that gets it released.
+fn hold_step_patch(step: HoldStep, resource_version: &str) -> Option<serde_json::Value> {
+    let mut patch = match step {
+        HoldStep::Nothing => return None,
+        HoldStep::Enforce => serde_json::json!({ "spec": { "dashboards": { "replicas": 0 } } }),
+        HoldStep::Release => dashboards_hold_patch(None),
+        HoldStep::ClearStale => serde_json::json!({
+            "metadata": { "annotations": { LABEL_DASHBOARDS_HOLD: null } }
+        }),
+    };
+    patch["metadata"]["resourceVersion"] = serde_json::Value::String(resource_version.into());
+    Some(patch)
+}
+
+/// A Dashboards replica is Ready right now. Unlike `dashboards_ready_in`, a
+/// missing Deployment reads as NOT serving: right after create it simply has
+/// not been rendered yet.
+async fn dashboards_serving_in(client: &Client, namespace: &str, name: &str) -> bool {
+    use k8s_openapi::api::apps::v1::Deployment;
+    let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    matches!(
+        api.get_opt(&format!("{name}-dashboards")).await,
+        Ok(Some(d)) if d.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0) >= 1
+    )
+}
+
+/// Decide and write one hold step for a CR just read, given whether the
+/// release is due (`release_due` — the caller's call, see
+/// [`reconcile_dashboards_hold`]). Returns the step taken (`Nothing` when the
+/// write was refused — the next poll decides again).
+async fn apply_hold_step(
+    client: &Client,
+    namespace: &str,
+    obj: &DynamicObject,
+    release_due: bool,
+) -> HoldStep {
+    let name = obj.metadata.name.clone().unwrap_or_default();
+    let held = dashboards_hold_of(obj.metadata.annotations.as_ref()).is_some();
+    if !held {
+        return HoldStep::Nothing;
+    }
+    let step = dashboards_hold_step(
+        held,
+        dashboards_replicas_of(&obj.data),
+        dashboards_serving_in(client, namespace, &name).await,
+        release_due,
+    );
+    let rv = obj.metadata.resource_version.clone().unwrap_or_default();
+    let Some(patch) = hold_step_patch(step, &rv) else {
+        return HoldStep::Nothing;
+    };
+    match cluster_api_in(client, namespace)
+        .patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
     {
-        tracing::warn!("#46 Recreate strategy for {namespace}/{object} failed: {e:#}");
-    }
-    let pp = PatchParams::apply("veloxsearch-dashboards-survivability").force();
-    let manifest = survivability_probe_apply(namespace, &object);
-    if let Err(e) = deploy.patch(&object, &pp, &Patch::Apply(&manifest)).await {
-        tracing::warn!("#46 startup-probe budget for {namespace}/{object} failed: {e:#}");
-    }
-}
-
-/// #46 strategy: `Recreate`, with the API server's defaulted `rollingUpdate`
-/// explicitly removed (merge-patch `null`) — the two are mutually exclusive.
-fn survivability_strategy_patch() -> serde_json::Value {
-    serde_json::json!({
-        "spec": { "strategy": { "type": "Recreate", "rollingUpdate": null } }
-    })
-}
-
-/// #46 probe budget, claimed under our own field manager. Carries NO
-/// `strategy` — see `ensure_dashboards_survivability` for why.
-fn survivability_probe_apply(namespace: &str, object: &str) -> serde_json::Value {
-    serde_json::json!({
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "metadata": { "name": object, "namespace": namespace },
-        "spec": {
-            "template": {
-                "spec": {
-                    "containers": [{
-                        "name": "dashboards",
-                        "startupProbe": { "failureThreshold": 90 }
-                    }]
-                }
-            }
+        Ok(_) => {
+            tracing::info!("#46 Dashboards hold of {namespace}/{name}: {step:?}");
+            step
         }
-    })
+        Err(e) => {
+            tracing::debug!("#46 Dashboards hold step {step:?} on {namespace}/{name}: {e:#}");
+            HoldStep::Nothing
+        }
+    }
 }
 
-/// Wait (bounded, best-effort) for the operator to materialize the Dashboards
-/// Deployment after a CR apply, then make it survivable. Spawned fire-and-
-/// forget from `create_cluster` so the create flow never blocks on the
-/// operator's reconcile cadence.
-async fn spawn_dashboards_survivability(namespace: String, name: String) {
-    // The operator creates the Deployment within seconds of accepting the CR;
-    // the window only needs to cover a slow reconcile, not the whole create.
-    for _ in 0..24 {
+/// Keep a new deployment's hold in force through the operator's first write
+/// (see the section note): poll the CR, re-assert the zero it drops, and stop
+/// once the operator's finalizer is on a CR that still reads 0 — or the hold
+/// is gone (released, or cleared because Dashboards is already serving).
+/// Spawned from `create_cluster`, never awaited; the sampler's
+/// [`reconcile_dashboards_hold`] is the backstop if this task dies with the
+/// backend or outlives its bound.
+async fn watch_new_dashboards_hold(namespace: String, name: String) {
+    for _ in 0..HOLD_WATCH_POLLS {
         if let Ok(client) = client().await {
-            use k8s_openapi::api::apps::v1::Deployment;
-            let deploy: Api<Deployment> = Api::namespaced(client.clone(), &namespace);
-            if deploy
-                .get_opt(&format!("{name}-dashboards"))
-                .await
-                .is_ok_and(|o| o.is_some())
-            {
-                ensure_dashboards_survivability(&client, &namespace, &name).await;
-                return;
+            if let Ok(Some(obj)) = cluster_api_in(&client, &namespace).get_opt(&name).await {
+                if dashboards_hold_of(obj.metadata.annotations.as_ref()).is_none() {
+                    tracing::info!(
+                        "#46 post-create Dashboards hold watch of {namespace}/{name} stopped: \
+                         the hold is gone"
+                    );
+                    return;
+                }
+                let operator_wrote = obj
+                    .metadata
+                    .finalizers
+                    .as_ref()
+                    .is_some_and(|f| f.iter().any(|x| x == OPERATOR_FINALIZER));
+                if operator_wrote && dashboards_replicas_of(&obj.data) == 0 {
+                    tracing::info!(
+                        "#46 post-create Dashboards hold watch of {namespace}/{name} stopped: \
+                         the operator's first write is in and the hold reads 0"
+                    );
+                    return;
+                }
+                // Enforce only: releasing is the sampler's call, on velox's
+                // own settled verdict.
+                apply_hold_step(&client, &namespace, &obj, false).await;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(HOLD_WATCH_INTERVAL).await;
     }
-    tracing::warn!(
-        "#46 Dashboards Deployment for {namespace}/{name} never appeared; \
-         survivability patch skipped (stall remediation remains the backstop)"
+    tracing::info!(
+        "#46 post-create Dashboards hold watch of {namespace}/{name} stopped at its \
+         bound; the sampler keeps enforcing the hold"
     );
+}
+
+/// Enforce or release a Dashboards hold — called by the sampler every tick
+/// for every deployment (the #47 re-arm is the precedent), so the state lives
+/// on the CR and a backend restart resumes it; a CR without the annotation
+/// costs one GET and nothing else.
+pub async fn reconcile_dashboards_hold(dep: &Deployment) {
+    // A remediation this process is still running owns its own hold; the
+    // sampler only picks up a hold whose remediation died with a backend.
+    let key = format!("{}/{}", dep.namespace(), dep.name());
+    let in_flight = dashboards_remediation_log()
+        .lock()
+        .ok()
+        .is_some_and(|m| matches!(m.get(&key), Some((_, None))));
+    if in_flight {
+        return;
+    }
+    let Ok(client) = client().await else {
+        return;
+    };
+    let Ok(Some(obj)) = os_api(&client, dep).get_opt(dep.name()).await else {
+        return;
+    };
+    if dashboards_hold_of(obj.metadata.annotations.as_ref()).is_none() {
+        return;
+    }
+    // Only a held deployment pays for the full evaluation: the release waits
+    // on velox's own verdict, not the CR's lagging `health`.
+    // An unreadable status is neither settled nor steady: the hold stays,
+    // and the next tick asks again.
+    let (nodes_settled, nodes_steady) = match get_deployment(dep).await {
+        Ok(Some(st)) => (
+            st.activity.nodes_settled,
+            nodes_steady(st.nodes_ready, st.nodes_updated, st.nodes_desired),
+        ),
+        _ => (false, false),
+    };
+    let created = obj.metadata.creation_timestamp.as_ref();
+    let quiet = node_pool_age_secs(&client, dep.namespace(), dep.name(), created).await;
+    let initialized = obj
+        .data
+        .pointer("/status/initialized")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let age = created
+        .map(|t| (k8s_openapi::chrono::Utc::now() - t.0).num_seconds())
+        .unwrap_or(0);
+    let release_due =
+        should_release_dashboards(nodes_settled, nodes_steady, quiet, initialized, age);
+    // Re-read so the write is pinned to a fresh resourceVersion: the
+    // evaluation above takes long enough for an operator status write to
+    // land, which would otherwise turn every release into a conflict.
+    let Ok(Some(obj)) = os_api(&client, dep).get_opt(dep.name()).await else {
+        return;
+    };
+    apply_hold_step(&client, dep.namespace(), &obj, release_due).await;
 }
 
 /// Message of the most recent `Warning`/`Upgrade` Event on a deployment's CR.
@@ -4275,6 +4875,11 @@ pub async fn dashboard_credentials(dep: &Deployment) -> Result<(String, String)>
 /// re-run its securityconfig update job so the new hash is applied to the
 /// running cluster. `admin_creds` immediately reflects the new password for the
 /// app's own calls.
+///
+/// That Job runs once and its failure is permanent, so a reset is refused
+/// unless the deployment has settled, is rolled back if the nudge fails, and
+/// is undone by the status backstop if the Job fails (#115, ADR-064,
+/// `crate::admin_reset`).
 /// Reset the cluster admin password to a freshly generated one and return it.
 ///
 /// The caller never chooses the value. A human-chosen password for a machine
@@ -4290,6 +4895,8 @@ pub async fn reset_admin_password_random(dep: &Deployment) -> Result<String> {
 }
 
 pub async fn reset_admin_password(dep: &Deployment, new_password: &str) -> Result<()> {
+    use crate::admin_reset::{self, ResetError};
+
     let name = dep.name();
     validate_name(name)?;
     password_check(new_password)?;
@@ -4298,52 +4905,323 @@ pub async fn reset_admin_password(dep: &Deployment, new_password: &str) -> Resul
     // exist would either 404 cryptically or, worse, leave an orphan Secret a
     // later create would silently adopt. Refuse with the actual situation.
     ensure_namespace_exists(&client, dep.namespace()).await?;
-    if os_api(&client, dep).get_opt(name).await?.is_none() {
+    let Some(cr) = os_api(&client, dep).get_opt(name).await? else {
         bail!(
             "no deployment named '{name}' in namespace '{}' — cannot reset \
              its admin password",
             dep.namespace()
         );
-    }
+    };
+
+    // #115: only a settled deployment (ADR-050) can take a reset. The
+    // operator's securityconfig Job reaches the cluster through its Service
+    // and runs once; a reset landing mid-roll left every node unready for
+    // good. An unconfirmed earlier reset is refused too — this one would
+    // overwrite the only copy of the password that one replaced.
+    let pending = cr
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(admin_reset::PENDING_ANNOTATION));
+    let settled = get_deployment(dep)
+        .await?
+        .is_some_and(|s| s.activity.settled);
+    admin_reset::gate(settled, pending.map(String::as_str)).map_err(ResetError::Refused)?;
 
     // 1. Update the credentials Secret — the source of truth the operator seeds
-    //    the admin hash from, and what `admin_creds` reads.
+    //    the admin hash from, and what `admin_creds` reads — keeping the
+    //    password it replaces for the backstop (`reset_backstop_in`). Read
+    //    with errors propagated: without the old value there is no way back.
     let secrets: Api<Secret> = Api::namespaced(client.clone(), dep.namespace());
-    let patch =
-        serde_json::json!({ "stringData": { "username": ADMIN_USER, "password": new_password } });
+    let secret_name = admin_secret_name(name);
+    let previous = secrets
+        .get(&secret_name)
+        .await
+        .context("reading admin credentials Secret")?
+        .data
+        .and_then(|d| d.get("password").map(|b| b.0.clone()))
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|p| !p.is_empty())
+        .context(
+            "admin credentials Secret has no password — refusing to reset without a way back",
+        )?;
+    let patch = admin_reset::start_patch(ADMIN_USER, new_password, &previous);
     secrets
+        .patch(&secret_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("updating admin credentials Secret")?;
+
+    // 2. Force a reconcile so the operator re-applies the security config with
+    //    the new hash, and mark the reset pending in the same apply.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+        .to_string();
+    let Err(nudge_err) =
+        apply_reset_annotations(&client, dep.namespace(), name, &ts, Some(&ts)).await
+    else {
+        return Ok(());
+    };
+
+    // 3. The nudge failed after the Secret was rewritten (#115: the operator's
+    //    webhook refusing with a 500). Put the old password back, so the
+    //    answer is "nothing changed" rather than a 500 over a changed password.
+    let rollback = admin_reset::restore_patch(&previous, true);
+    let rolled = secrets
+        .patch(
+            &secret_name,
+            &PatchParams::default(),
+            &Patch::Merge(&rollback),
+        )
+        .await;
+    let cause = format!("{nudge_err:#}");
+    let err = match admin_reset::outcome(false, Some(rolled.is_ok())) {
+        admin_reset::Outcome::NotApplied => ResetError::NotApplied { cause },
+        _ => ResetError::Partial {
+            cause,
+            rollback: rolled.err().map(|e| e.to_string()).unwrap_or_default(),
+        },
+    };
+    Err(err.into())
+}
+
+/// The reconcile nudge, applied under a dedicated field manager that owns ONLY
+/// these annotations, so server-side apply can't prune the rest of the spec.
+/// `pending: None` omits [`crate::admin_reset::PENDING_ANNOTATION`], which
+/// server-side apply then REMOVES — this manager is its only writer.
+async fn apply_reset_annotations(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    nudge: &str,
+    pending: Option<&str>,
+) -> Result<()> {
+    let mut annotations = serde_json::Map::new();
+    annotations.insert(
+        crate::admin_reset::NUDGE_ANNOTATION.into(),
+        serde_json::Value::String(nudge.into()),
+    );
+    if let Some(p) = pending {
+        annotations.insert(
+            crate::admin_reset::PENDING_ANNOTATION.into(),
+            serde_json::Value::String(p.into()),
+        );
+    }
+    let anno = serde_json::json!({
+        "apiVersion": "opensearch.org/v1",
+        "kind": "OpenSearchCluster",
+        "metadata": { "name": name, "annotations": annotations }
+    });
+    cluster_api_in(client, namespace)
+        .patch(
+            name,
+            &PatchParams::apply(SECRESET_FIELD_MANAGER).force(),
+            &Patch::Apply(&anno),
+        )
+        .await
+        .context("forcing operator reconcile for password reset")?;
+    Ok(())
+}
+
+/// The field manager that owns the reset annotations — and nothing else.
+const SECRESET_FIELD_MANAGER: &str = "veloxsearch-secreset";
+
+/// Epoch seconds, for comparing against a Kubernetes timestamp.
+fn now_secs() -> i64 {
+    k8s_openapi::chrono::Utc::now().timestamp()
+}
+
+/// The newest pod of `<name>-securityconfig-update`, the operator's one-shot
+/// Job. Pods, not Jobs: the runtime role can already read pods everywhere, and
+/// with `BackoffLimit: 0` the one pod's phase is the Job's verdict.
+async fn securityconfig_run_in(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<crate::admin_reset::UpdateRun>> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let lp = ListParams::default().labels(&format!("job-name={name}-securityconfig-update"));
+    let list = pods
+        .list(&lp)
+        .await
+        .context("listing securityconfig pods")?;
+    Ok(list
+        .into_iter()
+        .filter_map(|p| {
+            Some(crate::admin_reset::UpdateRun {
+                created_secs: p.metadata.creation_timestamp?.0.timestamp(),
+                phase: p.status.and_then(|s| s.phase).unwrap_or_default(),
+            })
+        })
+        .max_by_key(|r| r.created_secs))
+}
+
+/// The #115 backstop, run from `status_from` for a CR that carries
+/// [`crate::admin_reset::PENDING_ANNOTATION`] — a reset in its window, so a
+/// deployment without one pays nothing. The sampler lists every deployment
+/// on its own clock, so this runs with nobody watching the UI.
+///
+/// Every step is idempotent: two readers acting on the same tick restore the
+/// same password and write the same marker.
+async fn reset_backstop_in(client: &Client, namespace: &str, name: &str, pending: &str) {
+    use crate::admin_reset::{self, Backstop};
+
+    let decision = match admin_reset::parse_pending(pending) {
+        None => Backstop::Forget,
+        Some(p) => match securityconfig_run_in(client, namespace, name).await {
+            Ok(run) => admin_reset::backstop(&p, run.as_ref(), now_secs()),
+            Err(e) => {
+                tracing::debug!("#115 backstop for {namespace}/{name}: {e:#}");
+                return;
+            }
+        },
+    };
+    let result = match decision {
+        Backstop::Wait => return,
+        Backstop::Forget => forget_reset_in(client, namespace, name).await,
+        Backstop::Restore { next } => restore_reset_in(client, namespace, name, &next).await,
+        Backstop::Stall { next } => stall_reset_in(client, namespace, name, &next).await,
+    };
+    match (decision, result) {
+        (Backstop::Restore { next }, Ok(())) => tracing::warn!(
+            "#115 the securityconfig Job for {namespace}/{name} failed after an admin-password \
+             reset; the previous password was restored (attempt {:?}) so the nodes can pass \
+             their probes again — watching the restore's own Job",
+            next.stage
+        ),
+        (Backstop::Stall { .. }, Ok(())) => tracing::error!(
+            "#115 restoring the previous admin password of {namespace}/{name} failed {} times; \
+             the backstop has stopped and marked the reset stalled on the CR. Check the \
+             {name}-securityconfig-update Job and the node probes by hand",
+            crate::admin_reset::MAX_RESTORES
+        ),
+        (_, Ok(())) => {}
+        (_, Err(e)) => tracing::warn!("#115 backstop ({decision:?}) for {namespace}/{name}: {e:#}"),
+    }
+}
+
+/// The nudge annotation as the CR carries it now. The reset annotations are
+/// written by server-side apply under their own field manager, so every
+/// write of the marker has to restate the nudge or the apply removes it.
+async fn current_nudge_in(client: &Client, namespace: &str, name: &str) -> Result<String> {
+    Ok(cluster_api_in(client, namespace)
+        .get(name)
+        .await
+        .context("reading the deployment")?
+        .metadata
+        .annotations
+        .and_then(|a| a.get(crate::admin_reset::NUDGE_ANNOTATION).cloned())
+        .unwrap_or_default())
+}
+
+/// Drop the pending marker, then the kept password. In that order: a marker
+/// without a password is harmless (the backstop forgets it), a password
+/// without a marker is only stale.
+async fn forget_reset_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+    let nudge = current_nudge_in(client, namespace, name).await?;
+    apply_reset_annotations(client, namespace, name, &nudge, None).await?;
+    drop_previous_password_in(client, namespace, name).await
+}
+
+/// Put the previous password back and nudge the operator, which copies it into
+/// the probe Secret and re-runs its Job with the old hash — the one the cluster
+/// still has. The nudge's apply rewrites the marker to `next` (a restore
+/// stage), and the kept password STAYS: the restore is only done when its own
+/// Job succeeds, which the backstop keeps watching for. A failure midway is
+/// retried whole on the next read.
+///
+/// A retry (attempt 2+) restores a password the credentials Secret already
+/// holds, so the operator would compute the same securityconfig checksum and
+/// treat its failed Job as applied. The retry therefore deletes that Job
+/// first; with no Job to compare against, the operator's reconcile starts a
+/// new one. If the delete is refused (an install whose Role predates the
+/// grant), there is no way to retry, and the reset is marked stalled.
+async fn restore_reset_in(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    next: &crate::admin_reset::Pending,
+) -> Result<()> {
+    use crate::admin_reset::Stage;
+
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let secret_name = admin_secret_name(name);
+    let previous = secrets
+        .get(&secret_name)
+        .await
+        .context("reading admin credentials Secret")?
+        .data
+        .and_then(|d| {
+            d.get(crate::admin_reset::PREVIOUS_PASSWORD_KEY)
+                .map(|b| b.0.clone())
+        })
+        .and_then(|b| String::from_utf8(b).ok())
+        .filter(|p| !p.is_empty());
+    let Some(previous) = previous else {
+        // Nothing to restore to: forgetting is all that is left.
+        return forget_reset_in(client, namespace, name).await;
+    };
+    let patch = crate::admin_reset::restore_patch(&previous, false);
+    secrets
+        .patch(&secret_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("restoring the previous admin password")?;
+    if matches!(next.stage, Stage::Restore(n) if n > 1) {
+        use k8s_openapi::api::batch::v1::Job;
+        let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+        let dp = DeleteParams {
+            propagation_policy: Some(kube::api::PropagationPolicy::Background),
+            ..DeleteParams::default()
+        };
+        // Already gone is fine: a previous pass deleted it and failed later.
+        match jobs
+            .delete(&format!("{name}-securityconfig-update"), &dp)
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => {
+                let stalled = crate::admin_reset::Pending {
+                    since: now_secs(),
+                    stage: Stage::Stalled,
+                };
+                stall_reset_in(client, namespace, name, &stalled).await?;
+                bail!(
+                    "cannot delete the failed securityconfig Job to retry the restore ({e:#}); \
+                 the reset is marked stalled"
+                );
+            }
+        }
+    }
+    let ts = now_secs().to_string();
+    apply_reset_annotations(client, namespace, name, &ts, Some(&next.value())).await
+}
+
+/// Mark the reset stalled on the CR — the fact the gate refuses with, and
+/// what a person reading the CR finds — without nudging: the nudge value is
+/// restated unchanged, so the operator is not asked to do anything. The kept
+/// password stays until the window from the stall has passed.
+async fn stall_reset_in(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    next: &crate::admin_reset::Pending,
+) -> Result<()> {
+    let nudge = current_nudge_in(client, namespace, name).await?;
+    apply_reset_annotations(client, namespace, name, &nudge, Some(&next.value())).await
+}
+
+async fn drop_previous_password_in(client: &Client, namespace: &str, name: &str) -> Result<()> {
+    let patch = crate::admin_reset::drop_kept_patch();
+    Api::<Secret>::namespaced(client.clone(), namespace)
         .patch(
             &admin_secret_name(name),
             &PatchParams::default(),
             &Patch::Merge(&patch),
         )
         .await
-        .context("updating admin credentials Secret")?;
-
-    // 2. Force a reconcile so the operator re-applies the security config with
-    //    the new hash. A dedicated field manager owns ONLY this annotation, so
-    //    server-side apply can't prune the rest of the spec.
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    let anno = serde_json::json!({
-        "apiVersion": "opensearch.org/v1",
-        "kind": "OpenSearchCluster",
-        "metadata": {
-            "name": name,
-            "annotations": { "veloxsearch.ai/security-reset": ts.to_string() }
-        }
-    });
-    os_api(&client, dep)
-        .patch(
-            name,
-            &PatchParams::apply("veloxsearch-secreset").force(),
-            &Patch::Apply(&anno),
-        )
-        .await
-        .context("forcing operator reconcile for password reset")?;
-
+        .context("dropping the kept admin password")?;
     Ok(())
 }
 
@@ -4405,6 +5283,106 @@ struct Deferred {
     purpose: String,
     monitors: Vec<String>,
     record: crate::provisioning::Record,
+    /// The deployment's retention and velox's last policy stamp (ADR-062).
+    retention: RetentionOnCr,
+}
+
+/// The ADR-062 annotations, as the CR carries them.
+#[derive(Debug, Clone, Default)]
+pub struct RetentionOnCr {
+    pub purpose: String,
+    /// `retention::ANNOTATION`, raw (e.g. `30d`); `None` on legacy CRs.
+    pub value: Option<String>,
+    /// `retention::STAMP_ANNOTATION`.
+    pub stamp: Option<String>,
+    /// `retention::SOURCE_ANNOTATION`, raw; `None` on CRs that predate it.
+    pub source: Option<String>,
+    /// Whether the OTel stack is installed (ADR-053): its three policies then
+    /// follow this deployment's retention too.
+    pub otel_stack: bool,
+    /// `retention::OTEL_STAMP_ANNOTATION`, raw.
+    pub otel_stamps: Option<String>,
+}
+
+fn retention_from(
+    labels: &BTreeMap<String, String>,
+    annotations: &BTreeMap<String, String>,
+) -> RetentionOnCr {
+    RetentionOnCr {
+        purpose: labels.get(LABEL_PURPOSE).cloned().unwrap_or_default(),
+        value: annotations.get(crate::retention::ANNOTATION).cloned(),
+        stamp: annotations.get(crate::retention::STAMP_ANNOTATION).cloned(),
+        source: annotations
+            .get(crate::retention::SOURCE_ANNOTATION)
+            .cloned(),
+        otel_stack: annotations
+            .get(LABEL_OTEL_STACK)
+            .is_some_and(|v| !v.is_empty()),
+        otel_stamps: annotations
+            .get(crate::retention::OTEL_STAMP_ANNOTATION)
+            .cloned(),
+    }
+}
+
+/// Read a deployment's retention annotations and purpose off its CR.
+pub async fn retention_of(dep: &Deployment) -> Result<RetentionOnCr> {
+    let client = client().await?;
+    let obj = os_api(&client, dep)
+        .get(dep.name())
+        .await
+        .context("reading the deployment's retention")?;
+    Ok(retention_from(
+        &obj.metadata.labels.unwrap_or_default(),
+        &obj.metadata.annotations.unwrap_or_default(),
+    ))
+}
+
+/// Write the ADR-062 annotations — `Some` values only, as a JSON merge patch
+/// on those keys, like the provisioning record: it cannot touch the spec.
+pub async fn set_retention(
+    dep: &Deployment,
+    retention: Option<(u32, crate::retention::Source)>,
+    stamp: Option<&str>,
+) -> Result<()> {
+    let mut annotations = serde_json::Map::new();
+    if let Some((d, src)) = retention {
+        annotations.insert(
+            crate::retention::ANNOTATION.to_string(),
+            crate::retention::render_age(d).into(),
+        );
+        annotations.insert(
+            crate::retention::SOURCE_ANNOTATION.to_string(),
+            src.as_str().into(),
+        );
+    }
+    if let Some(s) = stamp {
+        annotations.insert(crate::retention::STAMP_ANNOTATION.to_string(), s.into());
+    }
+    if annotations.is_empty() {
+        return Ok(());
+    }
+    let client = client().await?;
+    let patch = serde_json::json!({ "metadata": { "annotations": annotations } });
+    os_api(&client, dep)
+        .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("patching the retention annotations")?;
+    Ok(())
+}
+
+/// Record what velox last wrote to the OTel stack's retention policies
+/// (`retention::OTEL_STAMP_ANNOTATION`). A merge patch on that one key, like
+/// `set_retention`: it cannot touch the spec.
+pub async fn set_otel_retention_stamps(dep: &Deployment, stamps: &str) -> Result<()> {
+    let client = client().await?;
+    let patch = serde_json::json!({
+        "metadata": { "annotations": { crate::retention::OTEL_STAMP_ANNOTATION: stamps } }
+    });
+    os_api(&client, dep)
+        .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("patching the OTel retention stamps")?;
+    Ok(())
 }
 
 /// Read the deferred-provisioning inputs. `None` means the CR is gone — a
@@ -4418,6 +5396,7 @@ async fn read_deferred(client: &Client, dep: &Deployment) -> Result<Option<Defer
     let annotations = obj.metadata.annotations.clone().unwrap_or_default();
     Ok(Some(Deferred {
         purpose: labels.get(LABEL_PURPOSE).cloned().unwrap_or_default(),
+        retention: retention_from(&labels, &annotations),
         monitors: monitors_from(Some(&annotations)),
         record: crate::provisioning::parse(
             annotations
@@ -4619,7 +5598,15 @@ async fn run_deferred_provisioning(dep: Deployment, mut snapshot: Option<Snapsho
         let mut failure: Option<String> = None;
         for item in record.pending(&state.purpose, &state.monitors) {
             let outcome = match &item {
-                Item::Profile(purpose) => crate::profiles::apply(&dep, purpose).await,
+                Item::Profile(purpose) => {
+                    crate::profiles::apply(
+                        &dep,
+                        purpose,
+                        state.retention.value.as_deref(),
+                        state.retention.stamp.as_deref(),
+                    )
+                    .await
+                }
                 // A selected monitor is either a built-in recipe or a catalog
                 // package (ADR-039): the wizard's data step offers both, so
                 // route by which one it is rather than failing the id as
@@ -4917,7 +5904,11 @@ pub async fn upgrade_cluster(
                     }
                     // The upgrade must not change what the deployment IS:
                     // re-assert the purpose profile rather than regenerate it.
-                    if let Err(e) = crate::profiles::apply(&n, &purpose).await {
+                    let r = retention_of(&n).await.unwrap_or_default();
+                    if let Err(e) =
+                        crate::profiles::apply(&n, &purpose, r.value.as_deref(), r.stamp.as_deref())
+                            .await
+                    {
                         tracing::error!("re-asserting profile '{purpose}' on {n}: {e:#}");
                     }
                 }
@@ -6242,51 +7233,426 @@ mod tests {
 
     // ── #27/#96 bounce target: the recovery SOURCE ─────────────────────
 
+    fn pods(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// The cluster-wide `_cat/recovery?active_only=true` reading of the
+    /// 2026-09-27 kind stall (OpenSearch 3.7.0, deployment `retb-6yp8`):
+    /// every wedged row sources from nodes-1, towards BOTH other nodes. The
+    /// byte cell is what 3.7.0 renders without `bytes=b` (`0b`), as probed.
+    fn kind_stall_rows() -> serde_json::Value {
+        serde_json::json!([
+            {"index": ".plugins-ml-config", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-0"},
+            {"index": ".plugins-ml-config", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-2"},
+            {"index": ".opendistro_security", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-0"},
+            {"index": ".opendistro_security", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-2"},
+            {"index": "security-auditlog-2026.09.27", "shard": "0", "type": "peer", "stage": "init",
+             "bytes_recovered": "0b", "source_node": "retb-6yp8-nodes-1", "target_node": "retb-6yp8-nodes-0"}
+        ])
+    }
+
+    const RETB_PODS: [&str; 3] = [
+        "retb-6yp8-nodes-0",
+        "retb-6yp8-nodes-1",
+        "retb-6yp8-nodes-2",
+    ];
+
     #[test]
-    fn wedged_recovery_bounces_the_source_not_the_target() {
-        // the live 2026-09-24 shape: every wedged row sources from nodes-1
+    fn the_kind_stall_bounces_the_source_pod_not_a_receiver() {
+        let c = choose_bounce_pod(&kind_stall_rows(), &pods(&RETB_PODS)).unwrap();
+        assert_eq!(c.pod, "retb-6yp8-nodes-1");
+        assert_eq!(c.by_source, vec![("retb-6yp8-nodes-1".to_string(), 5)]);
+        assert_eq!(c.wedged, 5);
+    }
+
+    #[test]
+    fn the_source_of_the_most_wedged_recoveries_wins() {
         let v = serde_json::json!([
-            {"stage": "done", "bytes_recovered": "208", "source_node": "d-nodes-2", "target_node": "d-nodes-0"},
-            {"stage": "init", "bytes_recovered": "0", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
-            {"stage": "init", "bytes_recovered": 0, "source_node": "d-nodes-1", "target_node": "d-nodes-2"}
+            {"type": "peer", "stage": "init", "bytes_recovered": "0", "source_node": "d-nodes-2", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "init", "bytes_recovered": "0", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "init", "bytes_recovered": 0, "source_node": "d-nodes-1", "target_node": "d-nodes-2"}
         ]);
-        assert_eq!(wedged_recovery_source(&v).as_deref(), Some("d-nodes-1"));
-    }
-
-    #[test]
-    fn wedged_recovery_source_needs_a_real_wedge_and_a_source() {
-        let moving = serde_json::json!([
-            {"stage": "init", "bytes_recovered": "4096", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
-            {"stage": "index", "bytes_recovered": "0", "source_node": "d-nodes-1", "target_node": "d-nodes-2"}
-        ]);
-        assert_eq!(wedged_recovery_source(&moving), None);
-        let no_source = serde_json::json!([
-            {"stage": "init", "bytes_recovered": "0", "source_node": "n/a", "target_node": "d-nodes-0"}
-        ]);
-        assert_eq!(wedged_recovery_source(&no_source), None);
-        assert_eq!(wedged_recovery_source(&serde_json::json!({})), None);
-    }
-
-    // ── #46 survivability patches ──────────────────────────────────────
-
-    #[test]
-    fn survivability_strategy_nulls_the_defaulted_rolling_update() {
-        let p = survivability_strategy_patch();
-        assert_eq!(p["spec"]["strategy"]["type"], "Recreate");
-        // present-and-null is the merge-patch delete; absent would keep the
-        // API server's default and the request would be rejected again
-        let strategy = p["spec"]["strategy"].as_object().unwrap();
-        assert!(strategy.contains_key("rollingUpdate"));
-        assert!(strategy["rollingUpdate"].is_null());
-    }
-
-    #[test]
-    fn survivability_probe_apply_never_claims_the_strategy() {
-        let m = survivability_probe_apply("ns", "d-dashboards");
-        assert!(m["spec"].get("strategy").is_none());
+        let c = choose_bounce_pod(&v, &pods(&["d-nodes-0", "d-nodes-1", "d-nodes-2"])).unwrap();
+        assert_eq!(c.pod, "d-nodes-1");
         assert_eq!(
-            m["spec"]["template"]["spec"]["containers"][0]["startupProbe"]["failureThreshold"],
-            90
+            c.by_source,
+            vec![("d-nodes-1".to_string(), 2), ("d-nodes-2".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn only_wedged_peer_recoveries_are_counted() {
+        // Moving (bytes in either rendering), past init, and source-less
+        // store recoveries are not the wedge.
+        let v = serde_json::json!([
+            {"type": "peer", "stage": "init", "bytes_recovered": "12kb", "source_node": "d-nodes-2", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "init", "bytes_recovered": "4096", "source_node": "d-nodes-2", "target_node": "d-nodes-1"},
+            {"type": "peer", "stage": "index", "bytes_recovered": "0b", "source_node": "d-nodes-2", "target_node": "d-nodes-1"},
+            {"type": "existing_store", "stage": "init", "bytes_recovered": "0b", "source_node": "n/a", "target_node": "d-nodes-2"},
+            {"type": "peer", "stage": "init", "bytes_recovered": "0b", "source_node": "d-nodes-1", "target_node": "d-nodes-0"}
+        ]);
+        let c = choose_bounce_pod(&v, &pods(&["d-nodes-0", "d-nodes-1", "d-nodes-2"])).unwrap();
+        assert_eq!(c.pod, "d-nodes-1");
+        assert_eq!(c.wedged, 1);
+    }
+
+    #[test]
+    fn no_wedge_means_no_bounce_never_a_fallback_to_a_receiver() {
+        let receivers_only = serde_json::json!([
+            {"type": "existing_store", "stage": "init", "bytes_recovered": "0b", "source_node": "n/a", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "translog", "bytes_recovered": "0b", "source_node": "d-nodes-1", "target_node": "d-nodes-0"}
+        ]);
+        let all = pods(&["d-nodes-0", "d-nodes-1"]);
+        assert_eq!(
+            choose_bounce_pod(&receivers_only, &all),
+            Err(BounceRefusal::NoWedgedPeerRecovery)
+        );
+        assert_eq!(
+            choose_bounce_pod(&serde_json::json!([]), &all),
+            Err(BounceRefusal::NoWedgedPeerRecovery)
+        );
+        // An error body (a 4xx/5xx answered as JSON) is not a wedge either.
+        assert_eq!(
+            choose_bounce_pod(&serde_json::json!({"error": "x", "status": 403}), &all),
+            Err(BounceRefusal::NoWedgedPeerRecovery)
+        );
+    }
+
+    #[test]
+    fn a_tie_between_sources_is_refused() {
+        let v = serde_json::json!([
+            {"type": "peer", "stage": "init", "bytes_recovered": "0b", "source_node": "d-nodes-1", "target_node": "d-nodes-0"},
+            {"type": "peer", "stage": "init", "bytes_recovered": "0b", "source_node": "d-nodes-2", "target_node": "d-nodes-0"}
+        ]);
+        assert_eq!(
+            choose_bounce_pod(&v, &pods(&["d-nodes-0", "d-nodes-1", "d-nodes-2"])),
+            Err(BounceRefusal::AmbiguousSource(vec![
+                ("d-nodes-1".to_string(), 1),
+                ("d-nodes-2".to_string(), 1)
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_node_pod_is_refused() {
+        // e.g. a node named after its host or IP instead of its pod
+        let v = serde_json::json!([
+            {"type": "peer", "stage": "init", "bytes_recovered": "0b", "source_node": "10-0-0-7", "target_node": "d-nodes-0"}
+        ]);
+        assert_eq!(
+            choose_bounce_pod(&v, &pods(&["d-nodes-0", "d-nodes-1"])),
+            Err(BounceRefusal::UnmappedSource("10-0-0-7".to_string()))
+        );
+        // and the kind stall with its source pod missing from the list
+        assert_eq!(
+            choose_bounce_pod(
+                &kind_stall_rows(),
+                &pods(&["retb-6yp8-nodes-0", "retb-6yp8-nodes-2"])
+            ),
+            Err(BounceRefusal::UnmappedSource(
+                "retb-6yp8-nodes-1".to_string()
+            ))
+        );
+    }
+
+    // ── #46 Dashboards hold (ADR-063) ──────────────────────────────────
+
+    #[test]
+    fn a_held_dashboards_spec_renders_zero_replicas() {
+        let held = dashboards_spec("3.3.0", 0);
+        assert_eq!(held["replicas"], 0);
+        assert_eq!(
+            held["enable"], true,
+            "held is not disabled: the Deployment must exist"
+        );
+        assert_eq!(held["version"], "3.3.0");
+        assert_eq!(dashboards_spec("3.3.0", 1)["replicas"], 1);
+    }
+
+    /// What the API server stores after the operator's first full update of a
+    /// CR (observed live 2026-09-26): its Go type carries `replicas` as
+    /// `int32` + `omitempty`, so a 0 is dropped from the body, and the CRD's
+    /// `default: 1` fills the gap back in.
+    fn operator_first_write(sent: &serde_json::Value) -> serde_json::Value {
+        let mut stored = sent.clone();
+        let dash = stored["spec"]["dashboards"].as_object_mut().unwrap();
+        if dash.get("replicas").and_then(|v| v.as_i64()) == Some(0) {
+            dash.remove("replicas"); // omitempty
+        }
+        dash.entry("replicas").or_insert(serde_json::json!(1)); // CRD default
+        stored
+    }
+
+    #[test]
+    fn a_hold_the_operator_rewrote_to_one_is_enforced_again() {
+        let sent = serde_json::json!({ "spec": { "dashboards": dashboards_spec("3.3.0", 0) } });
+        assert_eq!(dashboards_replicas_of(&sent), 0);
+        let stored = operator_first_write(&sent);
+        // the stored CR is NOT what we sent — the premise the first cut missed
+        assert_eq!(dashboards_replicas_of(&stored), 1);
+        // an unsettled cluster whose hold was dropped gets the zero back
+        assert_eq!(
+            dashboards_hold_step(true, dashboards_replicas_of(&stored), false, false),
+            HoldStep::Enforce
+        );
+        // and a hold in force is left alone
+        assert_eq!(
+            dashboards_hold_step(true, dashboards_replicas_of(&sent), false, false),
+            HoldStep::Nothing
+        );
+        // a nonzero replicas survives the same round trip untouched
+        let running = serde_json::json!({ "spec": { "dashboards": dashboards_spec("3.3.0", 1) } });
+        assert_eq!(dashboards_replicas_of(&operator_first_write(&running)), 1);
+        // absent reads as the CRD default, as the API server would store it
+        assert_eq!(dashboards_replicas_of(&serde_json::json!({})), 1);
+    }
+
+    #[test]
+    fn a_serving_dashboards_is_never_scaled_by_the_hold() {
+        // the hold was lost and Dashboards already booted: only the
+        // annotation goes, whatever the cluster's state
+        for (replicas, release_due) in [(1, false), (1, true), (0, false)] {
+            assert_eq!(
+                dashboards_hold_step(true, replicas, true, release_due),
+                HoldStep::ClearStale
+            );
+        }
+        let p = hold_step_patch(HoldStep::ClearStale, "42").unwrap();
+        assert!(
+            p.get("spec").is_none(),
+            "ClearStale must not touch replicas"
+        );
+        assert!(p["metadata"]["annotations"][LABEL_DASHBOARDS_HOLD].is_null());
+    }
+
+    #[test]
+    fn hold_steps_release_when_settled_and_do_nothing_without_a_hold() {
+        assert_eq!(
+            dashboards_hold_step(true, 0, false, true),
+            HoldStep::Release
+        );
+        // a settled cluster whose zero was dropped is released, not re-held
+        assert_eq!(
+            dashboards_hold_step(true, 1, false, true),
+            HoldStep::Release
+        );
+        for serving in [false, true] {
+            assert_eq!(
+                dashboards_hold_step(false, 0, serving, false),
+                HoldStep::Nothing
+            );
+        }
+    }
+
+    #[test]
+    fn every_hold_write_is_pinned_to_the_version_it_was_decided_on() {
+        assert_eq!(hold_step_patch(HoldStep::Nothing, "7"), None);
+        for step in [HoldStep::Enforce, HoldStep::Release, HoldStep::ClearStale] {
+            let p = hold_step_patch(step, "7").unwrap();
+            assert_eq!(p["metadata"]["resourceVersion"], "7", "{step:?}");
+        }
+        let enforce = hold_step_patch(HoldStep::Enforce, "7").unwrap();
+        assert_eq!(enforce["spec"]["dashboards"]["replicas"], 0);
+        assert!(
+            enforce["metadata"].get("annotations").is_none(),
+            "Enforce keeps the annotation as it is"
+        );
+        let release = hold_step_patch(HoldStep::Release, "7").unwrap();
+        assert_eq!(release["spec"]["dashboards"]["replicas"], 1);
+        assert!(release["metadata"]["annotations"][LABEL_DASHBOARDS_HOLD].is_null());
+    }
+
+    #[test]
+    fn the_dashboards_spec_claims_nothing_the_operator_cannot_render() {
+        // Operator 3.0.x has no probe or strategy field under
+        // spec.dashboards; an unknown field would be pruned by the API server
+        // and read as a fix that is not there.
+        let spec = dashboards_spec("3.3.0", 0);
+        let keys: Vec<&str> = spec
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for k in &keys {
+            assert!(
+                ["enable", "version", "replicas", "resources"].contains(k),
+                "unexpected spec.dashboards field {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn hold_and_release_move_replicas_and_annotation_together() {
+        let hold = dashboards_hold_patch(Some(DASHBOARDS_HOLD_REMEDIATION));
+        assert_eq!(hold["spec"]["dashboards"]["replicas"], 0);
+        assert_eq!(
+            hold["metadata"]["annotations"][LABEL_DASHBOARDS_HOLD],
+            DASHBOARDS_HOLD_REMEDIATION
+        );
+        let release = dashboards_hold_patch(None);
+        assert_eq!(release["spec"]["dashboards"]["replicas"], 1);
+        // present-and-null is the merge-patch delete of the annotation
+        let ann = release["metadata"]["annotations"].as_object().unwrap();
+        assert!(ann.contains_key(LABEL_DASHBOARDS_HOLD));
+        assert!(ann[LABEL_DASHBOARDS_HOLD].is_null());
+        // a merge patch that touched anything else could clobber the spec
+        assert_eq!(release["spec"].as_object().unwrap().len(), 1);
+        assert_eq!(release["spec"]["dashboards"].as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_hold_is_read_back_off_the_cr() {
+        let mut a = std::collections::BTreeMap::new();
+        assert_eq!(dashboards_hold_of(None), None);
+        assert_eq!(dashboards_hold_of(Some(&a)), None);
+        a.insert(LABEL_DASHBOARDS_HOLD.to_string(), String::new());
+        assert_eq!(dashboards_hold_of(Some(&a)), None, "empty is no hold");
+        a.insert(
+            LABEL_DASHBOARDS_HOLD.to_string(),
+            DASHBOARDS_HOLD_FIRST_BOOT.to_string(),
+        );
+        assert_eq!(
+            dashboards_hold_of(Some(&a)).as_deref(),
+            Some(DASHBOARDS_HOLD_FIRST_BOOT)
+        );
+    }
+
+    #[test]
+    fn the_hold_releases_on_velox_settled_and_quiet_or_after_its_ceiling() {
+        let q = DASHBOARDS_RELEASE_QUIET_SECS;
+        let max = DASHBOARDS_HOLD_MAX_SECS;
+        // velox's own verdict, and the node pool has been still long enough
+        assert!(should_release_dashboards(true, true, q, true, 300));
+        // settled per the evaluation, but a node pod was just re-created —
+        // the live 2026-09-27 case: the operator's post-bootstrap restart,
+        // CR still saying green (18s after nodes-0 came back)
+        assert!(!should_release_dashboards(true, true, 18, true, 300));
+        assert!(!should_release_dashboards(true, true, q - 1, true, 300));
+        // unmeasured stillness is never trusted
+        assert!(!should_release_dashboards(true, true, 0, true, 300));
+        // not settled (yellow, a node not ready, rolling…), however quiet
+        assert!(!should_release_dashboards(false, false, 10 * q, true, 300));
+        // the ceiling: an initialized cluster that stays yellow with its
+        // nodes steady and still gets its Dashboards; an uninitialized one
+        // could not authenticate anyway
+        assert!(should_release_dashboards(false, true, q, true, max));
+        assert!(!should_release_dashboards(false, true, q, true, max - 1));
+        assert!(!should_release_dashboards(false, true, q, false, max));
+    }
+
+    #[test]
+    fn the_ceiling_never_fires_while_nodes_are_rolling() {
+        let q = DASHBOARDS_RELEASE_QUIET_SECS;
+        // The exact c1 shape (kind, 2026-09-27): +1229s, initialized, the
+        // post-bootstrap roll still going — 2/3 nodes ready, a node pod
+        // created 19s earlier, health red. The age-only ceiling released here.
+        let steady = nodes_steady(2, 2, 3);
+        assert!(!steady);
+        assert!(!should_release_dashboards(false, steady, 19, true, 1229));
+        // any one of the three rolling signals holds it on its own:
+        // a node pod not ready…
+        assert!(!should_release_dashboards(
+            false,
+            nodes_steady(2, 3, 3),
+            10 * q,
+            true,
+            1229
+        ));
+        // …a node not yet on the current revision…
+        assert!(!should_release_dashboards(
+            false,
+            nodes_steady(3, 2, 3),
+            10 * q,
+            true,
+            1229
+        ));
+        // …or a node pod created inside the quiet period
+        assert!(!should_release_dashboards(
+            false,
+            nodes_steady(3, 3, 3),
+            q - 1,
+            true,
+            1229
+        ));
+        // and the roll's end is when the ceiling may act
+        assert!(should_release_dashboards(
+            false,
+            nodes_steady(3, 3, 3),
+            q,
+            true,
+            1229
+        ));
+    }
+
+    #[test]
+    fn the_yellow_forever_escape_still_works() {
+        // Single-copy storage: every node ready on its revision, nothing
+        // moving for an hour, replicas that can never be assigned — yellow
+        // forever, never settled. The ceiling must still hand it Dashboards.
+        assert!(should_release_dashboards(
+            false,
+            nodes_steady(1, 1, 1),
+            3600,
+            true,
+            DASHBOARDS_HOLD_MAX_SECS + 1
+        ));
+        assert!(should_release_dashboards(
+            false,
+            nodes_steady(3, 3, 3),
+            600,
+            true,
+            3 * DASHBOARDS_HOLD_MAX_SECS
+        ));
+    }
+
+    #[test]
+    fn nodes_are_steady_only_all_ready_on_the_current_revision() {
+        assert!(nodes_steady(3, 3, 3));
+        assert!(!nodes_steady(2, 3, 3));
+        assert!(!nodes_steady(3, 2, 3));
+        // nothing asked for, or nothing read, is not a steady pool
+        assert!(!nodes_steady(0, 0, 0));
+    }
+
+    #[test]
+    fn runtime_cluster_role_never_writes_deployments() {
+        // ADR-063 withdraws the ADR-055 exception: the operator reverts any
+        // Deployment edit, so the grant bought nothing but blast radius.
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let cluster = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .find(|v| {
+                v["kind"].as_str() == Some("ClusterRole")
+                    && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+            })
+            .expect("runtime ClusterRole");
+        let writes = cluster["rules"]
+            .as_sequence()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                let has = |k: &str, x: &str| {
+                    r[k].as_sequence()
+                        .into_iter()
+                        .flatten()
+                        .any(|e| e.as_str() == Some(x))
+                };
+                has("apiGroups", "apps")
+                    && has("resources", "deployments")
+                    && ["patch", "update", "create", "delete"]
+                        .iter()
+                        .any(|v| has("verbs", v))
+            });
+        assert!(
+            !writes,
+            "the runtime ClusterRole must not write Deployments"
         );
     }
 
@@ -6336,6 +7702,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_role_can_delete_jobs_in_the_app_namespace_only() {
+        // #115 / ADR-064: the backstop's one restore retry deletes the
+        // operator's failed securityconfig Job. Namespaced, like the bounce.
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let docs: Vec<serde_yaml::Value> = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .filter(|v| !v.is_null())
+            .collect();
+        let grants_job_delete = |v: &serde_yaml::Value| {
+            v["rules"].as_sequence().into_iter().flatten().any(|r| {
+                let has = |k: &str, x: &str| {
+                    r[k].as_sequence()
+                        .into_iter()
+                        .flatten()
+                        .any(|e| e.as_str() == Some(x))
+                };
+                has("apiGroups", "batch") && has("resources", "jobs") && has("verbs", "delete")
+            })
+        };
+        let named = |kind: &str, ns: Option<&str>| {
+            docs.iter()
+                .find(|v| {
+                    v["kind"].as_str() == Some(kind)
+                        && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+                        && v["metadata"]["namespace"].as_str() == ns
+                })
+                .expect("runtime role")
+        };
+        assert!(grants_job_delete(named("Role", Some("veloxsearch-system"))));
+        assert!(
+            !grants_job_delete(named("ClusterRole", None)),
+            "job delete must never be cluster-wide"
+        );
+    }
+
+    // ── runtime RBAC covers tenant isolation (#122) ───────────────────
+
+    /// Every kind `provision_tenant` applies must be appliable by the runtime
+    /// ClusterRole as shipped in `deploy/install.yaml`. Server-side apply is a
+    /// PATCH that creates the object when absent, so `get`, `create` and
+    /// `patch` are the floor. Tenant namespaces are created at runtime, so the
+    /// grant has to be cluster-scoped: no Role can pre-exist inside them.
+    ///
+    /// A template kind added without its grant fails here, not at a
+    /// customer's signup (#122: every tenant ran without walls because this
+    /// grant was documented but never shipped).
+    #[test]
+    fn runtime_cluster_role_can_apply_every_tenant_template_kind() {
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let cluster = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .find(|v| {
+                v["kind"].as_str() == Some("ClusterRole")
+                    && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+            })
+            .expect("runtime ClusterRole");
+        let grants = |group: &str, resource: &str, verb: &str| {
+            cluster["rules"]
+                .as_sequence()
+                .into_iter()
+                .flatten()
+                .any(|r| {
+                    let has = |k: &str, x: &str| {
+                        r[k].as_sequence()
+                            .into_iter()
+                            .flatten()
+                            .any(|e| e.as_str() == Some(x))
+                    };
+                    has("apiGroups", group) && has("resources", resource) && has("verbs", verb)
+                })
+        };
+
+        let bundle = rendered();
+        assert!(!bundle.is_empty());
+        for doc in &bundle {
+            let kind = doc["kind"].as_str().expect("template has a kind");
+            let api_version = doc["apiVersion"]
+                .as_str()
+                .expect("template has an apiVersion");
+            let group = api_version.split_once('/').map_or("", |(g, _)| g);
+            // Kind → REST resource. Explicit on purpose: a naive plural gets
+            // NetworkPolicy wrong, and a new kind must be looked at, not guessed.
+            let resource = match kind {
+                "Namespace" => "namespaces",
+                "ResourceQuota" => "resourcequotas",
+                "LimitRange" => "limitranges",
+                "NetworkPolicy" => "networkpolicies",
+                other => panic!(
+                    "tenant template kind {other} is new: map it to its resource here and \
+                     grant it to the runtime ClusterRole in deploy/install.yaml"
+                ),
+            };
+            for verb in ["get", "create", "patch"] {
+                assert!(
+                    grants(group, resource, verb),
+                    "the runtime ClusterRole cannot `{verb}` {resource} (apiGroup \
+                     {group:?}) — provision_tenant would be forbidden on {kind}"
+                );
+            }
+        }
+    }
+
     // ── stall-remediation policy (#27) ─────────────────────────────────
     //
     // The ACTIONS (throttle raise, pod bounce) are fleet-validated, not
@@ -6371,39 +7842,115 @@ mod tests {
     #[test]
     fn dashboards_remediation_respects_budget_and_cooldown() {
         use std::time::Duration;
+        let recent = Some(Duration::from_secs(30));
         // Budget: one restart is a slow cluster; three full cycles is a
         // deterministically dying boot.
         assert!(!should_remediate_dashboards(
             DASHBOARDS_REMEDIATE_AFTER_RESTARTS - 1,
             "CrashLoopBackOff",
+            recent,
             None
         ));
         assert!(should_remediate_dashboards(
             DASHBOARDS_REMEDIATE_AFTER_RESTARTS,
             "CrashLoopBackOff",
+            recent,
             None
         ));
-        // Only a crash-loop arms it: a pod still in its first start (no
-        // waiting reason) or waiting for something else is left alone.
-        assert!(!should_remediate_dashboards(9_999, "Pending", None));
-        assert!(!should_remediate_dashboards(9_999, "", None));
         // Cooldown: identical contract to the #27 half.
         assert!(!should_remediate_dashboards(
             9_999,
             "CrashLoopBackOff",
+            recent,
             Some(Duration::from_secs(60))
         ));
         let just_under = DASHBOARDS_REMEDIATE_COOLDOWN - Duration::from_secs(1);
         assert!(!should_remediate_dashboards(
             9_999,
-            "CrashLoopBackOff",
+            "",
+            recent,
             Some(just_under)
         ));
         assert!(should_remediate_dashboards(
             9_999,
-            "CrashLoopBackOff",
+            "",
+            recent,
             Some(DASHBOARDS_REMEDIATE_COOLDOWN)
         ));
+    }
+
+    #[test]
+    fn a_probe_kill_loop_that_exits_zero_arms_the_remediation() {
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateRunning, ContainerStateTerminated, ContainerStatus,
+        };
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        use std::time::Duration;
+        // The container status of the live 2026-09-27 deadlock at restart
+        // 3: running again at once, last death an exit 0 `Completed` from
+        // the startup probe's SIGTERM — no waiting state at all, so never
+        // `CrashLoopBackOff`.
+        let now = k8s_openapi::chrono::Utc::now();
+        let cs = ContainerStatus {
+            name: "dashboards".into(),
+            restart_count: 3,
+            ready: false,
+            state: Some(ContainerState {
+                running: Some(ContainerStateRunning {
+                    started_at: Some(Time(now - k8s_openapi::chrono::Duration::seconds(3))),
+                }),
+                ..Default::default()
+            }),
+            last_state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code: 0,
+                    reason: Some("Completed".into()),
+                    finished_at: Some(Time(now - k8s_openapi::chrono::Duration::seconds(4))),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Read the way `dashboards_block_in` reads it.
+        let waiting = cs
+            .state
+            .as_ref()
+            .and_then(|s| s.waiting.as_ref())
+            .and_then(|w| w.reason.clone())
+            .unwrap_or_default();
+        let last_terminated_ago = last_terminated_ago_of(&cs, now);
+        assert_eq!(last_terminated_ago, Some(Duration::from_secs(4)));
+        assert_eq!(waiting, "");
+        assert!(should_remediate_dashboards(
+            cs.restart_count,
+            &waiting,
+            last_terminated_ago,
+            None
+        ));
+        // Window: the same three restarts, last one long ago, is a boot that
+        // stopped dying — not armed.
+        assert!(!should_remediate_dashboards(
+            3,
+            "",
+            Some(DASHBOARDS_RESTART_WINDOW + Duration::from_secs(1)),
+            None
+        ));
+        assert!(should_remediate_dashboards(
+            3,
+            "",
+            Some(DASHBOARDS_RESTART_WINDOW),
+            None
+        ));
+        // No readable termination time: only a crash-loop counts as dying now.
+        assert!(should_remediate_dashboards(
+            3,
+            "CrashLoopBackOff",
+            None,
+            None
+        ));
+        assert!(!should_remediate_dashboards(9_999, "", None, None));
+        assert!(!should_remediate_dashboards(9_999, "Pending", None, None));
     }
 
     // ── restart-wave wedge watch (#96) ─────────────────────────────────
@@ -6466,7 +8013,8 @@ mod tests {
             ]
         );
 
-        // A row without a readable stage or duration is skipped, not guessed.
+        // A row without a readable stage, duration or byte count is skipped,
+        // not guessed.
         let junk = serde_json::json!([{"index": "x", "bytes_recovered": 1}, {"nope": true}]);
         assert!(parse_recovery_rows(&junk).is_empty());
         assert!(parse_recovery_rows(&serde_json::json!({})).is_empty());
@@ -6563,6 +8111,68 @@ mod tests {
             3,
             &[("RollingRestart".into(), "Running".into())]
         ));
+    }
+
+    /// A moving recovery must never read as wedged. Without `bytes=b` the
+    /// cluster renders `208b`, which the old parse read as 0 (and so as the
+    /// wedge); the query now asks for raw bytes, and both spellings read 208.
+    #[test]
+    fn a_moving_recovery_in_init_is_never_read_as_wedged() {
+        let rendered = |bytes: serde_json::Value| {
+            serde_json::json!([{"index": "logs-2026.09", "stage": "init",
+                                "time": "900s", "bytes_recovered": bytes}])
+        };
+        // The old parse, as it was: a failed number read as zero.
+        let old = |x: &serde_json::Value| -> i64 {
+            x.as_i64()
+                .or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))
+                .unwrap_or(0)
+        };
+        assert_eq!(old(&serde_json::json!("208b")), 0, "the bug being fixed");
+
+        for cell in [
+            serde_json::json!("208b"),
+            serde_json::json!("208"),
+            serde_json::json!(208),
+        ] {
+            let rows = parse_recovery_rows(&rendered(cell.clone()));
+            assert_eq!(rows.len(), 1, "{cell}");
+            assert_eq!(rows[0].bytes_recovered, 208, "{cell}");
+            assert_eq!(worst_wedged_init(&rows), None, "{cell}");
+            assert!(wave_settled(&rows), "{cell}");
+        }
+        // Zero in either spelling is still the wedge.
+        for cell in [serde_json::json!("0b"), serde_json::json!("0")] {
+            let rows = parse_recovery_rows(&rendered(cell.clone()));
+            assert_eq!(
+                worst_wedged_init(&rows).map(|r| r.secs),
+                Some(900),
+                "{cell}"
+            );
+        }
+        // A size the parser cannot read exactly is not evidence at all.
+        assert!(parse_recovery_rows(&rendered(serde_json::json!("12kb"))).is_empty());
+    }
+
+    /// The hand-back is bounded: settled recoveries return the throttle at
+    /// once, and a raise whose recoveries never settle is still returned
+    /// when its episode ends. Never in the pass that just armed a new fire.
+    #[test]
+    fn the_throttle_is_handed_back_when_settled_or_when_the_episode_ends() {
+        use std::time::Duration;
+        let early = Duration::from_secs(60);
+        let over = THROTTLE_HANDBACK_AFTER;
+        assert!(should_hand_back_throttle(early, true, false));
+        assert!(!should_hand_back_throttle(early, false, false));
+        assert!(!should_hand_back_throttle(
+            over - Duration::from_secs(1),
+            false,
+            false
+        ));
+        assert!(should_hand_back_throttle(over, false, false));
+        // a fire armed this pass keeps its fresh raise, settled or not
+        assert!(!should_hand_back_throttle(over, false, true));
+        assert!(!should_hand_back_throttle(over, true, true));
     }
 
     /// The restore half: the throttle comes back only once nothing sits in
@@ -7903,5 +9513,99 @@ mod tests {
 
         // Unconfigured deployments report nothing at all.
         assert!(!snapshot_state_from(&SnapshotConfig::default(), None, true).configured);
+    }
+
+    // ── #126: reverting the Dashboards config keys ──────────────────────
+
+    /// RFC 7386 JSON merge patch, as the API server applies `Patch::Merge`.
+    fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+        let Some(p) = patch.as_object() else {
+            *target = patch.clone();
+            return;
+        };
+        if !target.is_object() {
+            *target = serde_json::json!({});
+        }
+        let t = target.as_object_mut().unwrap();
+        for (k, v) in p {
+            if v.is_null() {
+                t.remove(k);
+            } else {
+                merge_patch(t.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+            }
+        }
+    }
+
+    fn cr_with(keys: &[(&str, &str)]) -> serde_json::Value {
+        let cfg: serde_json::Map<String, serde_json::Value> = keys
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+            .collect();
+        serde_json::json!({ "spec": { "dashboards": { "enable": true, "additionalConfig": cfg } } })
+    }
+
+    #[test]
+    fn removing_the_last_stack_keys_leaves_an_object_never_null() {
+        // The live 422: the stack's keys were the only ones left, and the old
+        // empty-map apply turned the map itself into null. The CRD types it
+        // `object` without `nullable`, so the result must still be one.
+        let mut cr = cr_with(&otel_dashboards_config());
+        let patch = dashboards_config_removal(otel_dashboards_config().iter().map(|(k, _)| *k));
+        assert!(
+            patch["spec"]["dashboards"]["additionalConfig"].is_object(),
+            "the map itself must never be sent as null"
+        );
+        merge_patch(&mut cr, &patch);
+        assert_eq!(
+            cr["spec"]["dashboards"]["additionalConfig"],
+            serde_json::json!({})
+        );
+        assert_eq!(cr["spec"]["dashboards"]["enable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn removal_deletes_only_the_stack_keys() {
+        let theirs = [
+            ("opensearch_security.auth.type", "openid"),
+            ("workspace.enabled", "true"),
+        ];
+        let mut all: Vec<(&str, &str)> = otel_dashboards_config().to_vec();
+        all.extend(theirs);
+        let mut cr = cr_with(&all);
+        let patch = dashboards_config_removal(otel_dashboards_config().iter().map(|(k, _)| *k));
+        // Every member is a key deletion and nothing else rides along.
+        let members = patch["spec"]["dashboards"]["additionalConfig"]
+            .as_object()
+            .unwrap();
+        assert_eq!(members.len(), otel_dashboards_config().len());
+        assert!(members.values().all(serde_json::Value::is_null));
+        assert_eq!(patch["spec"]["dashboards"].as_object().unwrap().len(), 1);
+        merge_patch(&mut cr, &patch);
+        assert_eq!(
+            cr["spec"]["dashboards"]["additionalConfig"],
+            cr_with(&theirs)["spec"]["dashboards"]["additionalConfig"]
+        );
+    }
+
+    #[test]
+    fn install_and_revert_address_the_same_keys() {
+        // Revert matches install: whatever the apply sets, the removal deletes.
+        for keys in [otel_dashboards_config().to_vec(), next_ui_config().to_vec()] {
+            let applied = dashboards_config_apply("d", &keys);
+            let removed = dashboards_config_removal(keys.iter().map(|(k, _)| *k));
+            let a: std::collections::BTreeSet<&String> = applied["spec"]["dashboards"]
+                ["additionalConfig"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect();
+            let r: std::collections::BTreeSet<&String> = removed["spec"]["dashboards"]
+                ["additionalConfig"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect();
+            assert_eq!(a, r);
+        }
     }
 }

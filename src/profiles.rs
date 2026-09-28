@@ -6,10 +6,16 @@
 //! Profiles are applied AFTER a deployment reports green (the deferred task in
 //! `app.rs`) and re-applied on every save — everything here must be an
 //! idempotent upsert. Per-profile effects:
-//!   - `observability` → ISM retention: rotate → snapshot → delete at 30 days
-//!   - `security`      → ISM retention (rotate → snapshot → delete, 90d) + detectors
+//!   - `observability` → ISM retention: rotate → snapshot → delete (30 days
+//!                       unless the deployment says otherwise, ADR-062)
+//!   - `security`      → ISM retention (rotate → snapshot → delete, 90d by
+//!                       default) + detectors
 //!   - `search`        → NO agents (enforced at create/save), search-tuned
 //!                       index template, no retention — data kept forever
+//!
+//! The retention policy is a starting point, not a policy velox enforces
+//! (ADR-062): once a user edits `velox-retention` inside OpenSearch, velox
+//! stops writing it. See [`crate::retention::is_customized`].
 //!
 //! Ordering matters: the profile runs BEFORE the monitoring recipes in the
 //! deferred task, so the ISM `ism_template` exists before the log indices are
@@ -49,19 +55,60 @@ pub(crate) fn log_patterns() -> Vec<String> {
 }
 
 /// Apply the purpose profile to a green deployment. Idempotent.
-pub async fn apply(deployment: &Deployment, purpose: &str) -> Result<()> {
+///
+/// `retention` is the deployment's own value, read off its CR by the caller
+/// (`retention::ANNOTATION`); `stamp` is what velox last wrote
+/// (`retention::STAMP_ANNOTATION`). A policy the user customized is left alone.
+pub async fn apply(
+    deployment: &Deployment,
+    purpose: &str,
+    retention: Option<&str>,
+    stamp: Option<&str>,
+) -> Result<()> {
     match purpose {
-        "security" => {
-            ensure_retention(deployment, "90d").await?;
-            ensure_detectors(deployment).await
-        }
         "search" => {
             remove_retention(deployment).await;
             ensure_search_template(deployment).await
         }
-        // observability is also the fallback for legacy/unlabeled deployments
-        _ => ensure_retention(deployment, "30d").await,
+        _ => {
+            // Every non-search purpose has a value; observability's is also
+            // the fallback for legacy/unlabeled deployments.
+            let days = crate::retention::effective_days(purpose, retention)
+                .unwrap_or(crate::retention::BUILTIN_OBSERVABILITY_DAYS);
+            ensure_retention(deployment, days, stamp, false).await?;
+            if purpose == "security" {
+                ensure_detectors(deployment).await?;
+            }
+            Ok(())
+        }
     }
+}
+
+/// Start of the description velox writes. Recognizing it is how a policy
+/// written before the stamp existed is still told apart from a user's.
+const DESCRIPTION_PREFIX: &str = "VeloxSearch purpose-profile retention";
+
+fn retention_description(age: &str) -> String {
+    format!("{DESCRIPTION_PREFIX} ({age}): rotate → snapshot → delete")
+}
+
+use crate::retention::delete_age;
+pub use crate::retention::RetentionOutcome;
+
+/// Does velox's own live policy already say what it should? Age and the index
+/// patterns — the patterns are derived from the recipe catalog, so a build that
+/// adds a recipe must still reach an unchanged-age policy.
+fn policy_is_current(live: &serde_json::Value, age: &str) -> bool {
+    let patterns: Option<Vec<&str>> = live["policy"]["ism_template"][0]["index_patterns"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|p| p.as_str()).collect());
+    delete_age(live) == Some(age)
+        && patterns.is_some_and(|p| {
+            p == log_patterns()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        })
 }
 
 /// The retention ISM policy document (`hot → snapshot → delete`). Pure so the
@@ -69,7 +116,7 @@ pub async fn apply(deployment: &Deployment, purpose: &str) -> Result<()> {
 fn retention_policy(age: &str) -> serde_json::Value {
     serde_json::json!({
         "policy": {
-            "description": format!("VeloxSearch purpose-profile retention ({age}): rotate → snapshot → delete"),
+            "description": retention_description(age),
             "default_state": "hot",
             "states": [
                 { "name": "hot", "actions": [
@@ -106,10 +153,23 @@ fn retention_policy(age: &str) -> serde_json::Value {
 /// needs managed indices to carry a `rollover_alias` write alias. Where those
 /// are absent the policy is still accepted and valid; only the snapshot/rollover
 /// steps no-op until the prerequisites exist.
-async fn ensure_retention(deployment: &Deployment, age: &str) -> Result<()> {
+///
+/// Apply-once (ADR-062): a policy someone edited inside OpenSearch is left
+/// alone and reported as [`RetentionOutcome::Customized`] — the same rule
+/// `Item::DashboardsDefault` follows, for the same reason: velox provides the
+/// starting point, the user owns it afterwards. `force` is the explicit
+/// "reset to default" and overwrites it anyway. After every write the new
+/// `_seq_no:_primary_term` is stamped on the CR so the next pass can tell.
+pub async fn ensure_retention(
+    deployment: &Deployment,
+    days: u32,
+    stamp: Option<&str>,
+    force: bool,
+) -> Result<RetentionOutcome> {
     let base = os_base(deployment);
     let c = http()?;
     let (u, p) = crate::k8s::admin_creds(deployment).await;
+    let age = crate::retention::render_age(days);
 
     // ADR-049: registration moved OUT of here. This function used to
     // best-effort register `SNAPSHOT_REPO` as an `fs` repo, which needed a
@@ -119,41 +179,34 @@ async fn ensure_retention(deployment: &Deployment, age: &str) -> Result<()> {
     // written onto the CR and reconciled by the operator. This policy simply
     // references it: where the user configured one, the snapshot state works;
     // where they did not, the state no-ops exactly as it did before.
-    let policy = retention_policy(age);
+    let policy = retention_policy(&age);
 
     let url = format!("{base}/_plugins/_ism/policies/{POLICY_ID}");
-    let resp = c
-        .put(&url)
-        .basic_auth(&u, Some(&p))
-        .json(&policy)
-        .send()
-        .await
-        .context("creating ISM retention policy")?;
-    if resp.status() == reqwest::StatusCode::CONFLICT {
-        // Policy exists: OpenSearch demands optimistic-concurrency params.
-        let cur: serde_json::Value = c
-            .get(&url)
-            .basic_auth(&u, Some(&p))
-            .send()
-            .await
-            .context("fetching existing ISM policy")?
-            .json()
-            .await
-            .context("parsing existing ISM policy")?;
-        let (seq, term) = (
-            cur["_seq_no"].as_i64().unwrap_or_default(),
-            cur["_primary_term"].as_i64().unwrap_or_default(),
-        );
-        c.put(format!("{url}?if_seq_no={seq}&if_primary_term={term}"))
-            .basic_auth(&u, Some(&p))
-            .json(&policy)
-            .send()
-            .await
-            .context("updating ISM retention policy")?
-            .error_for_status()
-            .context("ISM policy update rejected")?;
-    } else {
-        resp.error_for_status().context("ISM policy rejected")?;
+    let (outcome, written) = crate::retention::apply_once(
+        &c,
+        (&u, &p),
+        &crate::retention::IsmPolicy {
+            url: &url,
+            id: POLICY_ID,
+            body: &policy,
+            describe: retention_description,
+        },
+        stamp,
+        force,
+        |live| policy_is_current(live, &age),
+    )
+    .await?;
+    if outcome == RetentionOutcome::Customized {
+        return Ok(outcome);
+    }
+
+    // Stamp what velox wrote. Best-effort: without a stamp the next pass falls
+    // back to recognizing velox's description, which still holds for a policy
+    // velox just wrote.
+    if let Some(new) = written.filter(|s| Some(s.as_str()) != stamp) {
+        if let Err(e) = crate::k8s::set_retention(deployment, None, Some(&new)).await {
+            tracing::warn!("recording the retention policy stamp on {deployment}: {e:#}");
+        }
     }
 
     // Pre-existing indices: ism_template only covers indices created after the
@@ -173,7 +226,19 @@ async fn ensure_retention(deployment: &Deployment, age: &str) -> Result<()> {
             .send()
             .await;
     }
-    Ok(())
+    Ok(outcome)
+}
+
+/// Where the live retention policy stands, for the edit tab: `absent`,
+/// `managed` (velox's own, still as velox wrote it) or `customized`. Read-only.
+pub async fn retention_state(deployment: &Deployment, stamp: Option<&str>) -> Result<&'static str> {
+    let base = os_base(deployment);
+    let c = http()?;
+    let (u, p) = crate::k8s::admin_creds(deployment).await;
+    let url = format!("{base}/_plugins/_ism/policies/{POLICY_ID}");
+    let (state, _) =
+        crate::retention::live_state(&c, (&u, &p), &url, stamp, retention_description).await?;
+    Ok(state)
 }
 
 /// `search` keeps data forever: detach the retention policy from any managed
@@ -453,6 +518,13 @@ async fn ensure_search_template(deployment: &Deployment) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retention::policy_stamp;
+
+    /// `velox-retention`'s customized check: the shared rule with this
+    /// policy's description.
+    fn policy_is_customized(live: &serde_json::Value, stamp: Option<&str>) -> bool {
+        crate::retention::is_customized(live, stamp, retention_description)
+    }
 
     /// The retention policy is a `hot → snapshot → delete` lifecycle: rotation
     /// (rollover) in hot, backup (snapshot) in the middle, delete at `age`.
@@ -496,6 +568,88 @@ mod tests {
         assert_eq!(
             states[1]["transitions"][0]["conditions"]["min_index_age"],
             "90d"
+        );
+    }
+
+    /// The installation's knob reaches the policy: any number of days becomes
+    /// the delete trigger and is named in the description velox recognizes.
+    #[test]
+    fn the_policy_builder_takes_the_configured_days() {
+        for days in [1, 14, 45, 365] {
+            let age = crate::retention::render_age(days);
+            let p = retention_policy(&age);
+            assert_eq!(delete_age(&p), Some(age.as_str()));
+            assert_eq!(p["policy"]["description"], retention_description(&age));
+            assert!(p["policy"]["description"]
+                .as_str()
+                .unwrap()
+                .starts_with(DESCRIPTION_PREFIX));
+        }
+    }
+
+    /// A policy as the GET API returns it: velox's body plus the document
+    /// metadata, and fields OpenSearch adds on its own (which must not read as
+    /// a user edit).
+    fn live(age: &str, seq: i64, term: i64) -> serde_json::Value {
+        let mut doc = retention_policy(age);
+        doc["_id"] = POLICY_ID.into();
+        doc["_seq_no"] = seq.into();
+        doc["_primary_term"] = term.into();
+        doc["policy"]["policy_id"] = POLICY_ID.into();
+        doc["policy"]["schema_version"] = 21.into();
+        doc["policy"]["states"][2]["actions"][0]["retry"] =
+            serde_json::json!({ "count": 3, "backoff": "exponential", "delay": "1m" });
+        doc
+    }
+
+    /// With a stamp the check is exact: velox's own write, or anyone else's.
+    #[test]
+    fn a_stamped_policy_is_customized_exactly_when_someone_else_wrote_it() {
+        let doc = live("30d", 7, 1);
+        assert_eq!(policy_stamp(&doc).as_deref(), Some("7:1"));
+        assert!(
+            !policy_is_customized(&doc, Some("7:1")),
+            "velox's own write"
+        );
+        // A user saving it in Dashboards moves `_seq_no` — even with the very
+        // same content, it is theirs now.
+        assert!(policy_is_customized(&live("30d", 8, 1), Some("7:1")));
+        assert!(policy_is_customized(&live("30d", 7, 2), Some("7:1")));
+    }
+
+    /// Without a stamp (written before ADR-062) velox recognizes its own
+    /// description and the age it names; an edited age or description is the
+    /// user's.
+    #[test]
+    fn an_unstamped_policy_is_recognized_by_its_description() {
+        assert!(!policy_is_customized(&live("30d", 3, 1), None));
+        assert!(!policy_is_customized(&live("90d", 3, 1), Some("")));
+
+        let mut age_edited = live("30d", 3, 1);
+        age_edited["policy"]["states"][1]["transitions"][0]["conditions"]["min_index_age"] =
+            "60d".into();
+        assert!(policy_is_customized(&age_edited, None), "age edited");
+
+        let mut described = live("30d", 3, 1);
+        described["policy"]["description"] = "our compliance policy".into();
+        assert!(policy_is_customized(&described, None), "description edited");
+
+        let mut no_delete = live("30d", 3, 1);
+        no_delete["policy"]["states"][1]["transitions"] = serde_json::json!([]);
+        assert!(policy_is_customized(&no_delete, None), "delete removed");
+    }
+
+    /// velox's own policy is rewritten only when the age or the covered
+    /// patterns differ — not on every save.
+    #[test]
+    fn a_current_policy_is_not_rewritten() {
+        assert!(policy_is_current(&live("30d", 1, 1), "30d"));
+        assert!(!policy_is_current(&live("30d", 1, 1), "45d"));
+        let mut narrower = live("30d", 1, 1);
+        narrower["policy"]["ism_template"][0]["index_patterns"] = serde_json::json!(["x-*"]);
+        assert!(
+            !policy_is_current(&narrower, "30d"),
+            "a new recipe's pattern"
         );
     }
 

@@ -14,7 +14,8 @@ async fn main() {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| veloxsearch::DEFAULT_LOG_FILTER.into()),
         )
         .init();
 
@@ -68,6 +69,10 @@ async fn main() {
     // without a manual Save. Best-effort; never blocks serving.
     tokio::spawn(veloxsearch::access::backfill_on_startup());
 
+    // Re-provision tenants whose isolation is missing (#122): at startup, then
+    // on a slowing schedule. Inert unless multi-tenancy is on; never blocks.
+    tokio::spawn(veloxsearch::tenants::run_isolation_reconcile());
+
     // #104: repair k8s-events collectors shipped before the prune filter (they
     // index nothing — every event 400s). Idempotent; best-effort.
     tokio::spawn(veloxsearch::agents::repair_events_collectors_on_startup());
@@ -77,6 +82,12 @@ async fn main() {
     // Suggestion only — it writes nothing and every upgrade still goes through
     // the same pre-flight. VELOX_VERSION_CHECK_SECS=0 turns it off.
     tokio::spawn(veloxsearch::version_feed::run_poller());
+
+    // Re-revoke the bootstrap cluster-admin binding when an `install.yaml`
+    // re-apply (the upgrade path) re-creates it on an already-bootstrapped
+    // cluster (ADR-027, ADR-057). Deletes only the binding naming this app's
+    // own ServiceAccount, and only once bootstrap and storage are complete.
+    tokio::spawn(veloxsearch::bootstrap::run_revoke_watch());
 
     let addr = std::env::var("VELOX_SITE_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     tracing::info!("listening on http://{addr}");

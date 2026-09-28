@@ -45,8 +45,11 @@ metadata:
 #  - veloxsearch-runtime: day-to-day permissions, enumerated below.
 #  - veloxsearch-bootstrap: cluster-admin ONLY for the one-time self-bootstrap
 #    (cert-manager + operator: CRDs, webhooks, broad ClusterRoles). The app
-#    DELETES THIS BINDING ITSELF once bootstrap completes (ADR-027); re-apply
-#    this file if you ever need to re-bootstrap (e.g. component upgrade).
+#    DELETES THIS BINDING ITSELF once bootstrap completes (ADR-027). Upgrades
+#    apply the release's upgrade.yaml, which is this file without that binding
+#    (deploy/upgrade-manifest.sh, ADR-057). Re-applying THIS file re-creates
+#    it; the running app deletes it again within a minute once bootstrap is
+#    complete.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -62,13 +65,11 @@ rules:
     resources: ["opensearchsnapshotpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Workload discovery + operator/StatefulSet readiness (read-only, all ns).
-  # `patch` on deployments is the #46 exception, nothing wider: the Dashboards
-  # survivability fields (probe budget, Recreate) and the one-shot .kibana_1
-  # remediation's 0/1 scale — both claimed under our own field manager or a
-  # scalar merge, never a write to anything the operator owns wholesale.
+  # No write: the #46 Dashboards hold goes through the OpenSearchCluster CR
+  # (ADR-063); the operator reverts any direct edit of its Deployments.
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "daemonsets"]
-    verbs: ["get", "list", "watch", "patch"]
+    verbs: ["get", "list", "watch"]
   # Pod/namespace reads: discovery + parity with the velox-agent ClusterRole
   # we grant Fluent Bit (RBAC forbids granting perms we don't hold).
   - apiGroups: [""]
@@ -93,6 +94,19 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["create", "patch"]
+  # Tenant isolation (#81, #122, ADR-044): signup server-side-applies the
+  # deploy/tenant-templates/ ResourceQuota, LimitRange and NetworkPolicy set
+  # into each `velox-t-<slug>` namespace. A server-side apply is a PATCH, and
+  # one that creates the object also needs `create`. No `update` (nothing
+  # replaces these) and no `delete` (there is no tenant teardown; deleting the
+  # namespace would take them with it). Cluster-scoped because tenant
+  # namespaces are created at runtime and no Role can pre-exist in them.
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "patch"]
   # Conformity probe (REQUIREMENTS.md): CRDs present? version? storage? nodes?
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
@@ -162,6 +176,14 @@ rules:
   # rolling restart stays yellow forever.
   - apiGroups: [""]
     resources: ["pods"]
+    verbs: ["delete"]
+  # Admin-reset backstop (#115, ADR-064): the one retry of a failed restore
+  # deletes the operator's failed `<name>-securityconfig-update` Job so the
+  # operator runs it again (it never re-runs a Job whose checksum it has
+  # seen). Delete only, namespaced; without it the retry marks the reset
+  # stalled instead.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
     verbs: ["delete"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
@@ -265,9 +287,15 @@ subjects:
     name: veloxsearch
     namespace: veloxsearch-system
 ---
-# Pod environment (ADR-034): non-secret runtime knobs live here, owned by this
-# manifest. (The app's own runtime config — access mode, base domain — lives in
-# the app-managed `veloxsearch-config` ConfigMap, created in-app; ADR-027.)
+# Pod environment (ADR-034): non-secret runtime knobs live here. This manifest
+# creates the ConfigMap with the defaults below; after that it is YOURS. The
+# release's upgrade.yaml does not carry it, so upgrades keep what you set (#128,
+# ADR-057). Change a value with `kubectl -n veloxsearch-system edit configmap
+# veloxsearch-env`, then `kubectl -n veloxsearch-system rollout restart
+# deploy/veloxsearch`. A key missing here runs with the same default the binary
+# ships, so a release that adds a key needs no change to this ConfigMap.
+# (The app's own runtime config — access mode, base domain — lives in the
+# app-managed `veloxsearch-config` ConfigMap, created in-app; ADR-027.)
 # Secrets never go here: credentials are app-managed K8s Secrets (ADR-023/030)
 # or, for operator-provisioned ones, sourced from a vault — see deploy/secrets/.
 apiVersion: v1
@@ -335,9 +363,11 @@ spec:
         - name: veloxsearch
           # Pinned to the release this manifest ships with, never `:latest`:
           # `kubectl apply` of a floating tag makes the running version a
-          # function of when the pod last restarted. The release job rewrites
-          # this line, so the manifest and the binary are always one artifact.
-          image: docker.io/tornistecnologia/veloxsearch-oss:0.10.5
+          # function of when the pod last restarted. CI fails when this tag is
+          # not Cargo.toml's `version` (ci.yml, `manifest-version`), so applying
+          # this file from `main` can never roll an install back (#54); the
+          # release job pins its published copy to the image digest.
+          image: docker.io/tornistecnologia/veloxsearch-oss:0.11.0
           imagePullPolicy: IfNotPresent
           # Container hardening (#118). The image already runs as uid 10001, but
           # an image USER is a default a cluster can override; this makes it a

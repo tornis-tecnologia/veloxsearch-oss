@@ -50,6 +50,13 @@ jobs:
             echo "::error::tag v$now already exists but Cargo.toml just changed to it"
             exit 1
           fi
+          # Versions only move forward. A lower version would publish a release
+          # whose install.yaml pins an OLDER image than the one already out,
+          # and applying it rolls installs back past forward-only migrations.
+          if [ -n "$before" ] && [ "$(printf '%s\n%s\n' "$before" "$now" | sort -V | tail -1)" != "$now" ]; then
+            echo "::error::Cargo.toml version went backwards ($before -> $now)"
+            exit 1
+          fi
           echo "version $before -> $now — releasing"
           echo "release=true" >> "$GITHUB_OUTPUT"
 
@@ -176,12 +183,18 @@ jobs:
           grep -q "@${{ needs.publish.outputs.digest }}" install.yaml \
             || { echo "::error::digest pin did not apply"; exit 1; }
 
+      # The artifact upgrades apply (ADR-057, #54): the same pinned manifest
+      # without the bootstrap cluster-admin binding, so rolling a release out
+      # over an existing install never re-grants cluster-admin.
+      - name: Derive the upgrade manifest
+        run: deploy/upgrade-manifest.sh install.yaml > upgrade.yaml
+
       - name: Build the velox CLI as a release asset
         run: |
           set -euo pipefail
           cargo build --release --bin velox
           cp target/release/velox velox-linux-amd64
-          sha256sum install.yaml velox-linux-amd64 > SHA256SUMS
+          sha256sum install.yaml upgrade.yaml velox-linux-amd64 > SHA256SUMS
 
       - name: Extract the changelog section
         id: notes
@@ -196,6 +209,50 @@ jobs:
           ' CHANGELOG.md > NOTES.md
           [ -s NOTES.md ] || echo "See CHANGELOG.md." > NOTES.md
 
+      # The first line of the notes answers "is `kubectl set image` enough?":
+      # deploy/manifest-changes.sh compares the previous release's install.yaml
+      # with this one, image reference ignored. It is a report, not a gate —
+      # anything that goes wrong here says "unavailable" and the release goes
+      # on; continue-on-error is the backstop for a failure it did not foresee.
+      - name: State the upgrade impact at the top of the notes
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          set -uo pipefail
+          # The newest published release below this version. This version's
+          # own release does not exist yet: the next step creates it.
+          tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                   --jq '.[] | select(.draft or .prerelease | not) | .tag_name')
+          listed=$?
+          prev=$(printf '%s\nv%s\n' "$tags" "$VERSION" | grep -E '^v[0-9]' | sort -uV \
+                 | awk -v cur="v$VERSION" '$0 == cur { print prev; exit } { prev = $0 }')
+          if [ "$listed" -ne 0 ]; then
+            printf '**Upgrade:** manifest diff unavailable (could not list releases) — apply `upgrade.yaml`.\n' > UPGRADE.md
+          elif [ -z "$prev" ]; then
+            printf '**Upgrade:** manifest diff unavailable (no earlier release) — apply `upgrade.yaml`.\n' > UPGRADE.md
+          elif ! gh release download "$prev" --repo "$GITHUB_REPOSITORY" \
+                 --pattern install.yaml --output prev-install.yaml \
+               || ! out=$(deploy/manifest-changes.sh prev-install.yaml install.yaml); then
+            printf '**Upgrade:** manifest diff unavailable (could not compare with %s) — apply `upgrade.yaml`.\n' "$prev" > UPGRADE.md
+          else
+            class=$(sed -n '1s/^classification: //p' <<<"$out")
+            if [ "$class" = none ]; then
+              printf '**Upgrade:** image-only ✓ — `kubectl -n veloxsearch-system set image deploy/veloxsearch veloxsearch=%s@%s` is enough (no manifest change since %s).\n' \
+                "$IMAGE" "$DIGEST" "$prev" > UPGRADE.md
+            else
+              {
+                printf '**Upgrade:** apply `upgrade.yaml` — manifest changes since %s: %s\n\n' "$prev" "$class"
+                printf '<details><summary>What changed</summary>\n\n```\n%s\n```\n\n</details>\n' "$out"
+              } > UPGRADE.md
+            fi
+          fi
+          printf '\n' >> UPGRADE.md
+          cat UPGRADE.md NOTES.md > NOTES.new && mv NOTES.new NOTES.md
+          cat NOTES.md
+
       # target_commitish is load-bearing: without it GitHub creates a new tag on
       # the DEFAULT branch, which is develop since the branch-model switch, so
       # v0.10.0 landed on develop's head instead of the released main commit.
@@ -209,5 +266,6 @@ jobs:
           body_path: NOTES.md
           files: |
             install.yaml
+            upgrade.yaml
             velox-linux-amd64
             SHA256SUMS

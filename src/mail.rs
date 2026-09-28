@@ -73,12 +73,7 @@ pub struct SmtpConfig {
 /// alongside it is unusable — that is an operator mistake and must not
 /// silently degrade into logging account links.
 pub fn smtp_config() -> Result<Option<SmtpConfig>> {
-    let var = |k: &str| {
-        std::env::var(k)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    };
+    let var = |k: &str| setting(std::env::var(k).ok());
     resolve_smtp(
         var("VELOX_SMTP_HOST"),
         var("VELOX_SMTP_PORT"),
@@ -88,9 +83,15 @@ pub fn smtp_config() -> Result<Option<SmtpConfig>> {
     )
 }
 
+/// A mail setting as read from the env: trimmed, and empty counts as unset —
+/// the shipped `veloxsearch-env` carries these keys as `""` (#128).
+pub(crate) fn setting(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Pure resolution, unit-testable without touching process env (the
 /// `db::resolve_config` idiom).
-fn resolve_smtp(
+pub(crate) fn resolve_smtp(
     host: Option<String>,
     port: Option<String>,
     tls: Option<String>,
@@ -127,19 +128,22 @@ fn resolve_smtp(
 
 /// Base URL the emailed links are built from, without a trailing slash.
 pub fn public_url() -> String {
-    std::env::var("VELOX_PUBLIC_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
+    public_url_from(std::env::var("VELOX_PUBLIC_URL").ok())
+}
+
+pub(crate) fn public_url_from(v: Option<String>) -> String {
+    setting(v)
+        .map(|s| s.trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_PUBLIC_URL.to_string())
 }
 
 fn from_address() -> String {
-    std::env::var("VELOX_MAIL_FROM")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_FROM.to_string())
+    from_address_from(std::env::var("VELOX_MAIL_FROM").ok())
+}
+
+pub(crate) fn from_address_from(v: Option<String>) -> String {
+    setting(v).unwrap_or_else(|| DEFAULT_FROM.to_string())
 }
 
 /// Send a plain-text message, or log it when no relay is configured.

@@ -22,6 +22,11 @@ use kube::Client;
 pub(crate) const AGENT_NS: &str = "velox-agents";
 const AGENT_IMAGE: &str = "fluent/fluent-bit:3.1.9";
 
+/// ServiceAccount every workload in `AGENT_NS` runs as: the Fluent Bit agents
+/// and the OTel stack's Deployments (ADR-053). One name, created only by
+/// [`ensure_rbac`], so a pod template can never name an account nothing makes.
+pub(crate) const AGENT_SA: &str = "velox-agent";
+
 /// The k8s-events record filter (#104): drops `metadata.managedFields` and
 /// prunes empty maps, which otherwise flatten to dot-only field names that
 /// OpenSearch rejects — every event 400s and nothing is indexed. Static engine
@@ -43,7 +48,11 @@ const EVENTS_PRUNE_FILTER: &str = "[FILTER]
 ";
 
 /// Namespace + ServiceAccount + RBAC the Fluent Bit kubernetes filter needs.
-async fn ensure_rbac(client: &Client) -> Result<()> {
+///
+/// Shared with the OTel stack install, whose pods run as the same account: a
+/// platform where no log recipe was ever enabled has none of this, and the
+/// stack's ReplicaSets then fail every pod create (#125). Idempotent.
+pub(crate) async fn ensure_rbac(client: &Client) -> Result<()> {
     apply(
         client,
         "",
@@ -54,8 +63,8 @@ async fn ensure_rbac(client: &Client) -> Result<()> {
         &serde_json::json!({ "apiVersion":"v1","kind":"Namespace","metadata":{"name":AGENT_NS} }),
     )
     .await?;
-    apply(client, "", "v1", "ServiceAccount", Some(AGENT_NS), "velox-agent",
-        &serde_json::json!({ "apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"velox-agent","namespace":AGENT_NS} })).await?;
+    apply(client, "", "v1", "ServiceAccount", Some(AGENT_NS), AGENT_SA,
+        &serde_json::json!({ "apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":AGENT_SA,"namespace":AGENT_NS} })).await?;
     apply(client, "rbac.authorization.k8s.io", "v1", "ClusterRole", None, "velox-agent",
         &serde_json::json!({
             "apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRole",
@@ -71,7 +80,7 @@ async fn ensure_rbac(client: &Client) -> Result<()> {
             "apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBinding",
             "metadata":{"name":"velox-agent"},
             "roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"velox-agent"},
-            "subjects":[{"kind":"ServiceAccount","name":"velox-agent","namespace":AGENT_NS}]
+            "subjects":[{"kind":"ServiceAccount","name":AGENT_SA,"namespace":AGENT_NS}]
         })).await?;
     Ok(())
 }
@@ -361,7 +370,7 @@ fn agent_manifests(
             "annotations":{"veloxsearch.ai/target": deployment.name(),
                            "veloxsearch.ai/config-hash": conf_hash}},
         "spec":{
-            "serviceAccountName":"velox-agent",
+            "serviceAccountName":AGENT_SA,
             "tolerations":[{"operator":"Exists"}],
             "containers":[{
                 "name":"fluent-bit","image":AGENT_IMAGE,
