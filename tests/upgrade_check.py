@@ -136,6 +136,34 @@ def kubectl_json(*args):
     return json.loads(out)
 
 
+HOLD_ANNOTATION = "veloxsearch.ai/dashboards-hold"
+# Fully qualified: the vendored operator also ships the legacy
+# opensearch.opster.io CRD with the same plural, and a bare
+# `opensearchclusters` resolves to that empty one.
+OSC_RESOURCE = "opensearchclusters.opensearch.org"
+
+
+def wait_hold_released(name, secs):
+    """Wait until the deployment's Dashboards first-boot hold (ADR-063) is gone.
+
+    From 0.11.0 on, velox releases the hold by patching spec.dashboards.replicas
+    0 -> 1 once the cluster has settled, which can land minutes after green. A
+    baseline taken before that sees a legitimate write as upgrade drift. An N-1
+    without the hold never carries the annotation, so this returns at once.
+    """
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        items = kubectl_json("get", OSC_RESOURCE, "-A")["items"]
+        cr = next((i for i in items if i["metadata"]["name"] == name), None)
+        if cr is None:
+            fail(f"no OpenSearchCluster named {name}")
+        if HOLD_ANNOTATION not in (cr["metadata"].get("annotations") or {}):
+            ok(f"{name} carries no Dashboards hold")
+            return
+        time.sleep(15)
+    fail(f"{name} still holds Dashboards after {secs}s")
+
+
 def bootstrap_entries(obj):
     """The veloxsearch-bootstrap field manager's managedFields entries.
 
@@ -165,7 +193,7 @@ def snapshot():
     for crd in kubectl_json("get", "customresourcedefinitions")["items"]:
         if crd["spec"]["group"] in CRD_GROUPS:
             snap[f"crd/{crd['metadata']['name']}"] = record(crd)
-    for cr in kubectl_json("get", "opensearchclusters.opensearch.org", "-A")["items"]:
+    for cr in kubectl_json("get", OSC_RESOURCE, "-A")["items"]:
         m = cr["metadata"]
         snap[f"opensearchcluster/{m['namespace']}/{m['name']}"] = record(cr)
     if not any(k.startswith("opensearchcluster/") for k in snap):
@@ -274,6 +302,8 @@ def cmd_prepare(args):
     with open(state_file, "w") as f:
         json.dump({"deployment": name}, f)
     wait_green(name, 1800)
+    # The baseline must follow the hold's release, not race it.
+    wait_hold_released(name, 1500)
 
 
 def cmd_green(args):
