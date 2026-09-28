@@ -1,0 +1,85 @@
+# Fixture: only the image moved (tag -> digest). Comments, quoting,
+# key order and rule/verb order differ too, and none of that is a change.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: veloxsearch-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: veloxsearch-runtime
+rules:
+  # reordered rules and verbs
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["list", "get"]
+  - verbs:
+      - get
+      - list
+      - watch
+    apiGroups: ['']
+    resources: [pods, namespaces]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: veloxsearch-runtime
+  namespace: veloxsearch-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: veloxsearch-runtime
+subjects:
+  - kind: ServiceAccount
+    name: veloxsearch
+    namespace: veloxsearch-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: veloxsearch-env
+  namespace: veloxsearch-system
+data:
+  # a new comment
+  RUST_LOG: info  # trailing comment
+  VELOX_COOKIE_SECURE: "0"
+  init.sh: |
+    #!/bin/sh
+    set -eu
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: veloxsearch
+  namespace: veloxsearch-system
+  labels: { app: veloxsearch }
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: veloxsearch
+          image: docker.io/tornistecnologia/veloxsearch-oss@sha256:0000000000000000000000000000000000000000000000000000000000000001
+          envFrom:
+            - configMapRef:
+                name: veloxsearch-env
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits: { memory: "512Mi", cpu: "500m" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: veloxsearch
+  namespace: veloxsearch-system
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      nodePort: 30080

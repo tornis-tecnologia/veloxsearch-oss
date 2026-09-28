@@ -134,6 +134,16 @@ a release can need RBAC the previous one did not have — ADR-055 added `patch` 
 `apps/deployments`, for example — and an image-only upgrade would start the new
 binary without it.
 
+**When is an image-only upgrade enough?** When the release notes say so. Every
+release opens with an **Upgrade:** line produced by
+`deploy/manifest-changes.sh`, which compares the release's `install.yaml` with
+the previous release's, image reference ignored. "image-only ✓" means nothing
+but the image moved and gives the exact `kubectl set image` command; otherwise
+the line names what changed (`rbac`, `config`, `other`) with the details in a
+collapsible block, and `upgrade.yaml` is the way. Skipping releases means
+checking every release in between. Each pull request's CI summary shows the
+same verdict for the tree against the latest release.
+
 **Releases published before `upgrade.yaml` existed** ship only `install.yaml`.
 Applying one of those re-creates the binding. From this release on, the running
 app deletes a re-created binding again within about a minute once bootstrap is

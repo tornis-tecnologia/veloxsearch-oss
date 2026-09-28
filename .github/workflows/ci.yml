@@ -75,6 +75,29 @@ jobs:
           print(f"upgrade.yaml = install.yaml minus the bootstrap binding and veloxsearch-env ({len(upgrade)} documents)")
           PY
 
+      # release.yml heads every release's notes with this script's verdict.
+      - name: manifest-changes.sh classifies the fixtures
+        run: python3 tests/manifest_changes_check.py
+
+      # Informational, never failing: shows reviewers whether this tree still
+      # upgrades from the latest release with `kubectl set image` alone.
+      - name: Upgrade impact against the latest release
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          repo="https://github.com/$GITHUB_REPOSITORY"
+          tag=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$repo/releases/latest/download/install.yaml" \
+            | sed -n 's|.*/releases/download/\(v[^/]*\)/install\.yaml$|\1|p')
+          {
+            echo "### Upgrade impact: ${tag:-latest release} → this tree"
+            if [ -n "$tag" ] && curl -fsSL "$repo/releases/download/$tag/install.yaml" -o released-install.yaml \
+               && out=$(deploy/manifest-changes.sh released-install.yaml deploy/install.yaml); then
+              printf '```\n%s\n```\n' "$out"
+            else
+              echo "manifest diff unavailable: could not fetch or compare the latest release's install.yaml"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   rust:
     name: Rust (fmt, clippy, test)
     runs-on: ubuntu-latest

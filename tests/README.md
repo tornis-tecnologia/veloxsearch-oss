@@ -13,6 +13,7 @@ when you reshape a screen.
 
 | Script | Needs | What it checks |
 | --- | --- | --- |
+| `manifest_changes_check.py` | stdlib only, **no cluster needed** | `deploy/manifest-changes.sh` classifies the fixtures in `fixtures/manifest-changes/` (image-only, rbac, config, other) byte for byte. CI runs it in `manifest-version` |
 | `smoke_check.py <base>` | stdlib only | Install-and-boot: the app is up and serving. The minikube CI lane. |
 | `day2_check.py <base> <user> <pw>` | stdlib only | Day-2 operations against a live cluster |
 | `upgrade_check.py <subcommand> …` | stdlib + `kubectl` | The N-1 → N upgrade contract (ADR-057): driven step by step by `.github/workflows/upgrade.yml` on a throwaway minikube. Creates an admin and a deployment — never run it against a cluster you care about |
