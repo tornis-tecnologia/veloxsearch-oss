@@ -20,6 +20,10 @@ are called out explicitly.
   canary test asserts that no credential, host, address, URL, document body
   or free text can appear. The profile is only ever sent as that response;
   nothing is pushed. Schema: `docs/cluster-profile.md`.
+- Capacity view: **Download cluster profile**. It previews the exact JSON,
+  offers a names on/off toggle that refetches, and saves the previewed bytes
+  from the browser with no second request. Strings are translated into
+  pt/en/es, and `tests/profile_dialog_check.py` covers the dialog.
 - The metrics sampler also records `query_total`, `gc_old_millis` and
   `gc_young_millis`. These fields are additive, and older samples simply
   lack them.
