@@ -108,6 +108,7 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-062 | Default retention per purpose — installation default in `veloxsearch-config` (admin), stamped per deployment on the CR at create with its source (default/override), apply-once: a `velox-retention` policy the user edited in OpenSearch is never rewritten except by an explicit reset; existing deployments that inherit the default move only through an explicit admin action |
 | ADR-063 | The Dashboards first-boot fix goes through the CR: `spec.dashboards.replicas` held at 0 until the cluster settles, remediation holds the same way, no write on the operator's Deployment (supersedes ADR-055 decision 1, #46) |
 | ADR-064 | *(proposed)* Admin-password reset safety — refused (409) unless the deployment is settled and no reset is pending; a failed operator nudge rolls the Secret back (or says the password changed); a failed securityconfig Job restores the previous password (#115) |
+| ADR-065 | *(proposed)* Longhorn by default, with an opt-out — an explicit, recorded storage choice at first run with Longhorn pre-selected on a node-local default; node prerequisites pre-flighted before the question; the bootstrap binding held open until the recorded choice is satisfied (amends ADR-061) |
 
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and
