@@ -9,6 +9,28 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **The stuck-recovery remediation could still bounce a node that only
+  receives (#27/#96):** when its per-index lookup of the recovery source
+  failed or found no stalled row, it fell back to the node holding the
+  INITIALIZING replica, which is the receiver. Seen on OpenSearch 3.7.0: it
+  bounced `nodes-0` while every stalled recovery came from `nodes-1`, and the
+  stall stayed. The remediation now reads active recoveries cluster-wide,
+  bounces the node that is the source of the most recoveries stuck in `init`
+  at 0 bytes, checks that this node name is one of the deployment's node
+  pods, and logs the per-source counts it used. If there is no such source,
+  the top count is a tie, or the name matches no pod, it bounces nothing and
+  logs why.
+- **The stuck-recovery remediation bounces the recovery source, not the
+  target (#27/#96, #109).**
+- **The restart-wave watch could read a moving recovery as stuck (#96):**
+  without `bytes=b`, OpenSearch reports the recovered bytes as `208b`, which
+  was read as 0, the stuck signature. The watch now asks for raw bytes and
+  reads both forms. A byte count it cannot read no longer counts as zero.
+- **A recovery-throttle raise had no upper bound (#27/#96):** the raised
+  `node_concurrent_recoveries` was handed back only once every recovery had
+  settled. It is now also handed back when the remediation's 30-minute
+  episode ends. If the recoveries are still stuck by then, the next pass
+  starts a new episode.
 - **The Dashboards hold's 20-minute ceiling could release in the middle of a
   rolling restart (#46, ADR-063):** a post-bootstrap roll that ran past 20
   minutes had its hold released 19s after a node pod was re-created, and
