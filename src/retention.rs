@@ -240,6 +240,272 @@ pub async fn set(defaults: &Defaults) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Apply-once, shared by every retention policy velox writes (ADR-062 §3)
+// ---------------------------------------------------------------------------
+//
+// `velox-retention` (profiles.rs) and the OTel stack's three policies
+// (otel_stack.rs) follow one rule: velox writes the policy, stamps what it
+// wrote, and leaves it alone once anyone else has written it. The rule lives
+// here once; each caller supplies only its policy body, how it describes the
+// age it wrote, and what "already current" means for its patterns.
+
+/// `<id>=<_seq_no>:<_primary_term>` pairs, comma-separated: what velox last
+/// wrote to each of the OTel stack's ISM policies. One annotation for the
+/// three, like `integration-versions`; the per-policy analogue of
+/// [`STAMP_ANNOTATION`].
+pub const OTEL_STAMP_ANNOTATION: &str = "veloxsearch.ai/otel-retention-stamps";
+
+/// What happened to one retention policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionOutcome {
+    /// There was none; velox created it.
+    Installed,
+    /// velox's own policy, rewritten to the requested age.
+    Updated,
+    /// velox's own policy, already at the requested age.
+    Unchanged,
+    /// Someone edited it inside OpenSearch; left exactly as they left it.
+    Customized,
+}
+
+impl RetentionOutcome {
+    /// Wire name for the API.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Installed => "installed",
+            Self::Updated => "updated",
+            Self::Unchanged => "unchanged",
+            Self::Customized => "customized",
+        }
+    }
+}
+
+/// `<_seq_no>:<_primary_term>` of an ISM policy document, as both the GET and
+/// the PUT responses carry it. Every write to the document moves `_seq_no`,
+/// which is what makes the pair a precise "did anyone else write this" check —
+/// no normalization of what OpenSearch echoes back is involved.
+pub fn policy_stamp(doc: &serde_json::Value) -> Option<String> {
+    Some(format!(
+        "{}:{}",
+        doc["_seq_no"].as_i64()?,
+        doc["_primary_term"].as_i64()?
+    ))
+}
+
+/// The age at which the policy deletes, wherever the delete transition sits.
+pub fn delete_age(doc: &serde_json::Value) -> Option<&str> {
+    doc["policy"]["states"]
+        .as_array()?
+        .iter()
+        .filter_map(|s| s["transitions"].as_array())
+        .flatten()
+        .find(|t| t["state_name"] == "delete")?["conditions"]["min_index_age"]
+        .as_str()
+}
+
+/// Has anyone but velox written this live policy?
+///
+/// With a stamp — every policy velox wrote since ADR-062 — the answer is exact:
+/// the live document's `_seq_no:_primary_term` is still the one velox's own
+/// write produced, or someone else wrote it since.
+///
+/// Without one (a policy written before ADR-062, or a stamp that failed to
+/// save) the answer is a heuristic, stated as such: velox's description
+/// (`describe(age)`) names the age it wrote, so a policy whose description is
+/// not velox's, or whose delete age no longer matches it, was edited. An edit
+/// that keeps both is not detectable there — velox then overwrites it once and
+/// stamps it, which is exactly what every save did before ADR-062.
+pub fn is_customized(
+    live: &serde_json::Value,
+    stamp: Option<&str>,
+    describe: fn(&str) -> String,
+) -> bool {
+    if let Some(stamp) = stamp.filter(|s| !s.is_empty()) {
+        return policy_stamp(live).as_deref() != Some(stamp);
+    }
+    match delete_age(live) {
+        Some(age) => live["policy"]["description"] != describe(age).as_str(),
+        None => true,
+    }
+}
+
+/// One ISM policy velox writes, as [`apply_once`] and [`live_state`] need it.
+pub struct IsmPolicy<'a> {
+    /// `<base>/_plugins/_ism/policies/<id>`.
+    pub url: &'a str,
+    /// For error messages.
+    pub id: &'a str,
+    pub body: &'a serde_json::Value,
+    /// How velox's description names an age (the unstamped heuristic).
+    pub describe: fn(&str) -> String,
+}
+
+/// Write `policy` unless someone else owns it now (ADR-062 §3).
+///
+/// Absent → create. Present and velox's own → rewrite only when `is_current`
+/// says the live document differs. Present and customized → leave alone,
+/// unless `force` (the explicit "restore default"). A rewrite is conditional on
+/// the `_seq_no`/`_primary_term` just read, so a user edit landing in between
+/// is refused rather than overwritten.
+///
+/// Returns the outcome and the stamp of the document velox now stands behind
+/// (the one it wrote, or the live one when unchanged); `None` when customized.
+/// Recording that stamp is the caller's: it knows which annotation holds it.
+pub async fn apply_once(
+    c: &reqwest::Client,
+    auth: (&str, &str),
+    policy: &IsmPolicy<'_>,
+    stamp: Option<&str>,
+    force: bool,
+    is_current: impl Fn(&serde_json::Value) -> bool,
+) -> Result<(RetentionOutcome, Option<String>)> {
+    let (u, p) = auth;
+    let id = policy.id;
+    let resp = c
+        .get(policy.url)
+        .basic_auth(u, Some(p))
+        .send()
+        .await
+        .with_context(|| format!("reading the ISM policy {id}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // A concurrent writer that created it first makes this a 409; the
+        // next attempt then finds the policy and decides from there.
+        let doc = c
+            .put(policy.url)
+            .basic_auth(u, Some(p))
+            .json(policy.body)
+            .send()
+            .await
+            .with_context(|| format!("creating the ISM policy {id}"))?
+            .error_for_status()
+            .with_context(|| format!("ISM policy {id} rejected"))?
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default();
+        return Ok((RetentionOutcome::Installed, policy_stamp(&doc)));
+    }
+    let live: serde_json::Value = resp
+        .error_for_status()
+        .with_context(|| format!("reading the ISM policy {id}"))?
+        .json()
+        .await
+        .with_context(|| format!("parsing the ISM policy {id}"))?;
+    if !force && is_customized(&live, stamp, policy.describe) {
+        return Ok((RetentionOutcome::Customized, None));
+    }
+    if !force && is_current(&live) {
+        return Ok((RetentionOutcome::Unchanged, policy_stamp(&live)));
+    }
+    let (seq, term) = (
+        live["_seq_no"].as_i64().unwrap_or_default(),
+        live["_primary_term"].as_i64().unwrap_or_default(),
+    );
+    let doc = c
+        .put(format!(
+            "{}?if_seq_no={seq}&if_primary_term={term}",
+            policy.url
+        ))
+        .basic_auth(u, Some(p))
+        .json(policy.body)
+        .send()
+        .await
+        .with_context(|| format!("updating the ISM policy {id}"))?
+        .error_for_status()
+        .with_context(|| format!("ISM policy {id} update rejected"))?
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or_default();
+    Ok((RetentionOutcome::Updated, policy_stamp(&doc)))
+}
+
+/// Where a live policy stands, read-only: `absent`, `managed` (velox's own,
+/// still as velox wrote it) or `customized`, with the days it deletes at.
+pub async fn live_state(
+    c: &reqwest::Client,
+    auth: (&str, &str),
+    url: &str,
+    stamp: Option<&str>,
+    describe: fn(&str) -> String,
+) -> Result<(&'static str, Option<u32>)> {
+    let (u, p) = auth;
+    let resp = c
+        .get(url)
+        .basic_auth(u, Some(p))
+        .send()
+        .await
+        .context("reading the ISM policy")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(("absent", None));
+    }
+    let live: serde_json::Value = resp
+        .error_for_status()
+        .context("reading the ISM policy")?
+        .json()
+        .await
+        .context("parsing the ISM policy")?;
+    let days = delete_age(&live).and_then(parse_age);
+    let state = if is_customized(&live, stamp, describe) {
+        "customized"
+    } else {
+        "managed"
+    };
+    Ok((state, days))
+}
+
+/// The OTel stamps annotation back into `id → seq:term`. Garbled entries are
+/// dropped: a missing stamp falls back to the description heuristic, never to
+/// a guess.
+pub fn parse_stamps(value: Option<&str>) -> BTreeMap<String, String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|kv| kv.trim().split_once('='))
+        .filter(|(k, v)| !k.is_empty() && v.contains(':'))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+pub fn render_stamps(stamps: &BTreeMap<String, String>) -> String {
+    stamps
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Days the OTel stack's policies should carry on a deployment.
+///
+/// The deployment's own value (the CR annotation) first — the stack's indices
+/// are kept exactly as long as the recipe indices. A CR without one (created
+/// before ADR-062) falls back to the installation default, `defaults`, which
+/// the caller passes as `None` when it could not be read; then the built-in.
+///
+/// This differs on purpose from [`effective_days`], which falls back to the
+/// built-in: that function guards a policy the deployment already runs. The
+/// stack's policies are written only on an explicit action (install, apply
+/// default, restore default), and an explicit action takes the default.
+///
+/// The stack's telemetry is observability data whatever the deployment is
+/// for, so a `search` deployment (which has no retention of its own and no
+/// value on its CR) keeps it for the observability default.
+pub fn otel_days(purpose: &str, annotation: Option<&str>, defaults: Option<&Defaults>) -> u32 {
+    let purpose = if purpose == "security" {
+        "security"
+    } else {
+        "observability"
+    };
+    let builtin = if purpose == "security" {
+        BUILTIN_SECURITY_DAYS
+    } else {
+        BUILTIN_OBSERVABILITY_DAYS
+    };
+    annotation
+        .and_then(parse_age)
+        .or_else(|| defaults.and_then(|d| d.for_purpose(purpose)))
+        .unwrap_or(builtin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +611,39 @@ mod tests {
         for s in [Source::Default, Source::Override] {
             assert_eq!(Source::parse(s.as_str()), Some(s));
         }
+    }
+
+    /// The OTel stack's fallback chain: the deployment's value, else the
+    /// installation default, else (default unreadable) the built-in.
+    #[test]
+    fn the_otel_stack_falls_back_value_then_default_then_builtin() {
+        let now = Defaults {
+            observability_days: 21,
+            security_days: 60,
+        };
+        assert_eq!(otel_days("observability", Some("7d"), Some(&now)), 7);
+        assert_eq!(otel_days("observability", None, Some(&now)), 21);
+        assert_eq!(otel_days("security", Some("junk"), Some(&now)), 60);
+        assert_eq!(otel_days("observability", None, None), 30);
+        assert_eq!(otel_days("security", None, None), 90);
+        // Telemetry is observability data on any deployment: search and
+        // legacy/unlabeled ones use the observability default.
+        assert_eq!(otel_days("search", None, Some(&now)), 21);
+        assert_eq!(otel_days("", None, None), 30);
+    }
+
+    #[test]
+    fn otel_stamps_round_trip_and_drop_garbage() {
+        let mut m = BTreeMap::new();
+        m.insert("logs-policy".to_string(), "3:1".to_string());
+        m.insert("raw-span-policy".to_string(), "12:2".to_string());
+        assert_eq!(render_stamps(&m), "logs-policy=3:1,raw-span-policy=12:2");
+        assert_eq!(parse_stamps(Some(&render_stamps(&m))), m);
+        assert!(parse_stamps(None).is_empty());
+        assert_eq!(
+            parse_stamps(Some("logs-policy=3:1,=4:1,raw-span-policy=nope,junk")).len(),
+            1
+        );
     }
 
     #[test]

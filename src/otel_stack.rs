@@ -815,15 +815,16 @@ pub fn datasource_body(deployment: &str) -> serde_json::Value {
 /// indices created after the policy exists (the ordering rule `profiles.rs`
 /// documents), and the sink creates its indices within seconds of connecting.
 pub fn ism_policy(policy_id: &str, pattern: &str, retention_days: u32) -> serde_json::Value {
+    let age = crate::retention::render_age(retention_days);
     serde_json::json!({
         "policy": {
             "policy_id": policy_id,
-            "description": format!("OTel telemetry retention ({retention_days}d)"),
+            "description": ism_description(&age),
             "default_state": "hot",
             "states": [
                 { "name": "hot", "actions": [],
                   "transitions": [ { "state_name": "delete",
-                      "conditions": { "min_index_age": format!("{retention_days}d") } } ] },
+                      "conditions": { "min_index_age": age } } ] },
                 { "name": "delete", "actions": [ { "delete": {} } ], "transitions": [] }
             ],
             "ism_template": [
@@ -831,6 +832,21 @@ pub fn ism_policy(policy_id: &str, pattern: &str, retention_days: u32) -> serde_
             ]
         }
     })
+}
+
+/// The description velox writes on its OTel policies. It names the age, which
+/// is how a policy written before the stamps existed (every install before
+/// ADR-062 reached the stack) is still recognized as velox's own — the same
+/// fallback `velox-retention` has. Unchanged from those installs on purpose.
+fn ism_description(age: &str) -> String {
+    format!("OTel telemetry retention ({age})")
+}
+
+/// Does velox's own live OTel policy already say what it should: the age, and
+/// the one pattern its `ism_template` covers?
+fn ism_is_current(live: &serde_json::Value, pattern: &str, age: &str) -> bool {
+    crate::retention::delete_age(live) == Some(age)
+        && live["policy"]["ism_template"][0]["index_patterns"] == serde_json::json!([pattern])
 }
 
 /// One index pattern as the Observability plugin wants it.
@@ -1815,16 +1831,6 @@ pub struct StackState {
     pub error: String,
 }
 
-/// Retention window for the otel indices, matching what the purpose profile
-/// applies to the recipe indices (ADR-028): 90d for security, 30d otherwise.
-fn retention_days(purpose: &str) -> u32 {
-    if purpose == "security" {
-        90
-    } else {
-        30
-    }
-}
-
 /// Install the stack for one deployment.
 ///
 /// **OpenSearch side first, then Kubernetes** — not cosmetic ordering: an ISM
@@ -1881,8 +1887,25 @@ pub async fn install(dep: &Deployment, targets: ScrapeTargets) -> Result<()> {
     // 4. Retention first: an ISM `ism_template` only auto-attaches to indices
     //    created *after* the policy exists, and Data Prepper creates its
     //    indices seconds after it connects.
+    //    The age is the deployment's retention (ADR-062), and a policy
+    //    someone already owns inside OpenSearch is left as it is.
     crate::recipes::ensure_tenant(dep).await;
-    ensure_ism(dep, retention_days(&status.purpose)).await?;
+    let cr = crate::k8s::retention_of(dep)
+        .await
+        .context("reading the deployment's retention")?;
+    let defaults = match crate::retention::get().await {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!("otel stack: retention default unreadable, using the built-in: {e:#}");
+            None
+        }
+    };
+    let days = crate::retention::otel_days(&cr.purpose, cr.value.as_deref(), defaults.as_ref());
+    for r in ensure_retention(dep, days, cr.otel_stamps.as_deref(), false).await {
+        if let Err(e) = r.outcome {
+            bail!("ISM policy {}: {e}", r.policy_id);
+        }
+    }
 
     // 5. Kubernetes side, in inventory order.
     let client = crate::k8s::client().await?;
@@ -2341,64 +2364,126 @@ pub async fn wait_available(dep: &Deployment, part: &str, secs: u64) -> Result<(
     }
 }
 
-/// PUT the ISM policy, handling the "already exists" case the way
-/// `profiles::ensure_retention` does: a 409 means re-PUT with the current
-/// `_seq_no`/`_primary_term`, not give up.
-async fn ensure_ism(dep: &Deployment, days: u32) -> Result<()> {
+/// One OTel policy's result: the outcome, or the cluster's words.
+#[derive(Debug)]
+pub struct PolicyResult<T> {
+    pub policy_id: &'static str,
+    pub outcome: std::result::Result<T, String>,
+}
+
+/// Apply `days` to the stack's three ISM policies, once (ADR-062 §3, §6).
+///
+/// Each policy is decided on its own by `retention::apply_once`, the rule
+/// `velox-retention` follows: absent → create; velox's own → rewrite only if
+/// the age or pattern differs; written by anyone else since velox → left
+/// alone (`customized`) unless `force`, the explicit "restore default".
+///
+/// `stamps` is `retention::OTEL_STAMP_ANNOTATION` as the CR carries it; the
+/// stamps of what velox writes are recorded back there (best-effort, like
+/// `velox-retention`'s). A policy velox rewrote is re-attached to the indices
+/// it already manages, because ISM keeps a managed index on the policy version
+/// it started with. Never fails as a whole: one policy's error is its row.
+pub async fn ensure_retention(
+    dep: &Deployment,
+    days: u32,
+    stamps: Option<&str>,
+    force: bool,
+) -> Vec<PolicyResult<crate::retention::RetentionOutcome>> {
+    use crate::retention::RetentionOutcome;
+    let err_all = |e: anyhow::Error| {
+        ISM_POLICIES
+            .iter()
+            .map(|(id, _)| PolicyResult {
+                policy_id: id,
+                outcome: Err(format!("{e:#}")),
+            })
+            .collect()
+    };
+    let c = match crate::recipes::http() {
+        Ok(c) => c,
+        Err(e) => return err_all(e),
+    };
     let base = crate::recipes::os_base(dep);
-    let c = crate::recipes::http()?;
     let (u, p) = crate::k8s::admin_creds(dep).await;
+    let age = crate::retention::render_age(days);
+    let mut known = crate::retention::parse_stamps(stamps);
+    let before = known.clone();
+    let mut out = Vec::with_capacity(ISM_POLICIES.len());
 
     for (policy_id, pattern) in ISM_POLICIES {
         let url = format!("{base}/_plugins/_ism/policies/{policy_id}");
         let body = ism_policy(policy_id, pattern, days);
+        let applied = crate::retention::apply_once(
+            &c,
+            (&u, &p),
+            &crate::retention::IsmPolicy {
+                url: &url,
+                id: policy_id,
+                body: &body,
+                describe: ism_description,
+            },
+            known.get(policy_id).map(String::as_str),
+            force,
+            |live| ism_is_current(live, pattern, &age),
+        )
+        .await;
+        let outcome = match applied {
+            Ok((outcome, written)) => {
+                if let Some(stamp) = written {
+                    known.insert(policy_id.to_string(), stamp);
+                }
+                if outcome == RetentionOutcome::Updated {
+                    // Best-effort: fails harmlessly when no index matches yet.
+                    let _ = c
+                        .post(format!("{base}/_plugins/_ism/change_policy/{pattern}"))
+                        .basic_auth(&u, Some(&p))
+                        .json(&serde_json::json!({ "policy_id": policy_id }))
+                        .send()
+                        .await;
+                }
+                Ok(outcome)
+            }
+            Err(e) => Err(format!("{e:#}")),
+        };
+        out.push(PolicyResult { policy_id, outcome });
+    }
 
-        let resp = c
-            .put(&url)
-            .basic_auth(&u, Some(&p))
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("creating ISM policy {policy_id}"))?;
-        if resp.status().is_success() {
-            continue;
-        }
-        if resp.status() != reqwest::StatusCode::CONFLICT {
-            bail!("ISM policy {policy_id} PUT returned {}", resp.status());
-        }
-
-        // Already there — Data Prepper writes its own rollover-only version of
-        // these under the same ids at startup, so the conflicting case is the
-        // normal one, not the exception. Re-PUT with the current sequence.
-        let cur: serde_json::Value = c
-            .get(&url)
-            .basic_auth(&u, Some(&p))
-            .send()
-            .await
-            .with_context(|| format!("reading ISM policy {policy_id}"))?
-            .json()
-            .await
-            .with_context(|| format!("parsing ISM policy {policy_id}"))?;
-        let seq = cur.get("_seq_no").and_then(|v| v.as_u64()).unwrap_or(0);
-        let term = cur
-            .get("_primary_term")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let updated = c
-            .put(format!("{url}?if_seq_no={seq}&if_primary_term={term}"))
-            .basic_auth(&u, Some(&p))
-            .json(&body)
-            .send()
-            .await
-            .with_context(|| format!("updating ISM policy {policy_id}"))?;
-        if !updated.status().is_success() {
-            bail!(
-                "ISM policy {policy_id} update returned {}",
-                updated.status()
-            );
+    if known != before {
+        let value = crate::retention::render_stamps(&known);
+        if let Err(e) = crate::k8s::set_otel_retention_stamps(dep, &value).await {
+            tracing::warn!("recording the OTel retention stamps on {dep}: {e:#}");
         }
     }
-    Ok(())
+    out
+}
+
+/// Where each of the stack's policies stands, read-only, for the edit tab:
+/// `absent` / `managed` / `customized`, and the days it deletes at.
+pub async fn retention_state(
+    dep: &Deployment,
+    stamps: Option<&str>,
+) -> Vec<PolicyResult<(&'static str, Option<u32>)>> {
+    let known = crate::retention::parse_stamps(stamps);
+    let base = crate::recipes::os_base(dep);
+    let c = crate::recipes::http();
+    let (u, p) = crate::k8s::admin_creds(dep).await;
+    let mut out = Vec::with_capacity(ISM_POLICIES.len());
+    for (policy_id, _) in ISM_POLICIES {
+        let outcome = match &c {
+            Ok(c) => crate::retention::live_state(
+                c,
+                (&u, &p),
+                &format!("{base}/_plugins/_ism/policies/{policy_id}"),
+                known.get(policy_id).map(String::as_str),
+                ism_description,
+            )
+            .await
+            .map_err(|e| format!("{e:#}")),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        out.push(PolicyResult { policy_id, outcome });
+    }
+    out
 }
 
 /// Wait until the *new* Dashboards config is actually live.
@@ -3364,6 +3449,181 @@ mod tests {
     use super::*;
 
     const D: &str = "logs-ab12";
+
+    // -- retention follows the deployment (ADR-062 §6) -----------------------
+
+    /// A policy as the GET API returns it: velox's body plus the document
+    /// metadata, and a field OpenSearch adds on its own.
+    fn live_policy(id: &str, pattern: &str, days: u32, seq: i64) -> serde_json::Value {
+        let mut doc = ism_policy(id, pattern, days);
+        doc["_id"] = id.into();
+        doc["_seq_no"] = seq.into();
+        doc["_primary_term"] = 1.into();
+        doc["policy"]["schema_version"] = 21.into();
+        doc
+    }
+
+    /// The policies carry the deployment's effective retention, not a number
+    /// of their own: the CR value, else the installation default, else the
+    /// built-in.
+    #[test]
+    fn the_policy_days_come_from_the_effective_retention() {
+        let defaults = crate::retention::Defaults {
+            observability_days: 21,
+            security_days: 60,
+        };
+        for (purpose, annotation, expected) in [
+            ("observability", Some("14d"), 14),
+            ("security", Some("365d"), 365),
+            ("observability", None, 21),
+            ("security", None, 60),
+        ] {
+            let days = crate::retention::otel_days(purpose, annotation, Some(&defaults));
+            assert_eq!(days, expected, "{purpose} {annotation:?}");
+            for (id, pattern) in ISM_POLICIES {
+                let p = ism_policy(id, pattern, days);
+                let age = crate::retention::render_age(expected);
+                assert_eq!(crate::retention::delete_age(&p), Some(age.as_str()));
+                assert_eq!(p["policy"]["description"], ism_description(&age));
+                assert_eq!(p["policy"]["ism_template"][0]["index_patterns"][0], pattern);
+            }
+        }
+        // Nothing hardcoded is left over for a purpose.
+        assert_eq!(crate::retention::otel_days("observability", None, None), 30);
+        assert_eq!(crate::retention::otel_days("security", None, None), 90);
+    }
+
+    /// Every install before this change wrote `OTel telemetry retention (30d)`
+    /// and no stamp; those must still read as velox's own, or the first
+    /// "apply default" would skip every existing stack as customized.
+    #[test]
+    fn an_existing_install_is_recognized_as_velox_own() {
+        let (id, pattern) = ISM_POLICIES[0];
+        let old = live_policy(id, pattern, 30, 4);
+        assert_eq!(
+            old["policy"]["description"],
+            "OTel telemetry retention (30d)"
+        );
+        assert!(!crate::retention::is_customized(
+            &old,
+            None,
+            ism_description
+        ));
+        assert!(ism_is_current(&old, pattern, "30d"));
+        assert!(
+            !ism_is_current(&old, pattern, "21d"),
+            "a new age rewrites it"
+        );
+        assert!(
+            !ism_is_current(&old, ISM_POLICIES[1].1, "30d"),
+            "a policy covering another pattern is not current"
+        );
+    }
+
+    /// A policy someone else wrote is skipped, exactly as `velox-retention`
+    /// is: by stamp when velox recorded one, by description otherwise.
+    #[test]
+    fn a_customized_otel_policy_is_skipped() {
+        let (id, pattern) = ISM_POLICIES[1];
+        let custom = |doc: &serde_json::Value, stamp: Option<&str>| {
+            crate::retention::is_customized(doc, stamp, ism_description)
+        };
+        // Stamped: velox's own write, or anyone else's, even with equal content.
+        assert!(!custom(&live_policy(id, pattern, 30, 7), Some("7:1")));
+        assert!(custom(&live_policy(id, pattern, 30, 8), Some("7:1")));
+        // Unstamped: an edited age, a foreign description, or no delete at all
+        // (e.g. a rollover-only policy) is not velox's.
+        let mut aged = live_policy(id, pattern, 30, 3);
+        aged["policy"]["states"][0]["transitions"][0]["conditions"]["min_index_age"] =
+            "400d".into();
+        assert!(custom(&aged, None));
+        let mut described = live_policy(id, pattern, 30, 3);
+        described["policy"]["description"] = "our compliance policy".into();
+        assert!(custom(&described, None));
+        let mut forever = live_policy(id, pattern, 30, 3);
+        forever["policy"]["states"][0]["transitions"] = serde_json::json!([]);
+        assert!(custom(&forever, None));
+    }
+
+    /// The stamps of the three policies ride one annotation and each is
+    /// looked up by its own id.
+    #[test]
+    fn each_policy_keeps_its_own_stamp() {
+        let mut stamps = std::collections::BTreeMap::new();
+        for (n, (id, _)) in ISM_POLICIES.iter().enumerate() {
+            stamps.insert(id.to_string(), format!("{n}:1"));
+        }
+        let parsed =
+            crate::retention::parse_stamps(Some(&crate::retention::render_stamps(&stamps)));
+        assert_eq!(parsed, stamps);
+        assert_eq!(
+            parsed.get(ISM_POLICIES[2].0).map(String::as_str),
+            Some("2:1")
+        );
+    }
+
+    /// The source of `fn <name>`: from its signature to the closing brace at
+    /// the signature's own indentation.
+    fn fn_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let at = src
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("fn {name} not found"));
+        let line = src[..at].rfind('\n').map_or(0, |i| i + 1);
+        let indent = src[line..at].len() - src[line..at].trim_start().len();
+        let close = format!("\n{}}}\n", " ".repeat(indent));
+        let rest = &src[at..];
+        &rest[..rest.find(&close).expect("end of fn")]
+    }
+
+    /// ADR-053's ordering rule survives: the retention policies are written
+    /// before any workload, because `ism_template` only attaches to indices
+    /// created after the policy and Data Prepper creates its indices within
+    /// seconds of connecting.
+    #[test]
+    fn retention_is_written_before_the_workloads() {
+        // Split so the needles do not match this test's own source.
+        let ensure = concat!("ensure_", "retention(dep,");
+        let workloads = concat!("manifests_", "with(dep,");
+        let body = fn_body(include_str!("otel_stack.rs"), "install");
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("install no longer calls {needle}"))
+        };
+        assert!(at(ensure) < at(workloads));
+    }
+
+    /// ADR-057: an upgrade of VeloxSearch never rewrites the stack's policies
+    /// on its own. They are written by the stack install and by the two
+    /// explicit retention actions, and by nothing that runs at startup or on
+    /// a save.
+    #[test]
+    fn only_explicit_actions_write_the_otel_policies() {
+        let call = concat!("otel_stack::", "ensure_retention(");
+        for (file, src) in [
+            ("main.rs", include_str!("main.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("k8s.rs", include_str!("k8s.rs")),
+            ("provisioning.rs", include_str!("provisioning.rs")),
+            ("profiles.rs", include_str!("profiles.rs")),
+            ("upgrade.rs", include_str!("upgrade.rs")),
+            ("bootstrap.rs", include_str!("bootstrap.rs")),
+        ] {
+            assert!(!src.contains(call), "{file} writes the OTel policies");
+        }
+        let api = include_str!("api.rs");
+        let explicit = [
+            fn_body(api, "apply_default_retention"),
+            fn_body(api, "reset_retention"),
+        ];
+        let in_handlers: usize = explicit.iter().map(|b| b.matches(call).count()).sum();
+        assert_eq!(api.matches(call).count(), in_handlers);
+        assert_eq!(in_handlers, 2);
+        // Inside this module, only `install` calls it.
+        let own = concat!("ensure_", "retention(dep,");
+        let src = include_str!("otel_stack.rs");
+        assert_eq!(src.matches(own).count(), 1);
+        assert!(fn_body(src, "install").contains(own));
+    }
 
     /// The scoped counterpart of [`D`]. Tests that only build strings keep
     /// using `D`; anything that renders a namespaced object needs the token,

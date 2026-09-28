@@ -5205,6 +5205,11 @@ pub struct RetentionOnCr {
     pub stamp: Option<String>,
     /// `retention::SOURCE_ANNOTATION`, raw; `None` on CRs that predate it.
     pub source: Option<String>,
+    /// Whether the OTel stack is installed (ADR-053): its three policies then
+    /// follow this deployment's retention too.
+    pub otel_stack: bool,
+    /// `retention::OTEL_STAMP_ANNOTATION`, raw.
+    pub otel_stamps: Option<String>,
 }
 
 fn retention_from(
@@ -5217,6 +5222,12 @@ fn retention_from(
         stamp: annotations.get(crate::retention::STAMP_ANNOTATION).cloned(),
         source: annotations
             .get(crate::retention::SOURCE_ANNOTATION)
+            .cloned(),
+        otel_stack: annotations
+            .get(LABEL_OTEL_STACK)
+            .is_some_and(|v| !v.is_empty()),
+        otel_stamps: annotations
+            .get(crate::retention::OTEL_STAMP_ANNOTATION)
             .cloned(),
     }
 }
@@ -5264,6 +5275,21 @@ pub async fn set_retention(
         .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .context("patching the retention annotations")?;
+    Ok(())
+}
+
+/// Record what velox last wrote to the OTel stack's retention policies
+/// (`retention::OTEL_STAMP_ANNOTATION`). A merge patch on that one key, like
+/// `set_retention`: it cannot touch the spec.
+pub async fn set_otel_retention_stamps(dep: &Deployment, stamps: &str) -> Result<()> {
+    let client = client().await?;
+    let patch = serde_json::json!({
+        "metadata": { "annotations": { crate::retention::OTEL_STAMP_ANNOTATION: stamps } }
+    });
+    os_api(&client, dep)
+        .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("patching the OTel retention stamps")?;
     Ok(())
 }
 

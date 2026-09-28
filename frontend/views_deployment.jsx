@@ -651,7 +651,21 @@ function RetentionPanel({ d, lang, locked }) {
               <span className="v" data-testid="retention-source">{t["ret_source_" + st.source] || st.source}</span>
             </div>
           )}
-          {st.state === "customized" && <p className="hint">{t.ret_customized_p}</p>}
+          {(st.otel || []).length > 0 && (
+            <div data-testid="retention-otel">
+              <div className="kvrow"><span className="k">{t.ret_otel_h}</span><span className="v" /></div>
+              {st.otel.map(o => (
+                <div className="kvrow" key={o.policy_id}>
+                  <span className="k" style={{ fontFamily: "var(--font-mono)" }}>{o.policy_id}</span>
+                  <span className="v" title={o.detail || undefined}>
+                    {t["ret_state_" + o.state] || o.state}{o.days ? ` · ${days(o.days)}` : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {(st.state === "customized" || (st.otel || []).some(o => o.state === "customized")) &&
+            <p className="hint">{t.ret_customized_p}</p>}
           {st.days && <p className="hint" data-testid="retention-when">{t.ret_when_p}</p>}
           {st.default_days && (
             <Btn variant="outline" disabled={busy || !!locked} style={{ marginTop: 10 }}

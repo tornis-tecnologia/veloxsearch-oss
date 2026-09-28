@@ -8,6 +8,18 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Changed
+- **The OTel observability stack's retention follows the deployment's
+  (ADR-062 §6):** its three ISM policies used a hardcoded 30/90 days and
+  ignored the retention default. They now take the deployment's value (the
+  CR annotation, else the installation default, else the built-in), use the
+  same apply-once rule as `velox-retention` (a policy edited inside
+  OpenSearch is left alone), and are covered by "apply default to existing
+  deployments" and "restore default". The deployment's retention panel and
+  the apply report show one row per stack policy. An upgrade does not rewrite
+  existing stack policies. They change only on a stack install or through
+  those two actions.
+
 ## [0.11.0] - 2026-09-27
 
 ### Fixed
