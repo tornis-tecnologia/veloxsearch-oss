@@ -3260,11 +3260,12 @@ async fn stall_diagnosis_in(namespace: &str, name: &str) -> crate::activity::Clu
         .lock()
         .ok()
         .and_then(|m| m.get(&key).cloned());
-    let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    if should_remediate(out.recovery_secs, !out.recovery_index.is_empty(), fired_ago) {
-        if let Ok(mut log) = remediation_log().lock() {
-            log.insert(key.clone(), (std::time::Instant::now(), None));
-        }
+    let has_index = !out.recovery_index.is_empty();
+    if claim_remediation(remediation_log(), &key, |ago| {
+        should_remediate(out.recovery_secs, has_index, ago).then_some(())
+    })
+    .is_some()
+    {
         let (ns, nm, idx) = (
             namespace.to_string(),
             name.to_string(),
@@ -3316,6 +3317,25 @@ type RemediationLog =
 fn remediation_log() -> &'static RemediationLog {
     static LOG: std::sync::OnceLock<RemediationLog> = std::sync::OnceLock::new();
     LOG.get_or_init(Default::default)
+}
+
+/// Decide and claim a remediation slot under ONE lock guard. `decide` sees how
+/// long ago this key last fired and returns what to arm; when it arms, the
+/// placeholder entry is written before the guard drops. Reading the log, then
+/// deciding, then re-locking to insert let every status pass that read in
+/// between arm its own bounce: one stall armed four remediations within 90 ms,
+/// because the sampler and each API reader run these diagnoses concurrently.
+/// A poisoned lock arms nothing.
+fn claim_remediation<V, T>(
+    log: &std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<V>)>>,
+    key: &str,
+    decide: impl FnOnce(Option<std::time::Duration>) -> Option<T>,
+) -> Option<T> {
+    let mut map = log.lock().ok()?;
+    let ago = map.get(key).map(|(at, _)| at.elapsed());
+    let armed = decide(ago)?;
+    map.insert(key.to_string(), (std::time::Instant::now(), None));
+    Some(armed)
 }
 
 /// The pure decision — budget elapsed, something nameable, cooldown respected
@@ -3914,13 +3934,16 @@ async fn restart_wave_watch(
     // Arm the #27 remediation on the wave's trigger — same dance as the
     // stalled path: placeholder first (so a concurrent pass sees a
     // just-fired entry), then the bounce updates the log with the pod.
+    // The hand-back below reasons about the episode this pass started from.
     let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    let armed = restart_wave_should_remediate(&rows, fired_ago);
+    // Arming, though, is decided against the log as it is NOW, not as it was
+    // before the `_cat/recovery` round trip: a concurrent pass may have armed
+    // meanwhile.
+    let armed = claim_remediation(remediation_log(), &key, |ago| {
+        restart_wave_should_remediate(&rows, ago)
+    });
     let armed_this_pass = armed.is_some();
     if let Some((index, secs)) = armed {
-        if let Ok(mut log) = remediation_log().lock() {
-            log.insert(key.clone(), (std::time::Instant::now(), None));
-        }
         let (ns, nm, idx) = (namespace.to_string(), name.to_string(), index);
         tracing::warn!(
             "#96 restart-wave remediation armed for {ns}/{nm}: recovery of {idx} wedged in \
@@ -4127,16 +4150,12 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
         .lock()
         .ok()
         .and_then(|m| m.get(&key).cloned());
-    let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    if should_remediate_dashboards(
-        out.restarts,
-        &out.waiting_reason,
-        last_terminated_ago,
-        fired_ago,
-    ) {
-        if let Ok(mut log) = dashboards_remediation_log().lock() {
-            log.insert(key.clone(), (std::time::Instant::now(), None));
-        }
+    if claim_remediation(dashboards_remediation_log(), &key, |ago| {
+        should_remediate_dashboards(out.restarts, &out.waiting_reason, last_terminated_ago, ago)
+            .then_some(())
+    })
+    .is_some()
+    {
         let (ns, nm) = (namespace.to_string(), name.to_string());
         tracing::warn!(
             "#46 dashboards remediation armed for {ns}/{nm}: {} restarts ({})",
@@ -9607,5 +9626,64 @@ mod tests {
                 .collect();
             assert_eq!(a, r);
         }
+    }
+
+    // ── single-flight remediation claims ───────────────────────────────
+
+    type TestLog =
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>;
+
+    #[test]
+    fn concurrent_passes_arm_exactly_one_remediation() {
+        // Eight status passes racing on one wedged deployment: the shape that
+        // armed four bounces within 90 ms on a live cluster. Exactly one may
+        // claim; the rest must see its placeholder under the cooldown.
+        let log: &'static TestLog = Box::leak(Box::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    claim_remediation(log, "ns/dep", |ago| {
+                        // Widen the window the old read-then-insert left open.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        should_remediate(REMEDIATE_AFTER_SECS, true, ago).then_some(())
+                    })
+                    .is_some()
+                })
+            })
+            .collect();
+        let armed = handles
+            .into_iter()
+            .map(|h| h.join().expect("claim thread"))
+            .filter(|armed| *armed)
+            .count();
+        assert_eq!(armed, 1, "one wedged recovery must arm one remediation");
+        let map = log.lock().unwrap();
+        assert!(
+            map.get("ns/dep").is_some_and(|(_, pod)| pod.is_none()),
+            "placeholder claimed"
+        );
+    }
+
+    #[test]
+    fn a_claim_respects_the_cooldown_and_other_keys() {
+        let log: &'static TestLog = Box::leak(Box::default());
+        let eligible = |ago: Option<std::time::Duration>| {
+            should_remediate(REMEDIATE_AFTER_SECS, true, ago).then_some(())
+        };
+        assert!(claim_remediation(log, "ns/a", eligible).is_some());
+        assert!(
+            claim_remediation(log, "ns/a", eligible).is_none(),
+            "cooldown holds"
+        );
+        assert!(
+            claim_remediation(log, "ns/b", eligible).is_some(),
+            "keys are independent"
+        );
+        // A pass that decides not to arm writes nothing.
+        assert!(claim_remediation(log, "ns/c", |_| None::<()>).is_none());
+        assert!(log.lock().unwrap().get("ns/c").is_none());
     }
 }

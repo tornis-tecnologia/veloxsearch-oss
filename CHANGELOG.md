@@ -57,6 +57,13 @@ are called out explicitly.
   those two actions.
 
 ### Fixed
+- **One wedged recovery could arm several remediations at once (#135):**
+  the #27, #96 and #46 remediations read their cooldown log, released the
+  lock, decided, and only then wrote their placeholder. The sampler and each
+  API reader run these diagnoses concurrently, so every pass in that window
+  armed its own bounce (four within 90 ms on a live cluster). The decision
+  and the claim now happen under one lock guard; a test races eight passes
+  and requires exactly one to arm.
 - The Kubernetes Events integration indexes events again (#104). Every event
   was rejected with `mapper_parsing_exception` ("field name cannot contain
   only the character [.]"): raw Event objects carry `metadata.managedFields`
