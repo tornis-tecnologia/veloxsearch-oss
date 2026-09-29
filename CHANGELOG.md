@@ -57,6 +57,18 @@ are called out explicitly.
   those two actions.
 
 ### Fixed
+- The Kubernetes Events integration indexes events again (#104). Every event
+  was rejected with `mapper_parsing_exception` ("field name cannot contain
+  only the character [.]"): raw Event objects carry `metadata.managedFields`
+  and other empty maps that flatten to dot-only field names, so the
+  `k8s-events` index stayed empty and its dashboard could not resolve its
+  fields. The core now ships a static Lua filter that drops `managedFields`
+  and prunes empty maps, adds the `[FILTER]` stanza that calls it to every
+  k8s-events collector config it deploys (built-in recipe or registry
+  package alike), and mounts the script next to the config. The package
+  template is unchanged, so no registry update is needed. Collectors created
+  before this fix are repaired on the next start of the app; collectors the
+  app does not manage are left alone.
 - **Self-serve signup never provisioned tenant isolation (#122):** the
   runtime ClusterRole in `deploy/install.yaml` had no grant for
   `resourcequotas`, `limitranges` or `networkpolicies`, so the server-side

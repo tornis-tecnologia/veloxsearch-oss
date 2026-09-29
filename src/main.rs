@@ -73,6 +73,10 @@ async fn main() {
     // on a slowing schedule. Inert unless multi-tenancy is on; never blocks.
     tokio::spawn(veloxsearch::tenants::run_isolation_reconcile());
 
+    // #104: repair k8s-events collectors shipped before the prune filter (they
+    // index nothing — every event 400s). Idempotent; best-effort.
+    tokio::spawn(veloxsearch::agents::repair_events_collectors_on_startup());
+
     // Hourly upstream version check (ADR-048 rev. 2): discovers the newest
     // OpenSearch release so a deployment can show an "Upgrade v3.8.0" tag.
     // Suggestion only — it writes nothing and every upgrade still goes through

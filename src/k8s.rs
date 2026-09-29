@@ -248,6 +248,31 @@ pub(crate) async fn delete_dynamic(
     let _ = api.delete(name, &DeleteParams::default()).await;
 }
 
+/// Read one object by literal GVK as JSON, `None` when it does not exist. The
+/// read side of `apply_dynamic`, for reconcilers that must inspect what is live
+/// before deciding whether to re-apply.
+pub(crate) async fn get_dynamic(
+    client: &Client,
+    group: &str,
+    version: &str,
+    kind: &str,
+    namespace: Option<&str>,
+    name: &str,
+) -> Result<Option<serde_json::Value>> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(group, version, kind));
+    let api: Api<DynamicObject> = match namespace {
+        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
+        None => Api::all_with(client.clone(), &ar),
+    };
+    let obj = api
+        .get_opt(name)
+        .await
+        .with_context(|| format!("reading {kind}/{name}"))?;
+    obj.map(serde_json::to_value)
+        .transpose()
+        .with_context(|| format!("serializing {kind}/{name}"))
+}
+
 fn admin_secret_name(name: &str) -> String {
     format!("{name}-admin-credentials")
 }
