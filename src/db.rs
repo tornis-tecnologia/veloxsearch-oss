@@ -75,7 +75,7 @@ pub fn pg_enabled() -> bool {
 }
 
 /// Pure flag parse, split out for tests (the `resolve_ns` idiom, #67).
-fn flag_on(v: Option<String>) -> bool {
+pub(crate) fn flag_on(v: Option<String>) -> bool {
     matches!(
         v.as_deref()
             .map(|s| s.trim().to_ascii_lowercase())

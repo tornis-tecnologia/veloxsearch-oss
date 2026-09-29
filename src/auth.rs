@@ -67,8 +67,19 @@ fn secret() -> String {
     }
     env_or("VELOX_SESSION_SECRET", "dev-insecure-change-me")
 }
+/// The key the ADR-060 cluster profile derives its pseudonyms from. The same
+/// secret that signs sessions, so pseudonyms are stable for the life of the
+/// installation's credentials and change when they are rotated (stated in
+/// the profile schema doc). Never serialized anywhere.
+pub(crate) fn pseudonym_key() -> String {
+    secret()
+}
 fn secure_cookie() -> bool {
-    env_or("VELOX_COOKIE_SECURE", "0") == "1"
+    cookie_secure_from(std::env::var("VELOX_COOKIE_SECURE").ok().as_deref())
+}
+/// Pure parse of `VELOX_COOKIE_SECURE`; absent means "0" (#128).
+pub(crate) fn cookie_secure_from(v: Option<&str>) -> bool {
+    v.unwrap_or("0") == "1"
 }
 
 fn secret_str(s: &Secret, key: &str) -> Option<String> {

@@ -14,7 +14,8 @@ async fn main() {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| veloxsearch::DEFAULT_LOG_FILTER.into()),
         )
         .init();
 
@@ -67,6 +68,14 @@ async fn main() {
     // so an access ConfigMap restored or applied outside Settings takes effect
     // without a manual Save. Best-effort; never blocks serving.
     tokio::spawn(veloxsearch::access::backfill_on_startup());
+
+    // Re-provision tenants whose isolation is missing (#122): at startup, then
+    // on a slowing schedule. Inert unless multi-tenancy is on; never blocks.
+    tokio::spawn(veloxsearch::tenants::run_isolation_reconcile());
+
+    // #104: repair k8s-events collectors shipped before the prune filter (they
+    // index nothing — every event 400s). Idempotent; best-effort.
+    tokio::spawn(veloxsearch::agents::repair_events_collectors_on_startup());
 
     // Hourly upstream version check (ADR-048 rev. 2): discovers the newest
     // OpenSearch release so a deployment can show an "Upgrade v3.8.0" tag.

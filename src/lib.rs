@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pub mod api;
 
+/// The log filter when `RUST_LOG` is absent. Upgrades keep the operator's
+/// `veloxsearch-env`, so a key may be missing there; the binary's default must
+/// then match what `deploy/install.yaml` ships (#128, `install_env`).
+pub const DEFAULT_LOG_FILTER: &str = "info";
+
 #[cfg(feature = "ssr")]
 pub mod k8s;
 
@@ -48,6 +53,11 @@ pub mod otel_stack;
 #[cfg(all(test, feature = "ssr"))]
 mod registry_golden;
 
+// #128 / ADR-057: upgrades keep the operator's `veloxsearch-env`, so the
+// binary must run on a ConfigMap an older install.yaml created. Test-only.
+#[cfg(all(test, feature = "ssr"))]
+mod install_env;
+
 #[cfg(feature = "ssr")]
 pub mod bootstrap;
 
@@ -72,6 +82,11 @@ pub mod metrics;
 
 #[cfg(feature = "ssr")]
 pub mod capacity;
+
+// ADR-060: the bounded, derived cluster profile — a read-only capacity export
+// with its own DTOs, an allowlist of fields and keyed pseudonyms.
+#[cfg(feature = "ssr")]
+pub mod profile;
 
 #[cfg(feature = "ssr")]
 pub mod db;

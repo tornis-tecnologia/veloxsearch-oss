@@ -1,7 +1,7 @@
 # ADR-057 — The upgrade contract: an upgrade changes VeloxSearch, not what it manages
 
 **Status:** proposed
-**Date:** 2026-09-14
+**Date:** 2026-09-14 (amended 2026-09-28, #128: an upgrade keeps `veloxsearch-env`)
 
 ## Context
 
@@ -41,9 +41,10 @@ An upgrade is a rollout of a new VeloxSearch release. It may change:
 
 - **The VeloxSearch control plane in its own namespace**: the `veloxsearch`
   Deployment (image, env, probes), its ServiceAccount, the `veloxsearch-runtime`
-  ClusterRole/Roles and their bindings, the `veloxsearch-env` ConfigMap, the
-  bundled Postgres StatefulSet and its Service, and the default Ingress — i.e.
-  what `deploy/install.yaml` declares.
+  ClusterRole/Roles and their bindings, the bundled Postgres StatefulSet and its
+  Service, and the default Ingress — i.e. what `deploy/install.yaml` declares,
+  except the two documents `upgrade.yaml` leaves out (the bootstrap binding,
+  and the `veloxsearch-env` ConfigMap: see "The operator's settings" below).
 - **The control-plane database, through migrations** (forward-only; see
   DEPLOY.md "Rolling back").
 - **The ADR-055 fields** of an operator-owned Dashboards Deployment
@@ -61,6 +62,8 @@ An upgrade is a rollout of a new VeloxSearch release. It may change:
 - **The `veloxsearch-bootstrap` cluster-admin binding.** An upgrade never
   creates it: the first bootstrap is not repeated, so nothing an upgrade does
   needs cluster-admin.
+- **The operator's settings**, the `veloxsearch-env` ConfigMap (amended by
+  #128; see below).
 
 ### How the code holds it
 
@@ -113,6 +116,43 @@ An upgrade is a rollout of a new VeloxSearch release. It may change:
    `Cargo.toml` version lower than the previous one, so a release's
    `install.yaml` can never pin an older image than the release before it.
 
+### The operator's settings (amendment, #128)
+
+The first version of this ADR listed `veloxsearch-env` among what an upgrade may
+change, and `upgrade.yaml` carried it. That was wrong: ADR-034 makes it the home
+of the operator's non-secret settings (`VELOX_PG_ENABLED`,
+`VELOX_MULTITENANT_AUTH`, the SMTP relay, …), and `kubectl apply` of the
+shipped defaults reverted whatever the operator had set, on every upgrade. On a
+live test cluster that switched multitenancy off and broke tenant sign-in.
+
+1. **`upgrade.yaml` leaves the ConfigMap out.** `deploy/upgrade-manifest.sh`
+   drops exactly one `ConfigMap veloxsearch-env` next to the bootstrap binding,
+   and fails if it finds none or two; `ci.yml` asserts the upgrade manifest is
+   the install manifest minus exactly those two documents. `install.yaml` still
+   creates the ConfigMap, once. After that it belongs to the operator; DEPLOY.md
+   says how to change it (edit, then restart the Pod).
+2. **The binary never needs a key only a newer `install.yaml` adds.** The
+   Deployment takes the ConfigMap through `envFrom`, where an absent key is an
+   unset variable, not a start failure; any future `configMapKeyRef` must be
+   `optional: true`. Every key the ConfigMap ships has a default in code, and
+   that default behaves exactly like the shipped value, so an install that
+   predates a key runs as a fresh install would. `src/install_env.rs` holds
+   both properties against `deploy/install.yaml`: a new key without a code
+   default, a shipped value that differs from the default, or a non-optional
+   `configMapKeyRef` fails `cargo test`.
+3. **The `envFrom` reference itself stays required.** Marking the ConfigMap
+   `optional` would let a Pod start without it — silently on the defaults,
+   multitenancy off — when it was deleted (see the GitOps consequence below).
+   A Pod that refuses to start (`CreateContainerConfigError`) while the old one
+   keeps serving is the louder and safer failure.
+4. **The upgrade lane holds it.** Before the rollout the lane sets a non-default
+   value (`VELOX_PUBLIC_URL`, which only shapes mail links) in
+   `veloxsearch-env`; the documented-upgrade variant asserts the value survived
+   and that the new Pod runs with it, and the ConfigMap's `.data` joins the
+   protected objects the before/after snapshots compare. The operator-down
+   variant re-applies the full `install.yaml`, which carries the ConfigMap, so
+   there the comparison skips that one object.
+
 ### The vendored operator bundle (item 5 of #54)
 
 The bundle's chart label says `opensearch-operator-3.0.2` and its image says
@@ -148,12 +188,26 @@ maintainers (see Consequences).
   installs run.
 - **Two manifests per release.** `install.yaml` for a first install,
   `upgrade.yaml` for everything after. Applying the wrong one is survivable in
-  both directions: `upgrade.yaml` on an empty cluster starts an app whose
-  bootstrap fails with a permission error on the conformity screen; `install.yaml` over an
-  existing install re-grants cluster-admin until the watch revokes it, about a
-  minute once bootstrap is complete, indefinitely on a cluster that still owes
-  the Longhorn install (unchanged from ADR-031). The watch costs one GET per
-  minute in the steady state.
+  both directions: `upgrade.yaml` on an empty cluster creates a Pod that cannot
+  start, because the `veloxsearch-env` ConfigMap it requires does not exist
+  (before #128: an app whose bootstrap failed with a permission error);
+  `install.yaml` over an existing install re-grants cluster-admin until the
+  watch revokes it, about a minute once bootstrap is complete, indefinitely on
+  a cluster that still owes the Longhorn install (unchanged from ADR-031), and
+  resets every setting in `veloxsearch-env` to the shipped default. The watch
+  costs one GET per minute in the steady state.
+- **GitOps installs that prune must own `veloxsearch-env` (#128).** `kubectl
+  apply` without `--prune` deletes nothing, so a ConfigMap `upgrade.yaml`
+  stops declaring simply stays. A GitOps tool that renders `upgrade.yaml` with
+  pruning on (Argo CD or Flux with `prune: true`) DELETES it on the first
+  sync to a release with this change: the running Pod keeps serving, the next
+  one cannot start, and the settings are lost. Such installs must put
+  `veloxsearch-env` in their own overlay, or exclude it from pruning, BEFORE the
+  bump. DEPLOY.md and the CHANGELOG's upgrade notes say so; the release cannot
+  do it for them.
+- **A release's new setting is invisible in an upgraded ConfigMap.** It runs on
+  its default, which is the point, but an operator who wants to change it reads
+  its name and comment in that release's `install.yaml`.
 - **The watch deletes a ClusterRoleBinding without a human in the loop.** It is
   scoped by name *and* by subject to this app's ServiceAccount and namespace.
 - **The upgrade lane is slow** (minikube, cert-manager, the operator and a
@@ -164,6 +218,18 @@ maintainers (see Consequences).
   act the operator owns.
 
 ## Alternatives considered
+
+- **Ship the defaults in a second, release-owned ConfigMap and read the
+  operator's overrides from `veloxsearch-env`** (#128 option 2). Makes every
+  key visible in the cluster after an upgrade, but it is two `envFrom`s whose
+  precedence is an ordering rule in the Deployment, a second object to explain,
+  and it duplicates what the code defaults already say. The code defaults are
+  needed anyway, because the GitOps and `kubectl` paths both allow a key to be
+  absent; the test holding them equal to the shipped values is the single
+  source.
+- **Mark the `envFrom` ConfigMap `optional: true`.** Covers a deleted
+  ConfigMap by starting on the defaults — which silently turns a pruned
+  multitenant install into a single-admin one. Rejected for item 3 above.
 
 - **Image-only upgrades (`kubectl set image`).** Never re-creates the binding and
   never touches anything but the Pod. Lost because releases do change RBAC

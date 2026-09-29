@@ -401,13 +401,15 @@ Three places serve an install manifest. They are not equivalent:
 | Source | What it is |
 | --- | --- |
 | `releases/latest/download/install.yaml` | **Use this.** A release artifact with the image pinned to a **digest**. Immutable: the same URL applied twice gives the same bytes and the same image |
-| `releases/download/v0.11.0/install.yaml` | The same, pinned to one version instead of following the newest |
+| `releases/download/v0.12.0/install.yaml` | The same, pinned to one version instead of following the newest |
 | `deploy/install.yaml` on `main` | The source the release is built from. The image is a version **tag**, not a digest, and `main` moves. CI keeps the tag equal to `Cargo.toml`'s version, so it never names an older release than the tree (#54) — but it is still right for development, wrong for a cluster you care about |
 | `https://get.veloxsearch.ai/install.yml` | A convenience redirect to `releases/latest/download/install.yaml`. The daily `Mirror watch` workflow fails if it stops redirecting there or its bytes differ from the release asset (#37) |
 
 Each release also ships `upgrade.yaml`: the same manifest without the one-time
-`veloxsearch-bootstrap` cluster-admin binding. It is for upgrading an existing
-install, never for a first install (bootstrap needs the binding) — see
+`veloxsearch-bootstrap` cluster-admin binding and without the `veloxsearch-env`
+ConfigMap, so an upgrade keeps your settings. It is for upgrading an existing
+install, never for a first install (bootstrap needs the binding, the Pod needs
+the ConfigMap) — see
 [DEPLOY.md, "Rolling out an upgrade"](DEPLOY.md#rolling-out-an-upgrade).
 
 ### Verifying the image

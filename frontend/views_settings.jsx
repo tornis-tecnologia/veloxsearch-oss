@@ -139,6 +139,15 @@ function RetentionBlock({ t, onToast }) {
               <span className="v" title={r.detail || undefined}>
                 {outcomeLabel(r.outcome)}{r.days ? ` · ${r.days}d` : ""}
                 {r.detail && <span style={{ color: "var(--danger)" }}> — {r.detail}</span>}
+                {(r.otel || []).length > 0 && (
+                  <span style={{ display: "block", fontSize: 12, color: "var(--text-3)" }}>{t.ret_otel_h}</span>
+                )}
+                {(r.otel || []).map(o => (
+                  <span key={o.policy_id} style={{ display: "block", fontSize: 12 }} title={o.detail || undefined}>
+                    {o.policy_id}: {outcomeLabel(o.state)}
+                    {o.detail && <span style={{ color: "var(--danger)" }}> — {o.detail}</span>}
+                  </span>
+                ))}
               </span>
             </div>
           ))}

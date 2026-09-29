@@ -18,7 +18,7 @@ import { STR } from "./i18n.jsx";
 import { API, adaptDeployment } from "./api.jsx";
 import { Logo, Icon, Toast } from "./ui.jsx";
 import { AuthView } from "./views_auth.jsx";
-import { BootstrapView, OperatorDriftNotice } from "./views_bootstrap.jsx";
+import { BootstrapView, OperatorDriftNotice, TenantIsolationNotice } from "./views_bootstrap.jsx";
 import { StatusView } from "./views_status.jsx";
 import { CreateView } from "./views_create.jsx";
 import { CapacityView } from "./views_capacity.jsx";
@@ -355,6 +355,7 @@ function App() {
         </nav>
 
         <OperatorDriftNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
+        <TenantIsolationNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
 
         {route.name === "status" && (
           <StatusView deployments={deployments} lang={lang}

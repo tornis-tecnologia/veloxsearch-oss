@@ -59,7 +59,7 @@ jobs:
 
       # release.yml derives the upgrade asset with this script (ADR-057); a
       # manifest it cannot split must fail on the PR, not on the release.
-      - name: The upgrade manifest drops only the bootstrap binding
+      - name: The upgrade manifest drops only the bootstrap binding and the env ConfigMap
         run: |
           set -euo pipefail
           deploy/upgrade-manifest.sh deploy/install.yaml > upgrade.yaml
@@ -67,12 +67,36 @@ jobs:
           import yaml
           docs = lambda p: [d for d in yaml.safe_load_all(open(p)) if d]
           key = lambda d: (d["kind"], d["metadata"]["name"])
+          dropped = {("ClusterRoleBinding", "veloxsearch-bootstrap"), ("ConfigMap", "veloxsearch-env")}
           full, upgrade = docs("deploy/install.yaml"), docs("upgrade.yaml")
-          expected = [d for d in full if key(d) != ("ClusterRoleBinding", "veloxsearch-bootstrap")]
-          assert len(expected) == len(full) - 1, "install.yaml has no bootstrap binding"
-          assert upgrade == expected, "upgrade.yaml differs from install.yaml beyond the binding"
-          print(f"upgrade.yaml = install.yaml minus the bootstrap binding ({len(upgrade)} documents)")
+          expected = [d for d in full if key(d) not in dropped]
+          assert len(expected) == len(full) - 2, "install.yaml lacks the bootstrap binding or veloxsearch-env"
+          assert upgrade == expected, "upgrade.yaml differs from install.yaml beyond the two dropped documents"
+          print(f"upgrade.yaml = install.yaml minus the bootstrap binding and veloxsearch-env ({len(upgrade)} documents)")
           PY
+
+      # release.yml heads every release's notes with this script's verdict.
+      - name: manifest-changes.sh classifies the fixtures
+        run: python3 tests/manifest_changes_check.py
+
+      # Informational, never failing: shows reviewers whether this tree still
+      # upgrades from the latest release with `kubectl set image` alone.
+      - name: Upgrade impact against the latest release
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          repo="https://github.com/$GITHUB_REPOSITORY"
+          tag=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$repo/releases/latest/download/install.yaml" \
+            | sed -n 's|.*/releases/download/\(v[^/]*\)/install\.yaml$|\1|p')
+          {
+            echo "### Upgrade impact: ${tag:-latest release} → this tree"
+            if [ -n "$tag" ] && curl -fsSL "$repo/releases/download/$tag/install.yaml" -o released-install.yaml \
+               && out=$(deploy/manifest-changes.sh released-install.yaml deploy/install.yaml); then
+              printf '```\n%s\n```\n' "$out"
+            else
+              echo "manifest diff unavailable: could not fetch or compare the latest release's install.yaml"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   rust:
     name: Rust (fmt, clippy, test)

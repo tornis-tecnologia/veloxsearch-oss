@@ -8,6 +8,130 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-29
+
+### Upgrade notes
+- **GitOps with pruning (Argo CD, Flux): own `veloxsearch-env` BEFORE you
+  bump to this release, or the sync DELETES it.** `upgrade.yaml` no longer
+  carries the `veloxsearch-env` ConfigMap (#128). A tool that renders
+  `upgrade.yaml` and prunes will remove the ConfigMap; the next Pod then
+  cannot start and your settings are gone. Add the ConfigMap, with the values
+  you run today, to your own overlay (or annotate it
+  `argocd.argoproj.io/sync-options: Prune=false`) first. See DEPLOY.md,
+  "GitOps installs". `kubectl apply -f upgrade.yaml` users need do nothing.
+
+### Added
+- Release notes now open with an **Upgrade:** line that says whether
+  `kubectl set image` is enough or `upgrade.yaml` has to be applied, with the
+  RBAC, config and other manifest changes listed. `deploy/manifest-changes.sh`
+  compares the previous release's `install.yaml` with the new one, ignoring
+  the image reference, and CI writes the same verdict for every PR to its job
+  summary. See "When is an image-only upgrade enough?" in `docs/DEPLOY.md`.
+- `GET /api/cluster_profile[?names=true]`: a read-only cluster profile
+  (ADR-060, #59). It is one bounded JSON document covering size, shape, load
+  and health: host nodes and storage for the admin, per-deployment indices,
+  shards, disk-watermark headroom and restarts, live rates, and p50/p95 over
+  the sampler's retained window. Tenants get their own deployments plus
+  their quota. Node, deployment and tenant identities are keyed pseudonyms,
+  and real names are added only on opt-in. The fields come from a single
+  allowlist (`profile::FIELDS`) that tests enforce in both directions, and a
+  canary test asserts that no credential, host, address, URL, document body
+  or free text can appear. The profile is only ever sent as that response;
+  nothing is pushed. Schema: `docs/cluster-profile.md`.
+- Capacity view: **Download cluster profile**. It previews the exact JSON,
+  offers a names on/off toggle that refetches, and saves the previewed bytes
+  from the browser with no second request. Strings are translated into
+  pt/en/es, and `tests/profile_dialog_check.py` covers the dialog.
+- The metrics sampler also records `query_total`, `gc_old_millis` and
+  `gc_young_millis`. These fields are additive, and older samples simply
+  lack them.
+
+### Changed
+- **The OTel observability stack's retention follows the deployment's
+  (ADR-062 §6):** its three ISM policies used a hardcoded 30/90 days and
+  ignored the retention default. They now take the deployment's value (the
+  CR annotation, else the installation default, else the built-in), use the
+  same apply-once rule as `velox-retention` (a policy edited inside
+  OpenSearch is left alone), and are covered by "apply default to existing
+  deployments" and "restore default". The deployment's retention panel and
+  the apply report show one row per stack policy. An upgrade does not rewrite
+  existing stack policies. They change only on a stack install or through
+  those two actions.
+
+### Fixed
+- **One wedged recovery could arm several remediations at once (#135):**
+  the #27, #96 and #46 remediations read their cooldown log, released the
+  lock, decided, and only then wrote their placeholder. The sampler and each
+  API reader run these diagnoses concurrently, so every pass in that window
+  armed its own bounce (four within 90 ms on a live cluster). The decision
+  and the claim now happen under one lock guard; a test races eight passes
+  and requires exactly one to arm.
+- The Kubernetes Events integration indexes events again (#104). Every event
+  was rejected with `mapper_parsing_exception` ("field name cannot contain
+  only the character [.]"): raw Event objects carry `metadata.managedFields`
+  and other empty maps that flatten to dot-only field names, so the
+  `k8s-events` index stayed empty and its dashboard could not resolve its
+  fields. The core now ships a static Lua filter that drops `managedFields`
+  and prunes empty maps, adds the `[FILTER]` stanza that calls it to every
+  k8s-events collector config it deploys (built-in recipe or registry
+  package alike), and mounts the script next to the config. The package
+  template is unchanged, so no registry update is needed. Collectors created
+  before this fix are repaired on the next start of the app; collectors the
+  app does not manage are left alone.
+- **Self-serve signup never provisioned tenant isolation (#122):** the
+  runtime ClusterRole in `deploy/install.yaml` had no grant for
+  `resourcequotas`, `limitranges` or `networkpolicies`, so the server-side
+  apply of every tenant's ResourceQuota, LimitRange and default-deny
+  NetworkPolicy set was forbidden. Tenants got a namespace and no walls, and
+  signup still reported success. The ClusterRole now grants `get`, `create`
+  and `patch` on those three resources (no `update`, no `delete`), and
+  `upgrade.yaml` carries it. A test fails the build if a tenant template kind
+  is not appliable by the shipped ClusterRole.
+- **A failed tenant provisioning was only a log line (#122):** tenants whose
+  latest provisioning outcome is not a success are now listed to the admin
+  as a notice (`bootstrap_status.unisolated_tenants`) and re-provisioned at
+  startup, then after 5 min, 15 min, 1 h and every 6 h. Existing tenants
+  created before this fix are provisioned on the first start of the new
+  release. Signup itself is unchanged.
+- The metrics sampler no longer averages OpenSearch's `-1` ("unavailable",
+  e.g. cgroup-confined CPU) into CPU and heap. It averages the nodes that
+  answered, and records nothing when none did.
+- Installing the OTel observability stack on a platform where no log recipe
+  was ever enabled left all five components at 0 ready: their pods run as
+  `velox-agents/velox-agent`, which only the log-agent path created (#125).
+  The stack install now ensures that ServiceAccount and its RBAC through the
+  same `agents::ensure_rbac`. A stack already stuck on it recovers on the
+  next status read or re-install, which recreate only this stack's
+  ReplicaSets whose pod creation failed on that missing account.
+- Uninstalling the OTel stack returned HTTP 500 (#126). Reverting its
+  OpenSearch Dashboards keys was a server-side apply of an empty map. When
+  those were the last keys, that left `additionalConfig: null`, which the
+  CRD rejects (422). The revert is now a merge patch that deletes exactly the
+  keys the stack set, so an emptied map stays `{}`. Turning the
+  next-generation UI off reverts its own keys the same way.
+- After "restore default", an OTel stack index could stay on the old
+  version of its ISM policy (seen on the service map) while the policy
+  itself moved on (ADR-062 §6). The re-attach was a single `change_policy`
+  on the index pattern whose response was never read, so a per-index refusal
+  was lost. It now asks `explain` which indices each policy governs, under
+  its pattern and, for the service map, its physical index name too, and
+  moves the ones on an older version by name. It reads the response and
+  retries refused indices a bounded number of times. It also runs when the
+  policy was already current, so a later pass catches up an index an earlier
+  one missed. Whatever is still refused shows in that policy's row of the
+  apply report.
+- **Upgrading reset the operator's settings (#128):** applying a release's
+  `upgrade.yaml` re-applied the `veloxsearch-env` ConfigMap with the shipped
+  defaults, so values the operator had set there (`VELOX_PG_ENABLED`,
+  `VELOX_MULTITENANT_AUTH`, SMTP, …) reverted on every upgrade; turning
+  multitenancy off broke tenant sign-in. `upgrade.yaml` now leaves the
+  ConfigMap out: `install.yaml` creates it once and it is the operator's from
+  then on. Every key has a default in the binary equal to the shipped value,
+  so a release that adds a key needs no ConfigMap change; a test fails the
+  build if a shipped key lacks one or if an env var would need a ConfigMap key
+  to exist. The N-1 → N upgrade lane sets a non-default value before the
+  upgrade and asserts it reaches the new Pod unchanged (ADR-057).
+
 ## [0.11.0] - 2026-09-27
 
 ### Fixed

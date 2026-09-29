@@ -94,6 +94,19 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["create", "patch"]
+  # Tenant isolation (#81, #122, ADR-044): signup server-side-applies the
+  # deploy/tenant-templates/ ResourceQuota, LimitRange and NetworkPolicy set
+  # into each `velox-t-<slug>` namespace. A server-side apply is a PATCH, and
+  # one that creates the object also needs `create`. No `update` (nothing
+  # replaces these) and no `delete` (there is no tenant teardown; deleting the
+  # namespace would take them with it). Cluster-scoped because tenant
+  # namespaces are created at runtime and no Role can pre-exist in them.
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "create", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "patch"]
   # Conformity probe (REQUIREMENTS.md): CRDs present? version? storage? nodes?
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
@@ -274,9 +287,15 @@ subjects:
     name: veloxsearch
     namespace: veloxsearch-system
 ---
-# Pod environment (ADR-034): non-secret runtime knobs live here, owned by this
-# manifest. (The app's own runtime config — access mode, base domain — lives in
-# the app-managed `veloxsearch-config` ConfigMap, created in-app; ADR-027.)
+# Pod environment (ADR-034): non-secret runtime knobs live here. This manifest
+# creates the ConfigMap with the defaults below; after that it is YOURS. The
+# release's upgrade.yaml does not carry it, so upgrades keep what you set (#128,
+# ADR-057). Change a value with `kubectl -n veloxsearch-system edit configmap
+# veloxsearch-env`, then `kubectl -n veloxsearch-system rollout restart
+# deploy/veloxsearch`. A key missing here runs with the same default the binary
+# ships, so a release that adds a key needs no change to this ConfigMap.
+# (The app's own runtime config — access mode, base domain — lives in the
+# app-managed `veloxsearch-config` ConfigMap, created in-app; ADR-027.)
 # Secrets never go here: credentials are app-managed K8s Secrets (ADR-023/030)
 # or, for operator-provisioned ones, sourced from a vault — see deploy/secrets/.
 apiVersion: v1
@@ -348,7 +367,7 @@ spec:
           # not Cargo.toml's `version` (ci.yml, `manifest-version`), so applying
           # this file from `main` can never roll an install back (#54); the
           # release job pins its published copy to the image digest.
-          image: docker.io/tornistecnologia/veloxsearch-oss:0.11.0
+          image: docker.io/tornistecnologia/veloxsearch-oss:0.12.0
           imagePullPolicy: IfNotPresent
           # Container hardening (#118). The image already runs as uid 10001, but
           # an image USER is a default a cluster can override; this makes it a

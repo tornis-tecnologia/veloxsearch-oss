@@ -248,6 +248,31 @@ pub(crate) async fn delete_dynamic(
     let _ = api.delete(name, &DeleteParams::default()).await;
 }
 
+/// Read one object by literal GVK as JSON, `None` when it does not exist. The
+/// read side of `apply_dynamic`, for reconcilers that must inspect what is live
+/// before deciding whether to re-apply.
+pub(crate) async fn get_dynamic(
+    client: &Client,
+    group: &str,
+    version: &str,
+    kind: &str,
+    namespace: Option<&str>,
+    name: &str,
+) -> Result<Option<serde_json::Value>> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(group, version, kind));
+    let api: Api<DynamicObject> = match namespace {
+        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
+        None => Api::all_with(client.clone(), &ar),
+    };
+    let obj = api
+        .get_opt(name)
+        .await
+        .with_context(|| format!("reading {kind}/{name}"))?;
+    obj.map(serde_json::to_value)
+        .transpose()
+        .with_context(|| format!("serializing {kind}/{name}"))
+}
+
 fn admin_secret_name(name: &str) -> String {
     format!("{name}-admin-credentials")
 }
@@ -2146,26 +2171,26 @@ pub async fn set_next_ui(dep: &Deployment, enable: bool, chosen: bool) -> Result
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
-    let mut cfg = serde_json::Map::new();
+    let keys = next_ui_config();
     if enable {
-        for (k, v) in next_ui_config() {
-            cfg.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-        }
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::apply(UI_FIELD_MANAGER).force(),
+                &Patch::Apply(&dashboards_config_apply(name, &keys)),
+            )
+            .await
+            .context("patching dashboards additionalConfig for the next-gen UI")?;
+    } else {
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(&dashboards_config_removal(keys.iter().map(|(k, _)| *k))),
+            )
+            .await
+            .context("removing the next-gen UI keys from dashboards additionalConfig")?;
     }
-    let manifest = serde_json::json!({
-        "apiVersion": "opensearch.org/v1",
-        "kind": "OpenSearchCluster",
-        "metadata": { "name": name },
-        "spec": { "dashboards": { "additionalConfig": serde_json::Value::Object(cfg) } },
-    });
-    os_api(&client, dep)
-        .patch(
-            name,
-            &PatchParams::apply(UI_FIELD_MANAGER).force(),
-            &Patch::Apply(&manifest),
-        )
-        .await
-        .context("patching dashboards additionalConfig for the next-gen UI")?;
 
     let marker = if enable && chosen {
         serde_json::Value::String("1".to_string())
@@ -2215,9 +2240,10 @@ pub async fn workspaces_enabled(dep: &Deployment) -> bool {
 
 /// Turn the ADR-053 Dashboards config keys on or off.
 ///
-/// Server-side apply under `OTEL_FIELD_MANAGER`, so `enable: false` is an apply
-/// with the keys absent — SSA then removes precisely the keys this manager owns
-/// and leaves anyone else's (an SSO deployment's `opensearch_security.*`) alone.
+/// On: server-side apply under `OTEL_FIELD_MANAGER`. Off: a merge patch that
+/// deletes exactly [`otel_dashboards_config`]'s keys, and leaves anyone else's
+/// (an SSO deployment's `opensearch_security.*`, the next-gen UI's) alone —
+/// see [`dashboards_config_removal`] for why it is not an apply of `{}`.
 ///
 /// ADR-048: touches `spec.dashboards.additionalConfig` only. It never
 /// constructs `spec.general` or `spec.dashboards.version`, so it cannot move a
@@ -2226,27 +2252,58 @@ pub async fn set_dashboards_otel_config(dep: &Deployment, enable: bool) -> Resul
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
-    let mut cfg = serde_json::Map::new();
+    let keys = otel_dashboards_config();
     if enable {
-        for (k, v) in otel_dashboards_config() {
-            cfg.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-        }
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::apply(OTEL_FIELD_MANAGER).force(),
+                &Patch::Apply(&dashboards_config_apply(name, &keys)),
+            )
+            .await
+            .context("patching dashboards additionalConfig")?;
+    } else {
+        os_api(&client, dep)
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(&dashboards_config_removal(keys.iter().map(|(k, _)| *k))),
+            )
+            .await
+            .context("removing the observability keys from dashboards additionalConfig")?;
     }
-    let manifest = serde_json::json!({
+    Ok(())
+}
+
+/// The server-side-apply body that sets `keys` under
+/// `spec.dashboards.additionalConfig`, and nothing else.
+fn dashboards_config_apply(name: &str, keys: &[(&str, &str)]) -> serde_json::Value {
+    let cfg: serde_json::Map<String, serde_json::Value> = keys
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    serde_json::json!({
         "apiVersion": "opensearch.org/v1",
         "kind": "OpenSearchCluster",
         "metadata": { "name": name },
-        "spec": { "dashboards": { "additionalConfig": serde_json::Value::Object(cfg) } },
-    });
-    os_api(&client, dep)
-        .patch(
-            name,
-            &PatchParams::apply(OTEL_FIELD_MANAGER).force(),
-            &Patch::Apply(&manifest),
-        )
-        .await
-        .context("patching dashboards additionalConfig")?;
-    Ok(())
+        "spec": { "dashboards": { "additionalConfig": cfg } },
+    })
+}
+
+/// The merge patch that deletes `keys` from `spec.dashboards.additionalConfig`.
+///
+/// Not a server-side apply of an empty map, which is what this used to be:
+/// when the removed keys were the last ones in the map, the apply left
+/// `additionalConfig: null`, which the CRD rejects (`must be of type object`,
+/// 422), so every uninstall failed at this step (#126). In a JSON merge patch
+/// (RFC 7386) a `null` *member* deletes that key and an emptied map stays
+/// `{}`, so the map itself is never null.
+fn dashboards_config_removal<'a>(keys: impl IntoIterator<Item = &'a str>) -> serde_json::Value {
+    let cfg: serde_json::Map<String, serde_json::Value> = keys
+        .into_iter()
+        .map(|k| (k.to_string(), serde_json::Value::Null))
+        .collect();
+    serde_json::json!({ "spec": { "dashboards": { "additionalConfig": cfg } } })
 }
 
 /// The address the ingress controller answers on.
@@ -3203,11 +3260,12 @@ async fn stall_diagnosis_in(namespace: &str, name: &str) -> crate::activity::Clu
         .lock()
         .ok()
         .and_then(|m| m.get(&key).cloned());
-    let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    if should_remediate(out.recovery_secs, !out.recovery_index.is_empty(), fired_ago) {
-        if let Ok(mut log) = remediation_log().lock() {
-            log.insert(key.clone(), (std::time::Instant::now(), None));
-        }
+    let has_index = !out.recovery_index.is_empty();
+    if claim_remediation(remediation_log(), &key, |ago| {
+        should_remediate(out.recovery_secs, has_index, ago).then_some(())
+    })
+    .is_some()
+    {
         let (ns, nm, idx) = (
             namespace.to_string(),
             name.to_string(),
@@ -3259,6 +3317,25 @@ type RemediationLog =
 fn remediation_log() -> &'static RemediationLog {
     static LOG: std::sync::OnceLock<RemediationLog> = std::sync::OnceLock::new();
     LOG.get_or_init(Default::default)
+}
+
+/// Decide and claim a remediation slot under ONE lock guard. `decide` sees how
+/// long ago this key last fired and returns what to arm; when it arms, the
+/// placeholder entry is written before the guard drops. Reading the log, then
+/// deciding, then re-locking to insert let every status pass that read in
+/// between arm its own bounce: one stall armed four remediations within 90 ms,
+/// because the sampler and each API reader run these diagnoses concurrently.
+/// A poisoned lock arms nothing.
+fn claim_remediation<V, T>(
+    log: &std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<V>)>>,
+    key: &str,
+    decide: impl FnOnce(Option<std::time::Duration>) -> Option<T>,
+) -> Option<T> {
+    let mut map = log.lock().ok()?;
+    let ago = map.get(key).map(|(at, _)| at.elapsed());
+    let armed = decide(ago)?;
+    map.insert(key.to_string(), (std::time::Instant::now(), None));
+    Some(armed)
 }
 
 /// The pure decision — budget elapsed, something nameable, cooldown respected
@@ -3857,13 +3934,16 @@ async fn restart_wave_watch(
     // Arm the #27 remediation on the wave's trigger — same dance as the
     // stalled path: placeholder first (so a concurrent pass sees a
     // just-fired entry), then the bounce updates the log with the pod.
+    // The hand-back below reasons about the episode this pass started from.
     let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    let armed = restart_wave_should_remediate(&rows, fired_ago);
+    // Arming, though, is decided against the log as it is NOW, not as it was
+    // before the `_cat/recovery` round trip: a concurrent pass may have armed
+    // meanwhile.
+    let armed = claim_remediation(remediation_log(), &key, |ago| {
+        restart_wave_should_remediate(&rows, ago)
+    });
     let armed_this_pass = armed.is_some();
     if let Some((index, secs)) = armed {
-        if let Ok(mut log) = remediation_log().lock() {
-            log.insert(key.clone(), (std::time::Instant::now(), None));
-        }
         let (ns, nm, idx) = (namespace.to_string(), name.to_string(), index);
         tracing::warn!(
             "#96 restart-wave remediation armed for {ns}/{nm}: recovery of {idx} wedged in \
@@ -4070,16 +4150,12 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
         .lock()
         .ok()
         .and_then(|m| m.get(&key).cloned());
-    let fired_ago = last.as_ref().map(|(at, _)| at.elapsed());
-    if should_remediate_dashboards(
-        out.restarts,
-        &out.waiting_reason,
-        last_terminated_ago,
-        fired_ago,
-    ) {
-        if let Ok(mut log) = dashboards_remediation_log().lock() {
-            log.insert(key.clone(), (std::time::Instant::now(), None));
-        }
+    if claim_remediation(dashboards_remediation_log(), &key, |ago| {
+        should_remediate_dashboards(out.restarts, &out.waiting_reason, last_terminated_ago, ago)
+            .then_some(())
+    })
+    .is_some()
+    {
         let (ns, nm) = (namespace.to_string(), name.to_string());
         tracing::warn!(
             "#46 dashboards remediation armed for {ns}/{nm}: {} restarts ({})",
@@ -4102,6 +4178,41 @@ async fn dashboards_block_in(namespace: &str, name: &str) -> crate::activity::Da
         cache.insert(key, (std::time::Instant::now(), out.clone()));
     }
     out
+}
+
+/// Container restarts of a deployment's node-pool pods and of its Dashboards
+/// pods, each summed across containers — for the ADR-060 cluster profile.
+/// Cumulative since each pod was created, so a roll resets it. The same `pods`
+/// read `dashboards_block_in`/`node_pod_block_in` make, but side-effect free:
+/// those two arm remediations, and a read-only export must never do that.
+/// `None` when the pods could not be listed.
+pub async fn pod_restarts(dep: &Deployment) -> Option<(i64, i64)> {
+    use k8s_openapi::api::core::v1::Pod;
+    let client = client().await.ok()?;
+    let pods: Api<Pod> = Api::namespaced(client, dep.namespace());
+    let list = pods.list(&ListParams::default()).await.ok()?;
+    let (nodes_prefix, dash_prefix) = (
+        format!("{}-nodes-", dep.name()),
+        format!("{}-dashboards", dep.name()),
+    );
+    let (mut nodes, mut dashboards) = (0i64, 0i64);
+    for pod in list {
+        let name = pod.metadata.name.as_deref().unwrap_or_default();
+        let slot = if name.starts_with(&nodes_prefix) {
+            &mut nodes
+        } else if name.starts_with(&dash_prefix) {
+            &mut dashboards
+        } else {
+            continue;
+        };
+        let statuses = pod.status.and_then(|s| s.container_statuses);
+        *slot += statuses
+            .unwrap_or_default()
+            .iter()
+            .map(|cs| i64::from(cs.restart_count))
+            .sum::<i64>();
+    }
+    Some((nodes, dashboards))
 }
 
 /// TTL cache for the node-pod half (#97), same contract as `diagnosis_cache`:
@@ -5205,6 +5316,11 @@ pub struct RetentionOnCr {
     pub stamp: Option<String>,
     /// `retention::SOURCE_ANNOTATION`, raw; `None` on CRs that predate it.
     pub source: Option<String>,
+    /// Whether the OTel stack is installed (ADR-053): its three policies then
+    /// follow this deployment's retention too.
+    pub otel_stack: bool,
+    /// `retention::OTEL_STAMP_ANNOTATION`, raw.
+    pub otel_stamps: Option<String>,
 }
 
 fn retention_from(
@@ -5217,6 +5333,12 @@ fn retention_from(
         stamp: annotations.get(crate::retention::STAMP_ANNOTATION).cloned(),
         source: annotations
             .get(crate::retention::SOURCE_ANNOTATION)
+            .cloned(),
+        otel_stack: annotations
+            .get(LABEL_OTEL_STACK)
+            .is_some_and(|v| !v.is_empty()),
+        otel_stamps: annotations
+            .get(crate::retention::OTEL_STAMP_ANNOTATION)
             .cloned(),
     }
 }
@@ -5264,6 +5386,21 @@ pub async fn set_retention(
         .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
         .await
         .context("patching the retention annotations")?;
+    Ok(())
+}
+
+/// Record what velox last wrote to the OTel stack's retention policies
+/// (`retention::OTEL_STAMP_ANNOTATION`). A merge patch on that one key, like
+/// `set_retention`: it cannot touch the spec.
+pub async fn set_otel_retention_stamps(dep: &Deployment, stamps: &str) -> Result<()> {
+    let client = client().await?;
+    let patch = serde_json::json!({
+        "metadata": { "annotations": { crate::retention::OTEL_STAMP_ANNOTATION: stamps } }
+    });
+    os_api(&client, dep)
+        .patch(dep.name(), &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("patching the OTel retention stamps")?;
     Ok(())
 }
 
@@ -7621,6 +7758,74 @@ mod tests {
         );
     }
 
+    // ── runtime RBAC covers tenant isolation (#122) ───────────────────
+
+    /// Every kind `provision_tenant` applies must be appliable by the runtime
+    /// ClusterRole as shipped in `deploy/install.yaml`. Server-side apply is a
+    /// PATCH that creates the object when absent, so `get`, `create` and
+    /// `patch` are the floor. Tenant namespaces are created at runtime, so the
+    /// grant has to be cluster-scoped: no Role can pre-exist inside them.
+    ///
+    /// A template kind added without its grant fails here, not at a
+    /// customer's signup (#122: every tenant ran without walls because this
+    /// grant was documented but never shipped).
+    #[test]
+    fn runtime_cluster_role_can_apply_every_tenant_template_kind() {
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let cluster = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .find(|v| {
+                v["kind"].as_str() == Some("ClusterRole")
+                    && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+            })
+            .expect("runtime ClusterRole");
+        let grants = |group: &str, resource: &str, verb: &str| {
+            cluster["rules"]
+                .as_sequence()
+                .into_iter()
+                .flatten()
+                .any(|r| {
+                    let has = |k: &str, x: &str| {
+                        r[k].as_sequence()
+                            .into_iter()
+                            .flatten()
+                            .any(|e| e.as_str() == Some(x))
+                    };
+                    has("apiGroups", group) && has("resources", resource) && has("verbs", verb)
+                })
+        };
+
+        let bundle = rendered();
+        assert!(!bundle.is_empty());
+        for doc in &bundle {
+            let kind = doc["kind"].as_str().expect("template has a kind");
+            let api_version = doc["apiVersion"]
+                .as_str()
+                .expect("template has an apiVersion");
+            let group = api_version.split_once('/').map_or("", |(g, _)| g);
+            // Kind → REST resource. Explicit on purpose: a naive plural gets
+            // NetworkPolicy wrong, and a new kind must be looked at, not guessed.
+            let resource = match kind {
+                "Namespace" => "namespaces",
+                "ResourceQuota" => "resourcequotas",
+                "LimitRange" => "limitranges",
+                "NetworkPolicy" => "networkpolicies",
+                other => panic!(
+                    "tenant template kind {other} is new: map it to its resource here and \
+                     grant it to the runtime ClusterRole in deploy/install.yaml"
+                ),
+            };
+            for verb in ["get", "create", "patch"] {
+                assert!(
+                    grants(group, resource, verb),
+                    "the runtime ClusterRole cannot `{verb}` {resource} (apiGroup \
+                     {group:?}) — provision_tenant would be forbidden on {kind}"
+                );
+            }
+        }
+    }
+
     // ── stall-remediation policy (#27) ─────────────────────────────────
     //
     // The ACTIONS (throttle raise, pod bounce) are fleet-validated, not
@@ -9327,5 +9532,158 @@ mod tests {
 
         // Unconfigured deployments report nothing at all.
         assert!(!snapshot_state_from(&SnapshotConfig::default(), None, true).configured);
+    }
+
+    // ── #126: reverting the Dashboards config keys ──────────────────────
+
+    /// RFC 7386 JSON merge patch, as the API server applies `Patch::Merge`.
+    fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+        let Some(p) = patch.as_object() else {
+            *target = patch.clone();
+            return;
+        };
+        if !target.is_object() {
+            *target = serde_json::json!({});
+        }
+        let t = target.as_object_mut().unwrap();
+        for (k, v) in p {
+            if v.is_null() {
+                t.remove(k);
+            } else {
+                merge_patch(t.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+            }
+        }
+    }
+
+    fn cr_with(keys: &[(&str, &str)]) -> serde_json::Value {
+        let cfg: serde_json::Map<String, serde_json::Value> = keys
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+            .collect();
+        serde_json::json!({ "spec": { "dashboards": { "enable": true, "additionalConfig": cfg } } })
+    }
+
+    #[test]
+    fn removing_the_last_stack_keys_leaves_an_object_never_null() {
+        // The live 422: the stack's keys were the only ones left, and the old
+        // empty-map apply turned the map itself into null. The CRD types it
+        // `object` without `nullable`, so the result must still be one.
+        let mut cr = cr_with(&otel_dashboards_config());
+        let patch = dashboards_config_removal(otel_dashboards_config().iter().map(|(k, _)| *k));
+        assert!(
+            patch["spec"]["dashboards"]["additionalConfig"].is_object(),
+            "the map itself must never be sent as null"
+        );
+        merge_patch(&mut cr, &patch);
+        assert_eq!(
+            cr["spec"]["dashboards"]["additionalConfig"],
+            serde_json::json!({})
+        );
+        assert_eq!(cr["spec"]["dashboards"]["enable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn removal_deletes_only_the_stack_keys() {
+        let theirs = [
+            ("opensearch_security.auth.type", "openid"),
+            ("workspace.enabled", "true"),
+        ];
+        let mut all: Vec<(&str, &str)> = otel_dashboards_config().to_vec();
+        all.extend(theirs);
+        let mut cr = cr_with(&all);
+        let patch = dashboards_config_removal(otel_dashboards_config().iter().map(|(k, _)| *k));
+        // Every member is a key deletion and nothing else rides along.
+        let members = patch["spec"]["dashboards"]["additionalConfig"]
+            .as_object()
+            .unwrap();
+        assert_eq!(members.len(), otel_dashboards_config().len());
+        assert!(members.values().all(serde_json::Value::is_null));
+        assert_eq!(patch["spec"]["dashboards"].as_object().unwrap().len(), 1);
+        merge_patch(&mut cr, &patch);
+        assert_eq!(
+            cr["spec"]["dashboards"]["additionalConfig"],
+            cr_with(&theirs)["spec"]["dashboards"]["additionalConfig"]
+        );
+    }
+
+    #[test]
+    fn install_and_revert_address_the_same_keys() {
+        // Revert matches install: whatever the apply sets, the removal deletes.
+        for keys in [otel_dashboards_config().to_vec(), next_ui_config().to_vec()] {
+            let applied = dashboards_config_apply("d", &keys);
+            let removed = dashboards_config_removal(keys.iter().map(|(k, _)| *k));
+            let a: std::collections::BTreeSet<&String> = applied["spec"]["dashboards"]
+                ["additionalConfig"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect();
+            let r: std::collections::BTreeSet<&String> = removed["spec"]["dashboards"]
+                ["additionalConfig"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect();
+            assert_eq!(a, r);
+        }
+    }
+
+    // ── single-flight remediation claims ───────────────────────────────
+
+    type TestLog =
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>;
+
+    #[test]
+    fn concurrent_passes_arm_exactly_one_remediation() {
+        // Eight status passes racing on one wedged deployment: the shape that
+        // armed four bounces within 90 ms on a live cluster. Exactly one may
+        // claim; the rest must see its placeholder under the cooldown.
+        let log: &'static TestLog = Box::leak(Box::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    claim_remediation(log, "ns/dep", |ago| {
+                        // Widen the window the old read-then-insert left open.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        should_remediate(REMEDIATE_AFTER_SECS, true, ago).then_some(())
+                    })
+                    .is_some()
+                })
+            })
+            .collect();
+        let armed = handles
+            .into_iter()
+            .map(|h| h.join().expect("claim thread"))
+            .filter(|armed| *armed)
+            .count();
+        assert_eq!(armed, 1, "one wedged recovery must arm one remediation");
+        let map = log.lock().unwrap();
+        assert!(
+            map.get("ns/dep").is_some_and(|(_, pod)| pod.is_none()),
+            "placeholder claimed"
+        );
+    }
+
+    #[test]
+    fn a_claim_respects_the_cooldown_and_other_keys() {
+        let log: &'static TestLog = Box::leak(Box::default());
+        let eligible = |ago: Option<std::time::Duration>| {
+            should_remediate(REMEDIATE_AFTER_SECS, true, ago).then_some(())
+        };
+        assert!(claim_remediation(log, "ns/a", eligible).is_some());
+        assert!(
+            claim_remediation(log, "ns/a", eligible).is_none(),
+            "cooldown holds"
+        );
+        assert!(
+            claim_remediation(log, "ns/b", eligible).is_some(),
+            "keys are independent"
+        );
+        // A pass that decides not to arm writes nothing.
+        assert!(claim_remediation(log, "ns/c", |_| None::<()>).is_none());
+        assert!(log.lock().unwrap().get("ns/c").is_none());
     }
 }

@@ -20,9 +20,13 @@ Subcommands:
       Record what the upgrade must not change: the operator Deployment (.spec,
       image), cert-manager Deployments, operator + cert-manager CRDs (.spec),
       every OpenSearchCluster .spec, and the `veloxsearch-bootstrap` field
-      manager's entries on each of them.
-  compare  <before.json> <after.json>
-      Fail on any difference in the above.
+      manager's entries on each of them; and the operator's settings, the
+      `veloxsearch-env` ConfigMap's .data (#128).
+  compare  <before.json> <after.json> [--skip <key>]...
+      Fail on any difference in the above, except in the snapshot keys named
+      by --skip.
+  env      set|expect <KEY> <VALUE>
+      Set one key of `veloxsearch-env`, or assert it holds VALUE (#128).
   green    <base> <user> <pw> <state.json> [--timeout S]
       Log in and wait for the recorded deployment to be green.
   binding  gone|present [--timeout S]
@@ -47,6 +51,8 @@ OPERATOR = "opensearch-operator"
 CERT_MANAGER_NS = "cert-manager"
 CERT_MANAGER_DEPLOYS = ["cert-manager", "cert-manager-webhook", "cert-manager-cainjector"]
 BOOTSTRAP_MANAGER = "veloxsearch-bootstrap"
+ENV_CONFIGMAP = "veloxsearch-env"
+ENV_SNAPSHOT_KEY = f"configmap/{APP_NS}/{ENV_CONFIGMAP}"
 CRD_GROUPS = ("opensearch.org", "opensearch.opster.io", "cert-manager.io")
 
 _JAR = http.cookiejar.CookieJar()
@@ -136,6 +142,34 @@ def kubectl_json(*args):
     return json.loads(out)
 
 
+HOLD_ANNOTATION = "veloxsearch.ai/dashboards-hold"
+# Fully qualified: the vendored operator also ships the legacy
+# opensearch.opster.io CRD with the same plural, and a bare
+# `opensearchclusters` resolves to that empty one.
+OSC_RESOURCE = "opensearchclusters.opensearch.org"
+
+
+def wait_hold_released(name, secs):
+    """Wait until the deployment's Dashboards first-boot hold (ADR-063) is gone.
+
+    From 0.11.0 on, velox releases the hold by patching spec.dashboards.replicas
+    0 -> 1 once the cluster has settled, which can land minutes after green. A
+    baseline taken before that sees a legitimate write as upgrade drift. An N-1
+    without the hold never carries the annotation, so this returns at once.
+    """
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        items = kubectl_json("get", OSC_RESOURCE, "-A")["items"]
+        cr = next((i for i in items if i["metadata"]["name"] == name), None)
+        if cr is None:
+            fail(f"no OpenSearchCluster named {name}")
+        if HOLD_ANNOTATION not in (cr["metadata"].get("annotations") or {}):
+            ok(f"{name} carries no Dashboards hold")
+            return
+        time.sleep(15)
+    fail(f"{name} still holds Dashboards after {secs}s")
+
+
 def bootstrap_entries(obj):
     """The veloxsearch-bootstrap field manager's managedFields entries.
 
@@ -165,11 +199,15 @@ def snapshot():
     for crd in kubectl_json("get", "customresourcedefinitions")["items"]:
         if crd["spec"]["group"] in CRD_GROUPS:
             snap[f"crd/{crd['metadata']['name']}"] = record(crd)
-    for cr in kubectl_json("get", "opensearchclusters.opensearch.org", "-A")["items"]:
+    for cr in kubectl_json("get", OSC_RESOURCE, "-A")["items"]:
         m = cr["metadata"]
         snap[f"opensearchcluster/{m['namespace']}/{m['name']}"] = record(cr)
     if not any(k.startswith("opensearchcluster/") for k in snap):
         fail("snapshot found no OpenSearchCluster — the lane has nothing to protect")
+    # The operator's settings (ADR-034): an upgrade applies no veloxsearch-env,
+    # so its data must come out exactly as it went in (#128).
+    env = kubectl_json("-n", APP_NS, "get", "configmap", ENV_CONFIGMAP)
+    snap[ENV_SNAPSHOT_KEY] = {"data": env.get("data") or {}}
     return snap
 
 
@@ -195,9 +233,12 @@ def first_difference(a, b, path=""):
     return None if a == b else path
 
 
-def compare(before, after):
+def compare(before, after, skip=()):
     bad = []
     for key in sorted(set(before) | set(after)):
+        if key in skip:
+            print(f"  skip: {key}")
+            continue
         if key not in after:
             bad.append(f"{key}: disappeared")
             continue
@@ -205,7 +246,7 @@ def compare(before, after):
             # A NEW operator/cert-manager CRD is an upgrade changing CRDs.
             bad.append(f"{key}: appeared during the upgrade")
             continue
-        for part in ("spec", "images", "bootstrap_managed"):
+        for part in ("spec", "images", "bootstrap_managed", "data"):
             d = first_difference(before[key].get(part), after[key].get(part))
             if d is not None:
                 bad.append(f"{key}: {part} changed at {d}")
@@ -213,7 +254,9 @@ def compare(before, after):
         for b in bad:
             print("  DIFF:", b)
         fail(f"{len(bad)} object(s) the upgrade must not change were changed (ADR-057)")
-    ok(f"{len(before)} protected objects unchanged (specs, images, {BOOTSTRAP_MANAGER} fields)")
+    checked = len(set(before) - set(skip))
+    ok(f"{checked} protected objects unchanged (specs, images, {BOOTSTRAP_MANAGER} fields, "
+       f"{ENV_CONFIGMAP} data)")
 
 
 def binding_present():
@@ -224,6 +267,30 @@ def binding_present():
     if "NotFound" in r.stderr:
         return False
     fail(f"could not read clusterrolebinding {BOOTSTRAP_MANAGER}: {r.stderr.strip()}")
+
+
+def env_value(key):
+    data = kubectl_json("-n", APP_NS, "get", "configmap", ENV_CONFIGMAP).get("data") or {}
+    return data.get(key)
+
+
+def cmd_env(args):
+    action, key, value = args[0], args[1], args[2]
+    if action == "set":
+        patch = json.dumps({"data": {key: value}})
+        subprocess.run(["kubectl", "-n", APP_NS, "patch", "configmap", ENV_CONFIGMAP,
+                        "--type", "merge", "-p", patch], check=True)
+        if env_value(key) != value:
+            fail(f"{ENV_CONFIGMAP} {key} did not take the value {value!r}")
+        ok(f"{ENV_CONFIGMAP} {key}={value!r} (an operator setting)")
+    elif action == "expect":
+        got = env_value(key)
+        if got != value:
+            fail(f"{ENV_CONFIGMAP} {key} is {got!r} after the upgrade, the operator set "
+                 f"{value!r}: the upgrade reset an operator setting (#128)")
+        ok(f"{ENV_CONFIGMAP} {key} kept the operator's {value!r}")
+    else:
+        fail(f"env: unknown action {action!r} (set|expect)")
 
 
 def operator_replicas():
@@ -274,6 +341,8 @@ def cmd_prepare(args):
     with open(state_file, "w") as f:
         json.dump({"deployment": name}, f)
     wait_green(name, 1800)
+    # The baseline must follow the hold's release, not race it.
+    wait_hold_released(name, 1500)
 
 
 def cmd_green(args):
@@ -350,14 +419,17 @@ def main():
             json.dump(snapshot(), f, indent=1, sort_keys=True)
         ok(f"snapshot written to {rest[0]}")
     elif cmd == "compare":
+        skip = {rest[i + 1] for i, a in enumerate(rest) if a == "--skip"}
         with open(rest[0]) as a, open(rest[1]) as b:
-            compare(json.load(a), json.load(b))
+            compare(json.load(a), json.load(b), skip)
     elif cmd == "green":
         cmd_green(rest)
     elif cmd == "binding":
         cmd_binding(rest)
     elif cmd == "ensure-noop":
         cmd_ensure_noop(rest)
+    elif cmd == "env":
+        cmd_env(rest)
     else:
         print(__doc__)
         sys.exit(2)

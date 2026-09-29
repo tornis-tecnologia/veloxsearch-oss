@@ -104,13 +104,17 @@ Apply the **upgrade manifest of the version you are moving to** — never
 release than the one running:
 
 ```sh
-VERSION=0.11.0   # the release you are upgrading TO
+VERSION=0.12.0   # the release you are upgrading TO
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/v$VERSION/upgrade.yaml
 kubectl -n veloxsearch-system rollout status deploy/veloxsearch
 ```
 
 `upgrade.yaml` is the release's `install.yaml` — the same digest-pinned image,
-the same runtime RBAC — minus one document: the `veloxsearch-bootstrap`
+the same runtime RBAC — minus two documents. One is the `veloxsearch-env`
+ConfigMap, so **your settings survive the upgrade** (see
+[below](#your-settings-survive-the-upgrade); **GitOps users with pruning on must
+read [the GitOps note](#gitops-installs-argo-cd-flux-own-veloxsearch-env-before-you-bump)
+before bumping**). The other is the `veloxsearch-bootstrap`
 ClusterRoleBinding to `cluster-admin`. That binding exists only for the first
 bootstrap, which an upgrade does not repeat, so **an upgrade never grants
 cluster-admin**. Confirm it:
@@ -129,6 +133,16 @@ The whole manifest is applied, not just the image (`kubectl set image`), because
 a release can need RBAC the previous one did not have — ADR-055 added `patch` on
 `apps/deployments`, for example — and an image-only upgrade would start the new
 binary without it.
+
+**When is an image-only upgrade enough?** When the release notes say so. Every
+release opens with an **Upgrade:** line produced by
+`deploy/manifest-changes.sh`, which compares the release's `install.yaml` with
+the previous release's, image reference ignored. "image-only ✓" means nothing
+but the image moved and gives the exact `kubectl set image` command; otherwise
+the line names what changed (`rbac`, `config`, `other`) with the details in a
+collapsible block, and `upgrade.yaml` is the way. Skipping releases means
+checking every release in between. Each pull request's CI summary shows the
+same verdict for the tree against the latest release.
 
 **Releases published before `upgrade.yaml` existed** ship only `install.yaml`.
 Applying one of those re-creates the binding. From this release on, the running
@@ -149,6 +163,55 @@ Database migrations run **before** the app serves and exit the process on
 failure. A rollout that fails to migrate therefore fails closed: the old Pod
 keeps serving until the new one is ready, and the new one never becomes ready
 with a half-applied store.
+
+### Your settings survive the upgrade
+
+`upgrade.yaml` leaves out the `veloxsearch-env` ConfigMap, the Pod's
+non-secret settings (`VELOX_PG_ENABLED`, `VELOX_MULTITENANT_AUTH`, the SMTP
+relay, `VELOX_PUBLIC_URL`, …). `install.yaml` creates it once with the shipped
+defaults; after that it is yours, and an upgrade does not touch it (#128). A
+release that introduces a new key needs nothing from you: a key missing from
+the ConfigMap runs with the same default the release ships.
+
+To change a setting, edit the ConfigMap and restart the Pod — the Pod reads it
+only at start:
+
+```sh
+kubectl -n veloxsearch-system edit configmap veloxsearch-env
+kubectl -n veloxsearch-system rollout restart deploy/veloxsearch
+```
+
+To see a key a newer release added, with its comment, read that release's
+`install.yaml`. Re-applying `install.yaml` over an existing install resets every
+setting to the shipped default — one more reason to upgrade with `upgrade.yaml`.
+
+### GitOps installs (Argo CD, Flux): own `veloxsearch-env` before you bump
+
+> **Warning.** If your GitOps source renders a release's `upgrade.yaml` and
+> **pruning is on**, the first sync to a release whose `upgrade.yaml` leaves the
+> ConfigMap out (every release after 0.11.0) **deletes the `veloxsearch-env`
+> ConfigMap**, because the manifest no longer declares it. The
+> running Pod keeps working, but the next Pod cannot start
+> (`CreateContainerConfigError`: the Deployment requires the ConfigMap), and
+> whatever you had set there is gone.
+
+Before you bump to such a release, do one of these:
+
+- **Own the ConfigMap in your repository** (recommended). Add a
+  `veloxsearch-env` ConfigMap in namespace `veloxsearch-system` to your overlay,
+  with the values you run today (`kubectl -n veloxsearch-system get configmap
+  veloxsearch-env -o yaml`, without the server-set metadata). Git is then the
+  source of truth for your settings, which is what GitOps wants anyway, and the
+  upgrade manifest never competes with it.
+- **Or exclude it from pruning.** Annotate the live ConfigMap with
+  `argocd.argoproj.io/sync-options: Prune=false` (Argo CD) or
+  `kustomize.toolkit.fluxcd.io/prune: disabled` (Flux). It then stays, outside
+  git; Argo CD shows it as needing pruning and leaves it alone.
+
+A GitOps source that renders `install.yaml` instead is not affected — it keeps
+declaring the ConfigMap, with the shipped defaults, exactly as before (and a
+second `veloxsearch-env` in your overlay would collide with it: patch the
+rendered one instead).
 
 ## Rolling back
 
@@ -179,7 +242,7 @@ changed. What to do depends on why:
   namespace it was rendered into to the app namespace:
 
   ```sh
-  VERSION=0.11.0
+  VERSION=0.12.0
   curl -fsSL https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/v$VERSION/deploy/bootstrap/operator.yaml \
     | sed 's/veloxsearch-test/veloxsearch-system/g' \
     | kubectl apply --server-side --field-manager=veloxsearch-bootstrap --force-conflicts -f -
