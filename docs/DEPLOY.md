@@ -104,7 +104,7 @@ Apply the **upgrade manifest of the version you are moving to** — never
 release than the one running:
 
 ```sh
-VERSION=0.11.0   # the release you are upgrading TO
+VERSION=0.12.0   # the release you are upgrading TO
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/v$VERSION/upgrade.yaml
 kubectl -n veloxsearch-system rollout status deploy/veloxsearch
 ```
@@ -242,7 +242,7 @@ changed. What to do depends on why:
   namespace it was rendered into to the app namespace:
 
   ```sh
-  VERSION=0.11.0
+  VERSION=0.12.0
   curl -fsSL https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/v$VERSION/deploy/bootstrap/operator.yaml \
     | sed 's/veloxsearch-test/veloxsearch-system/g' \
     | kubectl apply --server-side --field-manager=veloxsearch-bootstrap --force-conflicts -f -

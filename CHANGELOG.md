@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-29
+
 ### Upgrade notes
 - **GitOps with pruning (Argo CD, Flux): own `veloxsearch-env` BEFORE you
   bump to this release, or the sync DELETES it.** `upgrade.yaml` no longer
