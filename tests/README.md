@@ -22,6 +22,7 @@ when you reshape a screen.
 | `create_submit_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | The create button disables from the first click and sends one request; it holds `create_cluster` in the browser, so it never provisions anything (#56) |
 | `profile_dialog_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | The Capacity view's cluster-profile dialog (ADR-060): one request per names setting, and the saved file is byte-for-byte the preview. It answers `cluster_profile` and `cluster_capacity` in the browser |
 | `frontend_robustness_check.py <base> [shots_dir]` | Playwright, **no cluster or backend needed** | Copy buttons report the truth with the Clipboard API denied or missing, render errors stay inside an error boundary, and tooltips are translated in pt/en/es (#141). It answers every `/api/*` call in the browser, so a static server over `frontend/build` is enough: `python3 -m http.server -d frontend/build 8099` |
+| `access_settings_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | Settings → Access shows why an ingress class the cluster lacks cannot be saved, and disables Save until one it has (or port-forward) is picked (#139). It answers `access_settings` and `save_access_settings` in the browser |
 | `browser_check.py <base> <user> <pw>` | Playwright | Browser smoke plus a network gate: the console must stay free of hydration and panic errors |
 
 `<base>` is the URL the app is reachable at, e.g. `http://localhost:3000` behind

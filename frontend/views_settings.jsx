@@ -210,9 +210,14 @@ function SettingsView({ lang, onToast, buildInfo, isTenant }) {
     }
   }
 
-  // Offer detected IngressClasses; fall back to the common controllers when
-  // the cluster hasn't reported any (keeps the select usable).
-  const classOptions = classes.length ? classes : ["traefik", "nginx", "istio"];
+  // Offer only the IngressClasses the cluster has (#139): the backend refuses
+  // any other, because every create would then fail on its route. A stored
+  // class the cluster lacks stays listed so the select shows what is saved.
+  const classOptions = !ingress || classes.includes(ingress) ? classes : [ingress, ...classes];
+  const classErr = access === "ingress" && loaded
+    ? (!classes.length ? t.ingress_no_class
+      : !classes.includes(ingress) ? fmtS(t.ingress_class_missing, ingress) : "")
+    : "";
 
   // Cheap, honest PEM check: catches the overwhelmingly common mistake (pasting
   // the wrong file, or a fingerprint) without pretending to validate a
@@ -230,7 +235,7 @@ function SettingsView({ lang, onToast, buildInfo, isTenant }) {
   // becomes required rather than silently failing on save.
   const effectiveDomain = domain.trim() || defaultDomain;
   const domainMissing = access === "ingress" && !effectiveDomain;
-  const blocked = !!(certErr || keyErr || pairErr) || domainMissing;
+  const blocked = !!(certErr || keyErr || pairErr || classErr) || domainMissing;
   // Switching away from ingress orphans the per-deployment Ingresses.
   const modeChanged = loaded && access !== loaded.mode;
 
@@ -284,8 +289,8 @@ function SettingsView({ lang, onToast, buildInfo, isTenant }) {
                 <code style={{ fontSize: 11.5 }}>{`meu-cluster-traces.${defaultDomain}`}</code>
               </p>
             )}
-            <Field label={t.ingress_class}>
-              <select className="select" value={ingress} onChange={e => setIngress(e.target.value)}>
+            <Field label={t.ingress_class} error={classErr}>
+              <select className="select" data-testid="ingress-class" value={ingress} onChange={e => setIngress(e.target.value)}>
                 {classOptions.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </Field>
@@ -311,7 +316,7 @@ function SettingsView({ lang, onToast, buildInfo, isTenant }) {
           </div>
         )}
 
-        <Btn variant="primary" icon="check" disabled={busy || blocked} onClick={save} style={{ marginTop: 6 }}>{t.save}</Btn>
+        <Btn variant="primary" icon="check" data-testid="access-save" disabled={busy || blocked} onClick={save} style={{ marginTop: 6 }}>{t.save}</Btn>
       </div>
 
       {!isTenant && <RetentionBlock t={t} onToast={onToast} />}
