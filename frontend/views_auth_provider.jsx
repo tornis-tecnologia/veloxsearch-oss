@@ -123,7 +123,7 @@ function SecretInput({ id, value, sentinel, onChange, testid, t }) {
         data-testid={testid}
       />
       <Btn variant="outline" type="button" onClick={() => setShow((s) => !s)}
-        aria-label={show ? "hide" : "show"} icon={show ? "eyeOff" : "eye"} />
+        aria-label={show ? t.hide : t.show} icon={show ? "eyeOff" : "eye"} />
     </div>
   );
 }
@@ -201,6 +201,9 @@ function RoleMappings({ maps, roles, t, onChange }) {
 function ProbePanel({ probe, t }) {
   if (!probe) return null;
   const tone = probe.ok ? "var(--accent)" : "var(--danger)";
+  // The API documents `checks` as a list, but an answer without it used to
+  // take the whole app down (#141): render what is there.
+  const checks = Array.isArray(probe.checks) ? probe.checks : [];
   return (
     <div className="card pad" data-testid="auth-probe-result"
       style={{ marginTop: 16, borderColor: probe.ok ? "var(--accent-border)" : "var(--danger-border)" }}>
@@ -208,9 +211,9 @@ function ProbePanel({ probe, t }) {
         <Icon name={probe.ok ? "check" : "bolt"} size={15} />
         {probe.ok ? t.auth_test_ok : t.auth_test_fail}
       </div>
-      {probe.checks.length > 0 && (
+      {checks.length > 0 && (
         <ul className="hint" style={{ margin: "10px 0 0", paddingLeft: 18, display: "grid", gap: 5, lineHeight: 1.5 }}>
-          {probe.checks.map((c, i) => <li key={i}>{c}</li>)}
+          {checks.map((c, i) => <li key={i}>{c}</li>)}
         </ul>
       )}
       {probe.error && (

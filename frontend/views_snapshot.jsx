@@ -96,7 +96,7 @@ function SecretField({ id, value, onChange, testid, t }) {
       <input id={id} className="input" type={show ? "text" : "password"} value={value || ""}
         autoComplete="new-password" onChange={(e) => onChange(e.target.value)} data-testid={testid} />
       <Btn variant="outline" type="button" onClick={() => setShow((s) => !s)}
-        aria-label={show ? "hide" : "show"} icon={show ? "eyeOff" : "eye"} />
+        aria-label={show ? t.hide : t.show} icon={show ? "eyeOff" : "eye"} />
     </div>
   );
 }
