@@ -110,13 +110,17 @@ the deployment at create. Neither kind is undone by the default.
   `default`. The action runs sequentially and returns one row per deployment:
   `installed` / `updated` / `unchanged` / `override` (skipped, chosen for this
   deployment) / `customized` (skipped, edited in OpenSearch) / `search`
-  (skipped) / `error` (with the cluster's words). Skipped rows report the days
-  the deployment keeps, not the default it did not get, and their CR is left
-  untouched. There is no background mass rewrite.
+  (skipped) / `unsettled` (skipped: the deployment has not settled, ADR-050;
+  the next apply picks it up) / `error` (with the cluster's words). Skipped
+  rows report the days the deployment keeps, not the default it did not get,
+  and their CR is left untouched. There is no background mass rewrite.
 - **Per deployment: "restore default"** (`/reset_retention`, tenant-scoped).
   This is the one path that overwrites a customized policy or an override. It
   forces the installation default for the purpose and re-stamps the value with
   source `default`, so the deployment follows the default again from then on.
+  It is refused with **409** while the deployment has not settled (ADR-050),
+  before anything is written, as the admin-password reset is (ADR-064):
+  OpenSearch rejects ISM writes mid-roll (#140).
 - **CRs without a source annotation** (created before the field existed). No
   retention value at all (pre-ADR-062) inherits, since it runs the built-in.
   A value equal to a default velox would have stamped (the built-in 30/90, or

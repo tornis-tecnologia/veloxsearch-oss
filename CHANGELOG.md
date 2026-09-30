@@ -8,6 +8,19 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **Client conditions no longer answer 500 (#140).**
+  `POST /api/otel_stack_credentials` and `POST /api/reset_otel_credentials`
+  on a deployment without the observability stack now answer **404** ("the
+  observability stack is not installed on …"). `POST /api/reset_retention` on
+  a deployment that has not settled (ADR-050) is refused at once with **409**
+  ("the deployment is still changing"), as the admin-password reset is
+  (ADR-064); it used to wait about a minute and forward OpenSearch's ISM
+  refusal as a 500. `POST /api/apply_default_retention` reports such a
+  deployment as a skipped `unsettled` row instead of an `error`. An unknown
+  recipe on `POST /api/apply_recipe` and a malformed integration id on
+  `POST /api/catalog_install` / `catalog_uninstall` are now **400**.
+
 ## [0.12.0] - 2026-09-29
 
 ### Upgrade notes
