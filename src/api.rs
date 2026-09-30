@@ -1661,6 +1661,57 @@ mod server {
         fresh.then_some(CreateClaim { set, key })
     }
 
+    /// 409 when the stored access settings ask for routes this cluster cannot
+    /// take (#139) — checked BEFORE anything is written, so the answer is an
+    /// actionable refusal instead of a raw 404 from the route apply.
+    async fn refuse_unroutable_access() -> Result<(), ApiError> {
+        let access = crate::access::get().await.map_err(ApiError::internal)?;
+        // No domain = no route is applied (see `AccessConfig::opensearch_host`).
+        if !access.ingress_enabled() {
+            return Ok(());
+        }
+        match crate::access::route_preflight(&access)
+            .await
+            .map_err(ApiError::internal)?
+        {
+            Some(why) => Err(ApiError::conflict(format!(
+                "the dashboard access settings cannot be applied: {why}. \
+                 Fix them under Settings → Access; nothing was changed"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// #139: a create is whole or gone — never "error" AND "created". When
+    /// `create` fails part-way (the CR is in, a route is not), `roll_back`
+    /// removes what it wrote before the error is answered, so a retry cannot
+    /// pile a second deployment on an orphan the user was told does not exist.
+    ///
+    /// Generic over both steps so the contract is tested without a cluster.
+    async fn whole_or_rolled_back<RF>(
+        create: impl std::future::Future<Output = anyhow::Result<()>>,
+        roll_back: impl FnOnce() -> RF,
+    ) -> Result<(), ApiError>
+    where
+        RF: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let Err(e) = create.await else {
+            return Ok(());
+        };
+        match roll_back().await {
+            Ok(()) => Err(ApiError::internal(format!(
+                "{e:#} — the deployment was rolled back; nothing was created"
+            ))),
+            Err(r) => {
+                tracing::error!("rolling back a failed create: {r:#}");
+                Err(ApiError::internal(format!(
+                    "{e:#} — and rolling the deployment back failed ({r:#}): \
+                     if it is in the deployment list, delete it"
+                )))
+            }
+        }
+    }
+
     /// Create a NEW deployment. Generates a unique `<name>-<suffix>` (ADR-020)
     /// and returns the generated name (a bare JSON string) so the UI can link to it.
     ///
@@ -1730,9 +1781,12 @@ mod server {
         // the caller's owner label — which is what makes it resolvable (and
         // only by them) on every later request.
         let dep = scope.claim(&final_name)?;
-        crate::k8s::create_cluster(&dep, &req.size, &purpose, ov)
-            .await
-            .map_err(ApiError::internal)?;
+        refuse_unroutable_access().await?;
+        whole_or_rolled_back(
+            crate::k8s::create_cluster(&dep, &req.size, &purpose, ov),
+            || crate::k8s::delete_created_objects(&dep),
+        )
+        .await?;
         // Monitor-at-creation (ADR-018) and the purpose profile (ADR-028) are
         // DEFERRED: OpenSearch isn't answering yet, so the work waits for the
         // cluster to settle (ADR-050) and happens in the background.
@@ -1787,6 +1841,7 @@ mod server {
                 .for_purpose(&purpose)
                 .map(|d| (d, crate::retention::Source::Default));
         }
+        refuse_unroutable_access().await?;
         crate::k8s::create_cluster(&dep, &req.size, &purpose, ov)
             .await
             .map_err(ApiError::internal)?;
@@ -2697,6 +2752,21 @@ mod server {
         Json(req): Json<AccessSettingsReq>,
     ) -> Result<StatusCode, ApiError> {
         scope.require_admin()?;
+        // #139: the classes this screen reports as available are the ones it
+        // accepts — a class the cluster lacks would fail every create later.
+        // Checked first, so a refused save writes nothing (not even the TLS
+        // Secret below).
+        let wanted = crate::access::AccessConfig {
+            mode: req.mode.clone(),
+            ingress_class: req.ingress_class.clone(),
+            ..Default::default()
+        };
+        if let Some(why) = crate::access::route_preflight(&wanted)
+            .await
+            .map_err(ApiError::internal)?
+        {
+            return Err(ApiError::bad_request(why));
+        }
         // BYO TLS (issue #54): a pasted PEM pair becomes a kubernetes.io/tls
         // Secret the Ingresses reference. Cert and key only make sense together.
         let (tls_cert, tls_key) = (req.tls_cert.trim(), req.tls_key.trim());
@@ -3148,6 +3218,71 @@ mod server {
                 String::new(),
                 None,
             )
+        }
+
+        /// #139: a create that fails part-way is rolled back before the error
+        /// is answered, and says so; a create that succeeds rolls nothing back.
+        #[tokio::test]
+        async fn a_failed_create_is_rolled_back_before_it_answers() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let rolled_back = AtomicBool::new(false);
+            let roll_back = || async {
+                rolled_back.store(true, Ordering::SeqCst);
+                Ok(())
+            };
+            let err = whole_or_rolled_back(
+                async {
+                    Err(anyhow::anyhow!(
+                        "applying IngressRoute/logs-ab12-opensearch: 404"
+                    ))
+                },
+                roll_back,
+            )
+            .await
+            .expect_err("the create failed");
+            assert!(rolled_back.load(Ordering::SeqCst), "the orphan was removed");
+            assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(err.message.contains("IngressRoute"), "{}", err.message);
+            assert!(
+                err.message.contains("nothing was created"),
+                "{}",
+                err.message
+            );
+
+            let untouched = AtomicBool::new(false);
+            let ok = whole_or_rolled_back(async { Ok(()) }, || async {
+                untouched.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+            assert!(ok.is_ok(), "the create succeeded");
+            assert!(
+                !untouched.load(Ordering::SeqCst),
+                "a success rolls nothing back"
+            );
+        }
+
+        /// A rollback that itself fails must not be reported as "nothing was
+        /// created": the user is told to delete what is left.
+        #[tokio::test]
+        async fn a_failed_rollback_is_not_hidden() {
+            let err =
+                whole_or_rolled_back(async { Err(anyhow::anyhow!("route: 404")) }, || async {
+                    Err(anyhow::anyhow!("deleting OpenSearchCluster CR: 500"))
+                })
+                .await
+                .expect_err("the create failed");
+            assert!(
+                !err.message.contains("nothing was created"),
+                "{}",
+                err.message
+            );
+            assert!(
+                err.message.contains("rolling the deployment back failed"),
+                "{}",
+                err.message
+            );
+            assert!(err.message.contains("delete it"), "{}", err.message);
         }
 
         /// #56: a double-submitted create is refused while the first is in

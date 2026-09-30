@@ -1757,12 +1757,33 @@ pub async fn delete_data_pvcs(dep: &Deployment) -> Result<usize> {
 /// tear the StatefulSet down (see `delete_data_pvcs`) — up to a couple of
 /// minutes, which is far too long to hold the HTTP response open.
 pub async fn delete_cluster(dep: &Deployment) -> Result<()> {
+    delete_created_objects(dep).await?;
+    for recipe in crate::recipes::RECIPES {
+        let _ = crate::agents::remove_agent(dep, recipe).await;
+    }
+    Ok(())
+}
+
+/// Everything `create_cluster` itself writes for a deployment — CR, routes,
+/// Secrets — and the data volumes the operator claims for it. Not the
+/// collection agents: those arrive later, from the deferred provisioning, and
+/// `remove_agent` also sweeps the pre-ADR-044 shared agent names, which a
+/// deployment that never finished creating must not take down.
+///
+/// Also the rollback of a failed create (#139), so a create is either whole or
+/// gone. The namespace stays: it is the tenant's, not the deployment's.
+pub async fn delete_created_objects(dep: &Deployment) -> Result<()> {
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
     let dp = DeleteParams::default();
-    // Best-effort: ignore not-found.
-    let _ = os_api(&client, dep).delete(name, &dp).await;
+    // Not-found is fine (a create that failed before its CR, a second delete);
+    // any other failure is not, because it leaves the deployment running.
+    match os_api(&client, dep).delete(name, &dp).await {
+        Ok(_) => {}
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+        Err(e) => return Err(e).context("deleting OpenSearchCluster CR"),
+    }
     let _ = ingress_api(&client, dep.namespace())
         .delete(&format!("{name}-dashboards"), &dp)
         .await;
@@ -1795,9 +1816,6 @@ pub async fn delete_cluster(dep: &Deployment) -> Result<()> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), dep.namespace());
     for s in owned_secret_names(name) {
         let _ = secrets.delete(&s, &dp).await;
-    }
-    for recipe in crate::recipes::RECIPES {
-        let _ = crate::agents::remove_agent(dep, recipe).await;
     }
     let owner = dep.clone();
     tokio::spawn(async move {
