@@ -429,7 +429,7 @@ impl FetchedPackage {
 
 /// One path component that is safe to concatenate into a URL or a filesystem
 /// path: lower-case ids and asset filenames only, no separators, no `..`.
-fn valid_component(s: &str) -> bool {
+pub(crate) fn valid_component(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 128
         && s != "."

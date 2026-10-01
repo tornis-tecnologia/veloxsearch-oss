@@ -94,6 +94,29 @@ pub fn source_of(
     }
 }
 
+/// Refusal for a retention write on a deployment that has not settled
+/// (ADR-050, #140). OpenSearch refuses ISM policy writes while nodes are
+/// coming and going, and the refusal used to arrive a minute later as a 500 of
+/// our own. `api.rs` answers 409 with this message, as the admin-password
+/// reset does (ADR-064).
+pub const NOT_SETTLED: &str = "the deployment is still changing (creating, restarting nodes or \
+     upgrading) — reset its retention once it has settled";
+
+/// Why the admin's "apply default to existing deployments" skips one
+/// deployment before writing anything, as the row's `outcome`; `None` means
+/// apply. A value chosen for the deployment is skipped whatever its state —
+/// that skip writes nothing, so settledness does not matter to it. An
+/// inheriting deployment that has not settled (ADR-050) is skipped and
+/// reported, never attempted: the ISM write would fail mid-roll (#140), and the
+/// next apply picks it up.
+pub fn apply_skip(source: Source, settled: bool) -> Option<&'static str> {
+    match (source, settled) {
+        (Source::Override, _) => Some("override"),
+        (Source::Default, false) => Some("unsettled"),
+        (Source::Default, true) => None,
+    }
+}
+
 /// The out-of-box defaults — exactly what every deployment got before the
 /// knob existed, so an installation that never touches it changes nothing.
 pub const BUILTIN_OBSERVABILITY_DAYS: u32 = 30;
@@ -637,6 +660,17 @@ pub fn otel_days(purpose: &str, annotation: Option<&str>, defaults: Option<&Defa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #140: an inheriting deployment that is still changing is reported as a
+    /// skip, not attempted; an override is skipped whether or not it settled;
+    /// only a settled, inheriting deployment is applied.
+    #[test]
+    fn apply_skips_an_unsettled_deployment_and_says_so() {
+        assert_eq!(apply_skip(Source::Default, false), Some("unsettled"));
+        assert_eq!(apply_skip(Source::Default, true), None);
+        assert_eq!(apply_skip(Source::Override, false), Some("override"));
+        assert_eq!(apply_skip(Source::Override, true), Some("override"));
+    }
 
     /// `_plugins/_ism/explain` as the 2026-09-28 kind run read it after
     /// "restore default": the live policies were at 63:3 / 65:3 / 67:3, and

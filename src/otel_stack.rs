@@ -3422,6 +3422,22 @@ pub async fn register_datasource(dep: &Deployment) -> Result<String> {
     })
 }
 
+/// The observability stack is not installed on this deployment (#140). A
+/// condition of the request, not a fault: `api.rs` maps it to 404, where
+/// every other error from this module is a 500. For the credential read it
+/// means the stack's Secret holds no password — the stack was never
+/// installed, or was uninstalled.
+#[derive(Debug)]
+pub struct NotInstalled(pub String);
+
+impl std::fmt::Display for NotInstalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the observability stack is not installed on {}", self.0)
+    }
+}
+
+impl std::error::Error for NotInstalled {}
+
 /// Rotate the credential the published endpoints check, and return the new one.
 ///
 /// **What this actually costs, measured against the inventory rather than
@@ -3443,7 +3459,7 @@ pub async fn reset_credentials(dep: &Deployment) -> Result<(String, String)> {
         .context("reading deployment status")?
         .ok_or_else(|| anyhow::anyhow!("no such deployment: {deployment}"))?;
     if status.otel_stack.is_empty() {
-        bail!("the observability stack is not installed on {deployment}");
+        return Err(NotInstalled(deployment.to_string()).into());
     }
     let (user, password) = crate::k8s::admin_creds(dep).await;
     if password.is_empty() {
@@ -3508,7 +3524,7 @@ pub async fn credentials(dep: &Deployment) -> Result<(String, String)> {
     };
     let (u, p) = (get("OTLP_USERNAME"), get("OTLP_PASSWORD"));
     if p.is_empty() {
-        bail!("no telemetry credential for {deployment}; is the stack installed?");
+        return Err(NotInstalled(deployment.to_string()).into());
     }
     Ok((u, p))
 }

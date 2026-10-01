@@ -891,7 +891,8 @@ mod server {
         pub namespace: String,
         /// `installed` | `updated` | `unchanged` | `customized` (skipped) |
         /// `override` (skipped — chosen for this deployment) |
-        /// `search` (skipped — no retention) | `error`.
+        /// `search` (skipped — no retention) | `unsettled` (skipped — the
+        /// deployment is still changing, #140) | `error`.
         pub outcome: String,
         pub days: Option<u32>,
         pub detail: String,
@@ -2074,6 +2075,7 @@ mod server {
         Json(req): Json<RecipeReq>,
     ) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
+        known_recipe(&req.recipe)?;
         crate::recipes::apply(&dep, &req.recipe)
             .await
             .map_err(ApiError::internal)?;
@@ -2081,6 +2083,16 @@ mod server {
             .await
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
+    }
+
+    /// A recipe id the binary does not know is the caller's mistake: 400, not
+    /// the 500 `recipes::apply` refusing it would become.
+    fn known_recipe(recipe: &str) -> Result<(), ApiError> {
+        if crate::recipes::RECIPES.contains(&recipe) {
+            Ok(())
+        } else {
+            Err(ApiError::bad_request(format!("unknown recipe: {recipe}")))
+        }
     }
 
     async fn disable_recipe(
@@ -2231,7 +2243,7 @@ mod server {
         let dep = scope.require(&req.deployment).await?;
         let (username, password) = crate::otel_stack::reset_credentials(&dep)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(otel_error)?;
         Ok(Json(DashCreds { username, password }))
     }
 
@@ -2242,8 +2254,21 @@ mod server {
         let dep = scope.require(&req.deployment).await?;
         let (username, password) = crate::otel_stack::credentials(&dep)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(otel_error)?;
         Ok(Json(DashCreds { username, password }))
+    }
+
+    /// #140: a stack that is not installed is a 404 — the thing asked for is
+    /// not there, and a 500 reads as our fault in logs and alerting. Every
+    /// other failure is ours.
+    fn otel_error(e: anyhow::Error) -> ApiError {
+        if e.downcast_ref::<crate::otel_stack::NotInstalled>()
+            .is_some()
+        {
+            ApiError::new(StatusCode::NOT_FOUND, e.to_string())
+        } else {
+            ApiError::internal(e)
+        }
     }
 
     async fn monitoring_status(
@@ -2289,6 +2314,7 @@ mod server {
         Json(req): Json<crate::catalog::CatalogInstallReq>,
     ) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
+        integration_id(&req.id)?;
         crate::catalog::install(&dep, &req.id, req.version.as_deref())
             .await
             .map_err(ApiError::internal)?;
@@ -2310,10 +2336,23 @@ mod server {
         // DELETES objects out of a deployment's OpenSearch, so an unowned name
         // must 404 here for exactly the reason it does there (#80).
         let dep = scope.require(&req.deployment).await?;
+        integration_id(&req.id)?;
         crate::catalog::uninstall(&dep, &req.id)
             .await
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
+    }
+
+    /// A malformed integration id is a 400. `catalog` refuses it too, as a
+    /// guard on the URL and path it builds, but that refusal surfaces as a 500.
+    fn integration_id(id: &str) -> Result<(), ApiError> {
+        if crate::catalog::valid_component(id) {
+            Ok(())
+        } else {
+            Err(ApiError::bad_request(format!(
+                "invalid integration id: {id:?}"
+            )))
+        }
     }
 
     // -- end integrations tab support (#76) -----------------------------
@@ -2437,8 +2476,12 @@ mod server {
                     cr.source.as_deref(),
                     &defaults,
                 );
-                if source == crate::retention::Source::Override {
-                    return Ok(("override", own, Vec::new()));
+                // Asked only when it matters: an override skips without a
+                // write, whatever the deployment is doing.
+                let settled = source == crate::retention::Source::Default
+                    && crate::k8s::is_settled(&dep).await?;
+                if let Some(skip) = crate::retention::apply_skip(source, settled) {
+                    return Ok((skip, own, Vec::new()));
                 }
                 let outcome =
                     crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), false)
@@ -2584,6 +2627,15 @@ mod server {
             .ok_or_else(|| {
                 ApiError::bad_request("a search deployment has no retention to reset")
             })?;
+        // #140: refuse up front while the deployment is still changing, as the
+        // admin-password reset does (ADR-064). Otherwise OpenSearch refuses
+        // the ISM write mid-roll and the refusal arrives a minute later as a
+        // 500 of ours.
+        retention_gate(
+            crate::k8s::is_settled(&dep)
+                .await
+                .map_err(ApiError::internal)?,
+        )?;
         crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), true)
             .await
             .map_err(ApiError::internal)?;
@@ -2608,6 +2660,15 @@ mod server {
             return Err(ApiError::internal(e));
         }
         Ok(Json(retention_status_of(&dep).await?))
+    }
+
+    /// A retention write needs a settled deployment (ADR-050): 409 until then.
+    fn retention_gate(settled: bool) -> Result<(), ApiError> {
+        if settled {
+            Ok(())
+        } else {
+            Err(ApiError::conflict(crate::retention::NOT_SETTLED))
+        }
     }
 
     // ───────────────────────── handlers: access / security ─────────────
@@ -3127,6 +3188,59 @@ mod server {
             assert!(err.contains("abc"), "names the bad value: {err}");
             assert!(overrides("-1").is_err(), "negative counts refused");
             assert!(overrides("3.5").is_err(), "fractional counts refused");
+        }
+
+        /// #140: the OTel credential routes answer 404 when the stack is not
+        /// installed — on both the read and the rotate path, and through any
+        /// context a caller wraps around it — and 500 for everything else.
+        #[test]
+        fn a_stack_that_is_not_installed_is_a_404_not_a_500() {
+            let not_installed =
+                || anyhow::Error::new(crate::otel_stack::NotInstalled("crawl-5q26".into()));
+            let e = otel_error(not_installed());
+            assert_eq!(e.status, StatusCode::NOT_FOUND);
+            assert_eq!(
+                e.message,
+                "the observability stack is not installed on crawl-5q26"
+            );
+            assert_eq!(
+                otel_error(not_installed().context("rotating")).status,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                otel_error(anyhow::anyhow!("applying Deployment otel-collector")).status,
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+
+        /// #140: a retention reset on a deployment that has not settled is
+        /// refused with 409 before anything is written — ADR-064's gate — and
+        /// goes through once it has.
+        #[test]
+        fn a_retention_reset_waits_for_a_settled_deployment() {
+            let e = retention_gate(false).unwrap_err();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+            assert!(e.message.contains("still changing"), "{}", e.message);
+            assert!(retention_gate(true).is_ok());
+        }
+
+        /// #140: malformed input on the recipe and catalog routes is a 400,
+        /// not the 500 the module's own refusal used to become.
+        #[test]
+        fn unknown_recipes_and_malformed_integration_ids_are_400() {
+            assert!(known_recipe("nginx").is_ok());
+            assert_eq!(
+                known_recipe("no-such-recipe").unwrap_err().status,
+                StatusCode::BAD_REQUEST
+            );
+            assert!(integration_id("nginx").is_ok());
+            for bad in ["", "../etc", "a/b"] {
+                assert_eq!(
+                    integration_id(bad).unwrap_err().status,
+                    StatusCode::BAD_REQUEST,
+                    "{bad:?}"
+                );
+            }
         }
     }
 }

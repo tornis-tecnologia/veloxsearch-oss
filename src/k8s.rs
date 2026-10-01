@@ -4942,9 +4942,7 @@ pub async fn reset_admin_password(dep: &Deployment, new_password: &str) -> Resul
         .annotations
         .as_ref()
         .and_then(|a| a.get(admin_reset::PENDING_ANNOTATION));
-    let settled = get_deployment(dep)
-        .await?
-        .is_some_and(|s| s.activity.settled);
+    let settled = is_settled(dep).await?;
     admin_reset::gate(settled, pending.map(String::as_str)).map_err(ResetError::Refused)?;
 
     // 1. Update the credentials Secret — the source of truth the operator seeds
@@ -5242,6 +5240,16 @@ async fn drop_previous_password_in(client: &Client, namespace: &str, name: &str)
         .await
         .context("dropping the kept admin password")?;
     Ok(())
+}
+
+/// ADR-050's predicate for one deployment, read now: `activity.settled`.
+/// A CR that vanished since resolution is not settled. The one question every
+/// write that must not land mid-roll asks first — the admin-password reset
+/// (#115) and the retention writes (#140).
+pub async fn is_settled(dep: &Deployment) -> Result<bool> {
+    Ok(get_deployment(dep)
+        .await?
+        .is_some_and(|s| s.activity.settled))
 }
 
 /// Wait until a deployment has actually settled — every node ready AND on the
