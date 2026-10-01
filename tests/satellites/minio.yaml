@@ -1,0 +1,186 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Satellite test service: MinIO, the S3 backend for exercising the ADR-049
+# snapshot surface (`src/snapshot.rs` renders the repository, `k8s.rs` writes
+# the keystore Secret and the OpensearchSnapshotPolicy CR).
+#
+#   kubectl apply -f tests/satellites/minio.yaml
+#
+# NOT FOR PRODUCTION. Credentials are in the clear here on purpose — fixture,
+# not a deployment.
+#
+# ## Why this namespace is called `minio`
+#
+# The tenant NetworkPolicy set (ADR-044, deploy/tenant-templates/networkpolicy.yaml)
+# punches exactly one egress hole for snapshots, and it selects the namespace
+# named by VELOX_MINIO_NS — which `k8s::NamespaceLayout::current` defaults to
+# `minio`. Landing the fixture there means tenant deployments can reach it with
+# no further edits. Putting it anywhere else means also setting
+# VELOX_MINIO_NAMESPACE on the control plane, or the egress rule selects a
+# namespace that does not exist and every snapshot times out at the CNI with no
+# error that points here.
+#
+# ## Why the bucket is created here and not by VeloxSearch
+#
+# `k8s::verify_snapshot_repo` surfaces "missing bucket" as an error from
+# OpenSearch — the control plane never creates buckets. MINIO_DEFAULT_BUCKETS
+# below does it at first boot, so the repository verifies on the first click
+# instead of after a detour through `mc`.
+#
+# ## Image
+#
+# `minio/minio` on Docker Hub no longer serves anonymous pulls (the registry
+# answers `denied: requested access to the resource is denied` for every tag,
+# including pinned RELEASE ones). `bitnamilegacy/*` is the frozen Bitnami
+# archive — real MinIO, still anonymously pullable, and pinned here to the last
+# build Bitnami published. It is an archive: treat a pull failure as a signal to
+# re-point this, not as a cluster problem.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio
+  labels:
+    # The ADR-044 egress rule selects on this label. Kubernetes sets it
+    # automatically, but it is written out so the coupling is greppable.
+    kubernetes.io/metadata.name: minio
+    veloxsearch.ai/test-fixture: "minio"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-root
+  namespace: minio
+  labels:
+    veloxsearch.ai/test-fixture: "minio"
+type: Opaque
+stringData:
+  # MinIO refuses to start with a root user under 3 chars or a password under
+  # 8. These are what you paste into the snapshot form's Access key / Secret key.
+  rootUser: veloxtest
+  rootPassword: veloxtest-secret
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: minio
+  labels:
+    veloxsearch.ai/test-fixture: "minio"
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName is deliberately unset: take the cluster default, which is
+  # `longhorn` once the VeloxSearch bootstrap has run (ADR-043). On stock k3s
+  # BEFORE that bootstrap the default is local-path, which also works for a
+  # fixture. Pin it explicitly if your cluster has more than one default
+  # StorageClass — a k3s cluster can end up in exactly that state, because the
+  # k3s addon reconciler re-applies local-storage.yaml and restores the
+  # default-class annotation that `bootstrap::demote_node_local_defaults`
+  # cleared.
+  # storageClassName: longhorn
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: minio
+  labels:
+    app: minio
+    veloxsearch.ai/test-fixture: "minio"
+spec:
+  replicas: 1
+  # Recreate: the PVC is ReadWriteOnce, so a rolling update deadlocks with the
+  # new pod Pending on a volume the old pod still holds.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      securityContext:
+        # uid 1001 / gid 0 / fsGroup 1001, and all three matter:
+        #
+        #   runAsUser  1001 — what the image declares.
+        #   runAsGroup 0    — NOT 1001. The image is built OpenShift-style: its
+        #                     writable directories (/opt/bitnami/minio/tmp, the
+        #                     mc config dir) are `drwxrwxr-x root:root`, i.e.
+        #                     group-writable for gid 0 and nobody else. The
+        #                     image sets `User=1001` with no group, so Docker
+        #                     runs it as gid 0 — which is why this works in a
+        #                     plain `docker run` and why pinning runAsGroup to
+        #                     1001 breaks it ONLY under Kubernetes. The failure
+        #                     is quiet: minio starts and serves, but the setup
+        #                     script cannot write its pid file, so it never gets
+        #                     to MINIO_DEFAULT_BUCKETS and loops on "Adding
+        #                     local Minio host to 'mc' configuration" forever.
+        #                     The bucket then silently does not exist.
+        #   fsGroup    1001 — makes the PVC writable, as a supplemental group.
+        runAsUser: 1001
+        runAsGroup: 0
+        fsGroup: 1001
+      containers:
+        - name: minio
+          image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef: { name: minio-root, key: rootUser }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: minio-root, key: rootPassword }
+            # Created at first boot, before anything else can ask for it.
+            - name: MINIO_DEFAULT_BUCKETS
+              value: "velox-snapshots"
+            # Must agree with the `region` field of the snapshot form;
+            # SnapshotConfig::default() uses us-east-1.
+            - name: MINIO_REGION_NAME
+              value: "us-east-1"
+            - name: MINIO_BROWSER
+              value: "on"
+          ports:
+            - { name: api, containerPort: 9000 }
+            - { name: console, containerPort: 9001 }
+          volumeMounts:
+            - { name: data, mountPath: /bitnami/minio/data }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: api }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: api }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits:   { cpu: "2",  memory: 2Gi }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: minio
+  labels:
+    app: minio
+    veloxsearch.ai/test-fixture: "minio"
+spec:
+  type: ClusterIP
+  selector:
+    app: minio
+  ports:
+    # Port 9000 is the one the ADR-044 egress rule allows. The console on 9001
+    # is reachable only by port-forward, which is the honest shape for a
+    # fixture: no ingress, no surprise exposure.
+    - { name: api,     port: 9000, targetPort: 9000, protocol: TCP }
+    - { name: console, port: 9001, targetPort: 9001, protocol: TCP }
