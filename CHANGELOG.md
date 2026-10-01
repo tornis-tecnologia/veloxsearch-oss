@@ -8,6 +8,13 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-01
+
+### Added
+- OpenLDAP and MinIO test satellites under `tests/satellites/` for local auth-provider
+  and snapshot verification.
+- ADR-065: proposal for Longhorn by default with an opt-out.
+
 ### Fixed
 - **Client conditions no longer answer 500 (#140).**
   `POST /api/otel_stack_credentials` and `POST /api/reset_otel_credentials`
