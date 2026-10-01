@@ -29,7 +29,6 @@ function shortDigest(d) {
 // commit compiled into the binary, digest and operator read from the cluster.
 // When a fact is unavailable the reason is shown, not hidden.
 function AboutBlock({ info, t, onToast }) {
-  const copied = () => onToast(t.copied);
   const unavailable = (note) => (
     <span style={{ color: "var(--text-3)" }} title={note || undefined}>{t.about_unavailable}</span>
   );
@@ -37,10 +36,10 @@ function AboutBlock({ info, t, onToast }) {
     [t.about_version, <span data-testid="about-version">{info.version}</span>],
     [t.about_commit, info.commit === "unknown"
       ? <span data-testid="about-commit" style={{ color: "var(--text-3)" }}>{t.about_commit_unknown}</span>
-      : <span data-testid="about-commit"><Copyable text={info.commit} display={info.commit.slice(0, 7)} onCopy={copied} /></span>],
+      : <span data-testid="about-commit"><Copyable text={info.commit} display={info.commit.slice(0, 7)} t={t} onCopy={onToast} /></span>],
     [t.about_image, info.image_digest === UNAVAILABLE
       ? unavailable(info.image_note)
-      : <Copyable text={info.image_digest} display={shortDigest(info.image_digest)} onCopy={copied} />],
+      : <Copyable text={info.image_digest} display={shortDigest(info.image_digest)} t={t} onCopy={onToast} />],
     [t.about_operator, info.operator_image === UNAVAILABLE
       ? unavailable(info.operator_note)
       : <span title={info.operator_deployment}>{info.operator_image}</span>],

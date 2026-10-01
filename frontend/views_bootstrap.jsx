@@ -64,13 +64,14 @@ function TenantIsolationNotice({ status, t, style }) {
 }
 
 function BootPrefs({ lang, setLang, theme, setTheme }) {
+  const t = STR[lang] || STR.pt;
   return (
     <div className="prefs" style={{ position: "absolute", top: 16, right: 16, display: "flex", gap: 8, alignItems: "center" }}>
-      <button className="iconbtn" title={theme === "dark" ? "Light" : "Dark"} onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}>
+      <button className="iconbtn" title={theme === "dark" ? t.theme_to_light : t.theme_to_dark} onClick={() => setTheme(th => th === "dark" ? "light" : "dark")}>
         <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
       </button>
       <button className="iconbtn" style={{ width: "auto", padding: "0 12px", fontFamily: "var(--font-mono)", fontSize: 13 }}
-        title="language" onClick={() => setLang(lang === "pt" ? "en" : lang === "en" ? "es" : "pt")}>
+        title={t.language} onClick={() => setLang(lang === "pt" ? "en" : lang === "en" ? "es" : "pt")}>
         {lang === "pt" ? "EN" : lang === "en" ? "ES" : "PT"}
       </button>
     </div>

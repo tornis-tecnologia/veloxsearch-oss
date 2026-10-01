@@ -20,6 +20,24 @@ are called out explicitly.
   deployment as a skipped `unsettled` row instead of an `error`. An unknown
   recipe on `POST /api/apply_recipe` and a malformed integration id on
   `POST /api/catalog_install` / `catalog_uninstall` are now **400**.
+- **Copy buttons claimed success they could not know (#141):** the clipboard
+  write was neither awaited nor caught, so a denied clipboard became an
+  uncaught page error, and on a plain-HTTP origin (no Clipboard API) nothing
+  was copied while the UI said "copied". Every copy button now goes through
+  one helper that awaits the write, falls back to the legacy copy path, and
+  reports what really happened. On failure the field shows the full text,
+  selected, with "press Ctrl+C", and the toast is marked as a failure. The
+  once-shown generated admin password's dialog no longer closes on a copy
+  that failed.
+- **One render error blanked the whole app (#141):** an auth-provider test
+  answer without `checks` was enough. The answer is now guarded, and the app
+  shell and each view sit behind an error boundary. A crash replaces only
+  that view with a translated message and a reload button; the header and
+  navigation keep working, and navigating away recovers.
+- The theme toggle, language button, copy buttons and secret show/hide
+  buttons had English-only tooltips or labels; they are translated in
+  pt/en/es (#141). `tests/frontend_robustness_check.py` covers all three
+  fixes against a stubbed API, with no cluster needed.
 
 ## [0.12.0] - 2026-09-29
 

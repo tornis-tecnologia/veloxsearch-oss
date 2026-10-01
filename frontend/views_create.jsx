@@ -538,7 +538,7 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
                           {[["Debian", m.install.debian], ["Ubuntu", m.install.ubuntu], ["Arch", m.install.arch]].map(([distro, cmd]) => (
                             <div key={distro} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                               <span style={{ fontSize: 11.5, color: "var(--text-3)", fontFamily: "var(--font-mono)", width: 52, flexShrink: 0 }}>{distro}</span>
-                              <Copyable text={cmd} />
+                              <Copyable text={cmd} t={t} />
                             </div>
                           ))}
                         </div>

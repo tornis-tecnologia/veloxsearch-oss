@@ -737,6 +737,10 @@ h1.page-title {
   padding: 5px 9px; display: grid; place-items: center;
 }
 .copyfield button:hover { color: var(--accent); }
+.copyfield-note {
+  padding: 5px 9px; border-left: 1px solid var(--border);
+  font-size: 11.5px; color: var(--warn);
+}
 
 /* empty state */
 .empty {
@@ -766,6 +770,7 @@ h1.page-title {
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast .ok { color: var(--accent); }
+.toast .bad { color: var(--danger); }
 
 /* fade-in for views */
 @media (prefers-reduced-motion: no-preference) {

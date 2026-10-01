@@ -16,7 +16,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { STR } from "./i18n.jsx";
 import { API, adaptDeployment } from "./api.jsx";
-import { Logo, Icon, Toast } from "./ui.jsx";
+import { Logo, Icon, Toast, ErrorBoundary } from "./ui.jsx";
 import { AuthView } from "./views_auth.jsx";
 import { BootstrapView, OperatorDriftNotice, TenantIsolationNotice } from "./views_bootstrap.jsx";
 import { StatusView } from "./views_status.jsx";
@@ -82,7 +82,7 @@ function App() {
   // tenant session never asks (the route would 404 for it).
   const [isTenant, setIsTenant] = useState(false);
   const [buildInfo, setBuildInfo] = useState(null);
-  const [toast, setToast] = useState({ msg: "", show: false });
+  const [toast, setToast] = useState({ msg: "", show: false, ok: true });
   const toastTimer = useRef(null);
 
   const tr = STR[lang];
@@ -184,8 +184,9 @@ function App() {
   }, [boot, sseDead]);
 
   // ── toast ──────────────────────────────────────────────────────
-  function showToast(msg) {
-    setToast({ msg, show: true });
+  // `ok` defaults to true; a caller that knows it failed passes false (#141).
+  function showToast(msg, ok = true) {
+    setToast({ msg, show: true, ok });
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(s => ({ ...s, show: false })), 2200);
   }
@@ -338,7 +339,7 @@ function App() {
           <button aria-pressed={lang === "en"} onClick={() => setLang("en")}>EN</button>
           <button aria-pressed={lang === "es"} onClick={() => setLang("es")}>ES</button>
         </div>
-        <button className="iconbtn" data-testid="theme-toggle" title={theme === "dark" ? "Light" : "Dark"} onClick={() => setTheme(th => th === "dark" ? "light" : "dark")}>
+        <button className="iconbtn" data-testid="theme-toggle" title={theme === "dark" ? tr.theme_to_light : tr.theme_to_dark} onClick={() => setTheme(th => th === "dark" ? "light" : "dark")}>
           <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
         </button>
         <button className="btn-link" style={{ color: "var(--text-3)", marginLeft: 4 }} onClick={doLogout}>{tr.logout}</button>
@@ -357,37 +358,41 @@ function App() {
         <OperatorDriftNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
         <TenantIsolationNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
 
-        {route.name === "status" && (
-          <StatusView deployments={deployments} lang={lang}
-            onOpen={id => go({ name: "deployment", id, tab: "overview" })}
-            // The "Upgrade vX" tag opens the deployment WITH the upgrade
-            // dialog — the click starts the flow, but the irreversible step
-            // still needs its confirmation (ADR-048).
-            onUpgrade={id => go({ name: "deployment", id, tab: "overview", upgrade: true })}
-            onCreate={() => go({ name: "create" })} />
-        )}
-        {route.name === "create" && (
-          <CreateView lang={lang} hostNodes={hostNodes} onCreate={createCluster} onCancel={() => go({ name: "status" })} />
-        )}
-        {route.name === "capacity" && (
-          <CapacityView lang={lang} />
-        )}
-        {route.name === "settings" && (
-          <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} isTenant={isTenant} />
-        )}
-        {route.name === "deployment" && (current
-          ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}
-              openUpgrade={!!route.upgrade}
-              onTab={tab => setRoute(r => ({ ...r, tab, upgrade: false }))}
-              onToggleStack={toggleOtelStack}
-              onSaveEdit={saveEdit}
-              onResetPass={resetPass}
-              onToast={showToast}
-              onDelete={deleteCluster} />
-          : <div className="view-enter"><p className="hint">{lang === "pt" ? "Carregando deployment…" : lang === "es" ? "Cargando deployment…" : "Loading deployment…"}</p></div>)}
+        {/* A view that throws while rendering takes only itself down (#141):
+            header and navigation stay, and navigating away resets it. */}
+        <ErrorBoundary t={tr} resetKey={`${route.name}/${route.id || ""}/${route.tab || ""}`}>
+          {route.name === "status" && (
+            <StatusView deployments={deployments} lang={lang}
+              onOpen={id => go({ name: "deployment", id, tab: "overview" })}
+              // The "Upgrade vX" tag opens the deployment WITH the upgrade
+              // dialog — the click starts the flow, but the irreversible step
+              // still needs its confirmation (ADR-048).
+              onUpgrade={id => go({ name: "deployment", id, tab: "overview", upgrade: true })}
+              onCreate={() => go({ name: "create" })} />
+          )}
+          {route.name === "create" && (
+            <CreateView lang={lang} hostNodes={hostNodes} onCreate={createCluster} onCancel={() => go({ name: "status" })} />
+          )}
+          {route.name === "capacity" && (
+            <CapacityView lang={lang} />
+          )}
+          {route.name === "settings" && (
+            <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} isTenant={isTenant} />
+          )}
+          {route.name === "deployment" && (current
+            ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}
+                openUpgrade={!!route.upgrade}
+                onTab={tab => setRoute(r => ({ ...r, tab, upgrade: false }))}
+                onToggleStack={toggleOtelStack}
+                onSaveEdit={saveEdit}
+                onResetPass={resetPass}
+                onToast={showToast}
+                onDelete={deleteCluster} />
+            : <div className="view-enter"><p className="hint">{lang === "pt" ? "Carregando deployment…" : lang === "es" ? "Cargando deployment…" : "Loading deployment…"}</p></div>)}
+        </ErrorBoundary>
       </main>
 
-      <Toast msg={toast.msg} show={toast.show} />
+      <Toast msg={toast.msg} show={toast.show} ok={toast.ok} />
 
       <TweaksPanel title="Tweaks">
         <TweakSection label={lang === "pt" ? "Aparência" : lang === "es" ? "Apariencia" : "Appearance"} />

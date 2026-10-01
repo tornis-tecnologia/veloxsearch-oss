@@ -3,7 +3,7 @@
 /* ============================================================
    Shared UI primitives + simple line icons
    ============================================================ */
-import { useState, useEffect } from "react";
+import { Component, useState, useEffect, useRef } from "react";
 
 /* --- Icons: simple stroke line icons --- */
 function Icon({ name, size = 16, className, style }) {
@@ -169,25 +169,126 @@ function Gauge({ label, pct, sub, size = 116 }) {
   );
 }
 
-/* --- Copyable --- */
-// `display` shows a shortened form (a digest, a commit) while the button still
-// copies the full `text`.
-function Copyable({ text, onCopy, display }) {
+/* --- Clipboard (#141) ---
+   The one copy path for every copy button. `navigator.clipboard` is missing on
+   a plain-HTTP origin and rejects when the browser denies the write, so it is
+   awaited and caught, then the legacy textarea + execCommand path is tried.
+   Resolves to whether the text really reached the clipboard: the UI says
+   "copied" only on true, never on an attempt. */
+async function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) { /* denied, or the document lost focus: try the legacy path */ }
+  }
+  return legacyCopy(text);
+}
+
+function legacyCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+  const prev = document.activeElement;
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  ta.remove();
+  if (prev && prev.focus) prev.focus();
+  return ok;
+}
+
+// Select an element's text so a failed copy still leaves the user one Ctrl+C
+// away from it.
+function selectContents(el) {
+  if (!el) return;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+/* --- Copyable ---
+   `display` shows a shortened form (a digest, a commit) while the button still
+   copies the full `text`. `onCopy(message, ok)` gets the translated outcome,
+   so a caller can hand it straight to a toast. After a failure the field shows
+   the full text, selected, and says to press Ctrl+C. */
+function Copyable({ text, display, t, onCopy }) {
+  const [state, setState] = useState("idle"); // idle | copied | failed
+  const codeRef = useRef(null);
+  useEffect(() => { setState("idle"); }, [text]);
+  useEffect(() => {
+    if (state === "failed") selectContents(codeRef.current);
+    if (state !== "copied") return;
+    const h = setTimeout(() => setState("idle"), 1500);
+    return () => clearTimeout(h);
+  }, [state]);
+
+  async function copy() {
+    const ok = await copyText(text);
+    setState(ok ? "copied" : "failed");
+    if (onCopy) onCopy(ok ? t.copied : t.copy_failed, ok);
+  }
+
+  const failed = state === "failed";
   return (
-    <span className="copyfield">
-      <code title={display ? text : undefined}>{display || text}</code>
-      <button onClick={() => { navigator.clipboard?.writeText(text); onCopy && onCopy(); }} title="copy">
-        <Icon name="copy" size={13} />
+    <span className="copyfield" data-copy-state={state}>
+      <code ref={codeRef} title={display && !failed ? text : undefined}>{failed ? text : (display || text)}</code>
+      <button type="button" onClick={copy} title={failed ? t.copy_failed : t.copy} aria-label={t.copy}>
+        <Icon name={state === "copied" ? "check" : "copy"} size={13} />
       </button>
+      {failed && <span className="copyfield-note" role="status">{t.copy_failed}</span>}
     </span>
   );
 }
 
-/* --- Toast --- */
-function Toast({ msg, show }) {
+/* --- Error boundary (#141) ---
+   One render exception used to blank the whole app. The app shell and each
+   view sit inside one of these: a crash replaces only what it wrapped with a
+   fallback that says so and offers a reload. `resetKey` clears the error when
+   it changes (the user navigated away), so a broken view does not stick.
+   `t` is the string table, or a function returning it: the top-level boundary
+   sits outside App's language state and reads the choice when it renders. */
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidUpdate(prev) {
+    if (this.state.error && prev.resetKey !== this.props.resetKey) this.setState({ error: null });
+  }
+
+  render() {
+    const { error } = this.state;
+    if (!error) return this.props.children;
+    const t = typeof this.props.t === "function" ? this.props.t() : this.props.t;
+    return (
+      <div className="card pad" role="alert" data-testid="error-boundary" style={{ maxWidth: 560, margin: "40px auto" }}>
+        <h3 style={{ margin: "0 0 6px", fontFamily: "var(--font-mono)", fontSize: 16, color: "var(--danger)" }}>{t.err_h}</h3>
+        <p className="hint" style={{ marginTop: 0 }}>{t.err_p}</p>
+        <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: 12.5, fontFamily: "var(--font-mono)", color: "var(--text-2)" }}>
+          {String((error && error.message) || error)}
+        </pre>
+        <Btn variant="primary" onClick={() => window.location.reload()}>{t.err_reload}</Btn>
+      </div>
+    );
+  }
+}
+
+/* --- Toast ---
+   `ok={false}` marks a failure, so "couldn't copy" never wears a check mark. */
+function Toast({ msg, show, ok = true }) {
   return (
     <div className={`toast ${show ? "show" : ""}`}>
-      <Icon name="check" size={15} className="ok" />
+      <Icon name={ok ? "check" : "bolt"} size={15} className={ok ? "ok" : "bad"} />
       {msg}
     </div>
   );
@@ -254,4 +355,4 @@ function Confirm({ open, title, body, confirmLabel, cancelLabel, onConfirm, onCa
   );
 }
 
-export { Icon, Logo, InfoTip, Btn, Field, Metric, MiniMeter, StatTile, Gauge, Copyable, Toast, Confirm };
+export { Icon, Logo, InfoTip, Btn, Field, Metric, MiniMeter, StatTile, Gauge, copyText, Copyable, ErrorBoundary, Toast, Confirm };
