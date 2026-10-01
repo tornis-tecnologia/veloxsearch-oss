@@ -8,6 +8,59 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-01
+
+### Added
+- OpenLDAP and MinIO test satellites under `tests/satellites/` for local auth-provider
+  and snapshot verification.
+- ADR-065: proposal for Longhorn by default with an opt-out.
+
+### Fixed
+- **Client conditions no longer answer 500 (#140).**
+  `POST /api/otel_stack_credentials` and `POST /api/reset_otel_credentials`
+  on a deployment without the observability stack now answer **404** ("the
+  observability stack is not installed on …"). `POST /api/reset_retention` on
+  a deployment that has not settled (ADR-050) is refused at once with **409**
+  ("the deployment is still changing"), as the admin-password reset is
+  (ADR-064); it used to wait about a minute and forward OpenSearch's ISM
+  refusal as a 500. `POST /api/apply_default_retention` reports such a
+  deployment as a skipped `unsettled` row instead of an `error`. An unknown
+  recipe on `POST /api/apply_recipe` and a malformed integration id on
+  `POST /api/catalog_install` / `catalog_uninstall` are now **400**.
+- **Copy buttons claimed success they could not know (#141):** the clipboard
+  write was neither awaited nor caught, so a denied clipboard became an
+  uncaught page error, and on a plain-HTTP origin (no Clipboard API) nothing
+  was copied while the UI said "copied". Every copy button now goes through
+  one helper that awaits the write, falls back to the legacy copy path, and
+  reports what really happened. On failure the field shows the full text,
+  selected, with "press Ctrl+C", and the toast is marked as a failure. The
+  once-shown generated admin password's dialog no longer closes on a copy
+  that failed.
+- **One render error blanked the whole app (#141):** an auth-provider test
+  answer without `checks` was enough. The answer is now guarded, and the app
+  shell and each view sit behind an error boundary. A crash replaces only
+  that view with a translated message and a reload button; the header and
+  navigation keep working, and navigating away recovers.
+- The theme toggle, language button, copy buttons and secret show/hide
+  buttons had English-only tooltips or labels; they are translated in
+  pt/en/es (#141). `tests/frontend_robustness_check.py` covers all three
+  fixes against a stubbed API, with no cluster needed.
+- **A create that failed on its route left the deployment running (#139):**
+  with ingress mode saved for a class the cluster did not have (no Traefik,
+  no `ingressroutes.traefik.io` CRD), every create answered 500 `applying
+  opensearch route: ... 404` after its `OpenSearchCluster` was already
+  applied, so the "failed" deployment bootstrapped anyway and held the
+  cluster's capacity, and each retry added another. A create is now whole or
+  gone: when any step after the first write fails, what it wrote (CR, routes,
+  Secrets, data volumes) is removed before the error is answered, and the
+  message says so. Before anything is written, create and save refuse with a
+  409 naming the problem when the stored access settings ask for a route the
+  cluster cannot take. Settings → Access refuses (400) to save ingress mode
+  with a class the cluster does not list, or `traefik` without its
+  IngressRoute CRD, and the screen says why and disables Save instead of
+  offering made-up classes. Deleting a deployment now reports a failed CR
+  delete instead of answering 200.
+
 ## [0.12.0] - 2026-09-29
 
 ### Upgrade notes

@@ -891,7 +891,8 @@ mod server {
         pub namespace: String,
         /// `installed` | `updated` | `unchanged` | `customized` (skipped) |
         /// `override` (skipped — chosen for this deployment) |
-        /// `search` (skipped — no retention) | `error`.
+        /// `search` (skipped — no retention) | `unsettled` (skipped — the
+        /// deployment is still changing, #140) | `error`.
         pub outcome: String,
         pub days: Option<u32>,
         pub detail: String,
@@ -1660,6 +1661,57 @@ mod server {
         fresh.then_some(CreateClaim { set, key })
     }
 
+    /// 409 when the stored access settings ask for routes this cluster cannot
+    /// take (#139) — checked BEFORE anything is written, so the answer is an
+    /// actionable refusal instead of a raw 404 from the route apply.
+    async fn refuse_unroutable_access() -> Result<(), ApiError> {
+        let access = crate::access::get().await.map_err(ApiError::internal)?;
+        // No domain = no route is applied (see `AccessConfig::opensearch_host`).
+        if !access.ingress_enabled() {
+            return Ok(());
+        }
+        match crate::access::route_preflight(&access)
+            .await
+            .map_err(ApiError::internal)?
+        {
+            Some(why) => Err(ApiError::conflict(format!(
+                "the dashboard access settings cannot be applied: {why}. \
+                 Fix them under Settings → Access; nothing was changed"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// #139: a create is whole or gone — never "error" AND "created". When
+    /// `create` fails part-way (the CR is in, a route is not), `roll_back`
+    /// removes what it wrote before the error is answered, so a retry cannot
+    /// pile a second deployment on an orphan the user was told does not exist.
+    ///
+    /// Generic over both steps so the contract is tested without a cluster.
+    async fn whole_or_rolled_back<RF>(
+        create: impl std::future::Future<Output = anyhow::Result<()>>,
+        roll_back: impl FnOnce() -> RF,
+    ) -> Result<(), ApiError>
+    where
+        RF: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let Err(e) = create.await else {
+            return Ok(());
+        };
+        match roll_back().await {
+            Ok(()) => Err(ApiError::internal(format!(
+                "{e:#} — the deployment was rolled back; nothing was created"
+            ))),
+            Err(r) => {
+                tracing::error!("rolling back a failed create: {r:#}");
+                Err(ApiError::internal(format!(
+                    "{e:#} — and rolling the deployment back failed ({r:#}): \
+                     if it is in the deployment list, delete it"
+                )))
+            }
+        }
+    }
+
     /// Create a NEW deployment. Generates a unique `<name>-<suffix>` (ADR-020)
     /// and returns the generated name (a bare JSON string) so the UI can link to it.
     ///
@@ -1729,9 +1781,12 @@ mod server {
         // the caller's owner label — which is what makes it resolvable (and
         // only by them) on every later request.
         let dep = scope.claim(&final_name)?;
-        crate::k8s::create_cluster(&dep, &req.size, &purpose, ov)
-            .await
-            .map_err(ApiError::internal)?;
+        refuse_unroutable_access().await?;
+        whole_or_rolled_back(
+            crate::k8s::create_cluster(&dep, &req.size, &purpose, ov),
+            || crate::k8s::delete_created_objects(&dep),
+        )
+        .await?;
         // Monitor-at-creation (ADR-018) and the purpose profile (ADR-028) are
         // DEFERRED: OpenSearch isn't answering yet, so the work waits for the
         // cluster to settle (ADR-050) and happens in the background.
@@ -1786,6 +1841,7 @@ mod server {
                 .for_purpose(&purpose)
                 .map(|d| (d, crate::retention::Source::Default));
         }
+        refuse_unroutable_access().await?;
         crate::k8s::create_cluster(&dep, &req.size, &purpose, ov)
             .await
             .map_err(ApiError::internal)?;
@@ -2074,6 +2130,7 @@ mod server {
         Json(req): Json<RecipeReq>,
     ) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
+        known_recipe(&req.recipe)?;
         crate::recipes::apply(&dep, &req.recipe)
             .await
             .map_err(ApiError::internal)?;
@@ -2081,6 +2138,16 @@ mod server {
             .await
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
+    }
+
+    /// A recipe id the binary does not know is the caller's mistake: 400, not
+    /// the 500 `recipes::apply` refusing it would become.
+    fn known_recipe(recipe: &str) -> Result<(), ApiError> {
+        if crate::recipes::RECIPES.contains(&recipe) {
+            Ok(())
+        } else {
+            Err(ApiError::bad_request(format!("unknown recipe: {recipe}")))
+        }
     }
 
     async fn disable_recipe(
@@ -2231,7 +2298,7 @@ mod server {
         let dep = scope.require(&req.deployment).await?;
         let (username, password) = crate::otel_stack::reset_credentials(&dep)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(otel_error)?;
         Ok(Json(DashCreds { username, password }))
     }
 
@@ -2242,8 +2309,21 @@ mod server {
         let dep = scope.require(&req.deployment).await?;
         let (username, password) = crate::otel_stack::credentials(&dep)
             .await
-            .map_err(ApiError::internal)?;
+            .map_err(otel_error)?;
         Ok(Json(DashCreds { username, password }))
+    }
+
+    /// #140: a stack that is not installed is a 404 — the thing asked for is
+    /// not there, and a 500 reads as our fault in logs and alerting. Every
+    /// other failure is ours.
+    fn otel_error(e: anyhow::Error) -> ApiError {
+        if e.downcast_ref::<crate::otel_stack::NotInstalled>()
+            .is_some()
+        {
+            ApiError::new(StatusCode::NOT_FOUND, e.to_string())
+        } else {
+            ApiError::internal(e)
+        }
     }
 
     async fn monitoring_status(
@@ -2289,6 +2369,7 @@ mod server {
         Json(req): Json<crate::catalog::CatalogInstallReq>,
     ) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
+        integration_id(&req.id)?;
         crate::catalog::install(&dep, &req.id, req.version.as_deref())
             .await
             .map_err(ApiError::internal)?;
@@ -2310,10 +2391,23 @@ mod server {
         // DELETES objects out of a deployment's OpenSearch, so an unowned name
         // must 404 here for exactly the reason it does there (#80).
         let dep = scope.require(&req.deployment).await?;
+        integration_id(&req.id)?;
         crate::catalog::uninstall(&dep, &req.id)
             .await
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
+    }
+
+    /// A malformed integration id is a 400. `catalog` refuses it too, as a
+    /// guard on the URL and path it builds, but that refusal surfaces as a 500.
+    fn integration_id(id: &str) -> Result<(), ApiError> {
+        if crate::catalog::valid_component(id) {
+            Ok(())
+        } else {
+            Err(ApiError::bad_request(format!(
+                "invalid integration id: {id:?}"
+            )))
+        }
     }
 
     // -- end integrations tab support (#76) -----------------------------
@@ -2437,8 +2531,12 @@ mod server {
                     cr.source.as_deref(),
                     &defaults,
                 );
-                if source == crate::retention::Source::Override {
-                    return Ok(("override", own, Vec::new()));
+                // Asked only when it matters: an override skips without a
+                // write, whatever the deployment is doing.
+                let settled = source == crate::retention::Source::Default
+                    && crate::k8s::is_settled(&dep).await?;
+                if let Some(skip) = crate::retention::apply_skip(source, settled) {
+                    return Ok((skip, own, Vec::new()));
                 }
                 let outcome =
                     crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), false)
@@ -2584,6 +2682,15 @@ mod server {
             .ok_or_else(|| {
                 ApiError::bad_request("a search deployment has no retention to reset")
             })?;
+        // #140: refuse up front while the deployment is still changing, as the
+        // admin-password reset does (ADR-064). Otherwise OpenSearch refuses
+        // the ISM write mid-roll and the refusal arrives a minute later as a
+        // 500 of ours.
+        retention_gate(
+            crate::k8s::is_settled(&dep)
+                .await
+                .map_err(ApiError::internal)?,
+        )?;
         crate::profiles::ensure_retention(&dep, days, cr.stamp.as_deref(), true)
             .await
             .map_err(ApiError::internal)?;
@@ -2608,6 +2715,15 @@ mod server {
             return Err(ApiError::internal(e));
         }
         Ok(Json(retention_status_of(&dep).await?))
+    }
+
+    /// A retention write needs a settled deployment (ADR-050): 409 until then.
+    fn retention_gate(settled: bool) -> Result<(), ApiError> {
+        if settled {
+            Ok(())
+        } else {
+            Err(ApiError::conflict(crate::retention::NOT_SETTLED))
+        }
     }
 
     // ───────────────────────── handlers: access / security ─────────────
@@ -2636,6 +2752,21 @@ mod server {
         Json(req): Json<AccessSettingsReq>,
     ) -> Result<StatusCode, ApiError> {
         scope.require_admin()?;
+        // #139: the classes this screen reports as available are the ones it
+        // accepts — a class the cluster lacks would fail every create later.
+        // Checked first, so a refused save writes nothing (not even the TLS
+        // Secret below).
+        let wanted = crate::access::AccessConfig {
+            mode: req.mode.clone(),
+            ingress_class: req.ingress_class.clone(),
+            ..Default::default()
+        };
+        if let Some(why) = crate::access::route_preflight(&wanted)
+            .await
+            .map_err(ApiError::internal)?
+        {
+            return Err(ApiError::bad_request(why));
+        }
         // BYO TLS (issue #54): a pasted PEM pair becomes a kubernetes.io/tls
         // Secret the Ingresses reference. Cert and key only make sense together.
         let (tls_cert, tls_key) = (req.tls_cert.trim(), req.tls_key.trim());
@@ -3089,6 +3220,71 @@ mod server {
             )
         }
 
+        /// #139: a create that fails part-way is rolled back before the error
+        /// is answered, and says so; a create that succeeds rolls nothing back.
+        #[tokio::test]
+        async fn a_failed_create_is_rolled_back_before_it_answers() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let rolled_back = AtomicBool::new(false);
+            let roll_back = || async {
+                rolled_back.store(true, Ordering::SeqCst);
+                Ok(())
+            };
+            let err = whole_or_rolled_back(
+                async {
+                    Err(anyhow::anyhow!(
+                        "applying IngressRoute/logs-ab12-opensearch: 404"
+                    ))
+                },
+                roll_back,
+            )
+            .await
+            .expect_err("the create failed");
+            assert!(rolled_back.load(Ordering::SeqCst), "the orphan was removed");
+            assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(err.message.contains("IngressRoute"), "{}", err.message);
+            assert!(
+                err.message.contains("nothing was created"),
+                "{}",
+                err.message
+            );
+
+            let untouched = AtomicBool::new(false);
+            let ok = whole_or_rolled_back(async { Ok(()) }, || async {
+                untouched.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+            assert!(ok.is_ok(), "the create succeeded");
+            assert!(
+                !untouched.load(Ordering::SeqCst),
+                "a success rolls nothing back"
+            );
+        }
+
+        /// A rollback that itself fails must not be reported as "nothing was
+        /// created": the user is told to delete what is left.
+        #[tokio::test]
+        async fn a_failed_rollback_is_not_hidden() {
+            let err =
+                whole_or_rolled_back(async { Err(anyhow::anyhow!("route: 404")) }, || async {
+                    Err(anyhow::anyhow!("deleting OpenSearchCluster CR: 500"))
+                })
+                .await
+                .expect_err("the create failed");
+            assert!(
+                !err.message.contains("nothing was created"),
+                "{}",
+                err.message
+            );
+            assert!(
+                err.message.contains("rolling the deployment back failed"),
+                "{}",
+                err.message
+            );
+            assert!(err.message.contains("delete it"), "{}", err.message);
+        }
+
         /// #56: a double-submitted create is refused while the first is in
         /// flight, only for the same namespace and base name, and the name is
         /// free again the moment the first request finishes — on any path.
@@ -3127,6 +3323,59 @@ mod server {
             assert!(err.contains("abc"), "names the bad value: {err}");
             assert!(overrides("-1").is_err(), "negative counts refused");
             assert!(overrides("3.5").is_err(), "fractional counts refused");
+        }
+
+        /// #140: the OTel credential routes answer 404 when the stack is not
+        /// installed — on both the read and the rotate path, and through any
+        /// context a caller wraps around it — and 500 for everything else.
+        #[test]
+        fn a_stack_that_is_not_installed_is_a_404_not_a_500() {
+            let not_installed =
+                || anyhow::Error::new(crate::otel_stack::NotInstalled("crawl-5q26".into()));
+            let e = otel_error(not_installed());
+            assert_eq!(e.status, StatusCode::NOT_FOUND);
+            assert_eq!(
+                e.message,
+                "the observability stack is not installed on crawl-5q26"
+            );
+            assert_eq!(
+                otel_error(not_installed().context("rotating")).status,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                otel_error(anyhow::anyhow!("applying Deployment otel-collector")).status,
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+
+        /// #140: a retention reset on a deployment that has not settled is
+        /// refused with 409 before anything is written — ADR-064's gate — and
+        /// goes through once it has.
+        #[test]
+        fn a_retention_reset_waits_for_a_settled_deployment() {
+            let e = retention_gate(false).unwrap_err();
+            assert_eq!(e.status, StatusCode::CONFLICT);
+            assert!(e.message.contains("still changing"), "{}", e.message);
+            assert!(retention_gate(true).is_ok());
+        }
+
+        /// #140: malformed input on the recipe and catalog routes is a 400,
+        /// not the 500 the module's own refusal used to become.
+        #[test]
+        fn unknown_recipes_and_malformed_integration_ids_are_400() {
+            assert!(known_recipe("nginx").is_ok());
+            assert_eq!(
+                known_recipe("no-such-recipe").unwrap_err().status,
+                StatusCode::BAD_REQUEST
+            );
+            assert!(integration_id("nginx").is_ok());
+            for bad in ["", "../etc", "a/b"] {
+                assert_eq!(
+                    integration_id(bad).unwrap_err().status,
+                    StatusCode::BAD_REQUEST,
+                    "{bad:?}"
+                );
+            }
         }
     }
 }

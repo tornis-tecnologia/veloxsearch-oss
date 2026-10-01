@@ -1,0 +1,217 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Satellite test service: OpenLDAP, for exercising the ADR-045 auth-provider
+# axis (`src/auth_provider.rs` + the pre-save probe in `src/auth_probe.rs`)
+# against a real directory instead of a mock.
+#
+#   kubectl apply -f tests/satellites/openldap.yaml
+#
+# NOT FOR PRODUCTION. Credentials are in the clear in this file on purpose:
+# it is a fixture, and a fixture whose password you have to go looking for is a
+# fixture nobody runs. Everything it holds is disposable.
+#
+# Shape of the tree it seeds (base dn=velox,dc=test):
+#
+#   ou=people                       ou=groups
+#     uid=alice  (alice123)           cn=velox-admins   member: alice
+#     uid=bob    (bob123)             cn=velox-readers  member: bob, carol
+#     uid=carol  (carol123)
+#
+# Group membership is resolved by SEARCHING the group entries for the user DN
+# (`rolesearch: (member={0})`), not by reading an attribute off the user entry.
+# That is deliberate: plain `groupOfNames` needs no `memberof` overlay, and
+# `auth_provider::ldap_backend` pins `userroleattribute: null` whenever
+# `userrolename` is left empty, which is exactly this case.
+#
+# Storage is emptyDir, so every pod restart re-seeds the tree from the
+# ConfigMap below. That is a feature — the directory is always in a known
+# state at the start of a test run.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velox-test-ldap
+  labels:
+    # The tenant NetworkPolicy set (ADR-044) selects peer namespaces by this
+    # label, so netpol-tenant-egress.yaml can name this namespace.
+    kubernetes.io/metadata.name: velox-test-ldap
+    veloxsearch.ai/test-fixture: "openldap"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openldap-admin
+  namespace: velox-test-ldap
+  labels:
+    veloxsearch.ai/test-fixture: "openldap"
+type: Opaque
+stringData:
+  # Bind DN for VeloxSearch: cn=admin,dc=velox,dc=test
+  adminPassword: velox-test-admin
+  configPassword: velox-test-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openldap-seed
+  namespace: velox-test-ldap
+  labels:
+    veloxsearch.ai/test-fixture: "openldap"
+data:
+  # osixia/openldap applies every .ldif in its bootstrap custom directory, in
+  # filename order, after the base DIT exists. One file keeps the order
+  # unambiguous: OUs must exist before the entries under them.
+  01-velox-test-tree.ldif: |
+    dn: ou=people,dc=velox,dc=test
+    objectClass: organizationalUnit
+    ou: people
+
+    dn: ou=groups,dc=velox,dc=test
+    objectClass: organizationalUnit
+    ou: groups
+
+    dn: uid=alice,ou=people,dc=velox,dc=test
+    objectClass: inetOrgPerson
+    objectClass: organizationalPerson
+    objectClass: person
+    objectClass: top
+    uid: alice
+    cn: Alice Admin
+    sn: Admin
+    mail: alice@velox.test
+    userPassword: alice123
+
+    dn: uid=bob,ou=people,dc=velox,dc=test
+    objectClass: inetOrgPerson
+    objectClass: organizationalPerson
+    objectClass: person
+    objectClass: top
+    uid: bob
+    cn: Bob Reader
+    sn: Reader
+    mail: bob@velox.test
+    userPassword: bob123
+
+    dn: uid=carol,ou=people,dc=velox,dc=test
+    objectClass: inetOrgPerson
+    objectClass: organizationalPerson
+    objectClass: person
+    objectClass: top
+    uid: carol
+    cn: Carol Reader
+    sn: Reader
+    mail: carol@velox.test
+    userPassword: carol123
+
+    dn: cn=velox-admins,ou=groups,dc=velox,dc=test
+    objectClass: groupOfNames
+    objectClass: top
+    cn: velox-admins
+    description: Maps to all_access in the VeloxSearch role mapping
+    member: uid=alice,ou=people,dc=velox,dc=test
+
+    dn: cn=velox-readers,ou=groups,dc=velox,dc=test
+    objectClass: groupOfNames
+    objectClass: top
+    cn: velox-readers
+    description: Maps to readall + kibana_user in the VeloxSearch role mapping
+    member: uid=bob,ou=people,dc=velox,dc=test
+    member: uid=carol,ou=people,dc=velox,dc=test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openldap
+  namespace: velox-test-ldap
+  labels:
+    app: openldap
+    veloxsearch.ai/test-fixture: "openldap"
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two slapd pods would answer the same Service
+  # with two independently-seeded emptyDir trees, and a probe that hits the
+  # wrong one fails for a reason that has nothing to do with the config.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: openldap
+  template:
+    metadata:
+      labels:
+        app: openldap
+    spec:
+      containers:
+        - name: openldap
+          image: osixia/openldap:1.5.0
+          # --copy-service is REQUIRED for the seed to be read: without it the
+          # image runs the bootstrap straight out of the read-only mount and
+          # skips the custom directory entirely.
+          args: ["--copy-service"]
+          env:
+            - name: LDAP_ORGANISATION
+              value: "VeloxSearch Test"
+            - name: LDAP_DOMAIN
+              value: "velox.test"
+            - name: LDAP_BASE_DN
+              value: "dc=velox,dc=test"
+            - name: LDAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: openldap-admin, key: adminPassword }
+            - name: LDAP_CONFIG_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: openldap-admin, key: configPassword }
+            # Plaintext 389 only, and that is the whole verified surface of
+            # this fixture. `auth_provider::ldap_backend` hardcodes
+            # `verify_hostnames: true`, so an LDAPS variant needs a cert whose
+            # SAN carries the in-cluster Service DNS name AND its CA pasted
+            # into the form's `pemtrustedcas_content`. That path is NOT shipped
+            # here: osixia 1.5.0 silently skips its TLS setup when the cert
+            # directory is mounted read-only, and an untested TLS fixture is
+            # worse than none — it turns a config bug into a PKI bug hunt.
+            # See the README section "TLS" before attempting it.
+            - name: LDAP_TLS
+              value: "false"
+            - name: LDAP_REMOVE_CONFIG_AFTER_SETUP
+              value: "true"
+          ports:
+            - { name: ldap, containerPort: 389 }
+          volumeMounts:
+            - name: seed
+              mountPath: /container/service/slapd/assets/config/bootstrap/ldif/custom
+            - { name: data, mountPath: /var/lib/ldap }
+            - { name: config, mountPath: /etc/ldap/slapd.d }
+          readinessProbe:
+            tcpSocket: { port: 389 }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 389 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: seed
+          configMap: { name: openldap-seed }
+        - name: data
+          emptyDir: {}
+        - name: config
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openldap
+  namespace: velox-test-ldap
+  labels:
+    app: openldap
+    veloxsearch.ai/test-fixture: "openldap"
+spec:
+  type: ClusterIP
+  selector:
+    app: openldap
+  ports:
+    - { name: ldap, port: 389, targetPort: 389, protocol: TCP }

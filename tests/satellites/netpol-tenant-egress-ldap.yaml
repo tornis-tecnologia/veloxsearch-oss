@@ -1,0 +1,47 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Egress hole: tenant namespace -> the OpenLDAP fixture.
+#
+#   kubectl -n velox-t-<slug> apply -f tests/satellites/netpol-tenant-egress-ldap.yaml
+#
+# ## Only needed with VELOX_MULTITENANT_AUTH on
+#
+# With the flag off (the default) every session is Scope::Admin, deployments
+# land in the control-plane namespace, and no tenant NetworkPolicy set exists —
+# the OpenSearch nodes reach the fixture with nothing applied here.
+#
+# ## Why this file has to exist at all
+#
+# deploy/tenant-templates/networkpolicy.yaml is default-deny on BOTH directions
+# and then enumerates five flows. Its only egress rule is (5): DNS to
+# kube-system, and port 9000 to VELOX_MINIO_NS. There is no LDAP hole — so a
+# tenant deployment configured against an external directory cannot reach it,
+# and the failure surfaces as the security plugin timing out mid-restart rather
+# than as anything naming the network.
+#
+# That gap is the reason this file ships next to the fixture instead of being
+# folded into the tenant template: widening the ADR-044 set is a decision for an
+# ADR, not for a test fixture. What is here is the narrowest thing that
+# unblocks a test — one namespace, two ports.
+#
+# The metadata carries no namespace on purpose: `kubectl -n <tenant-ns>` places
+# it, so one file serves every tenant.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: velox-test-allow-egress-ldap
+  labels:
+    veloxsearch.ai/test-fixture: "openldap"
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: velox-test-ldap
+      ports:
+        - { port: 389, protocol: TCP }   # plain / StartTLS
+        - { port: 636, protocol: TCP }   # LDAPS, if you switch the fixture over

@@ -12,7 +12,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { STR, SIZES, sizeMeta } from "./i18n.jsx";
 import { API, adaptMetrics, adaptSeries } from "./api.jsx";
-import { Icon, Copyable, Btn, Confirm, Field, MiniMeter, StatTile } from "./ui.jsx";
+import { Icon, copyText, Copyable, Btn, Confirm, Field, MiniMeter, StatTile } from "./ui.jsx";
 import { AuthProviderTab } from "./views_auth_provider.jsx";
 import { SnapshotTab } from "./views_snapshot.jsx";
 import { ActivityPanel, lockReason, LockNotice } from "./views_activity.jsx";
@@ -525,9 +525,9 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
           </div>
           <div style={{ display: "grid", gap: 6 }}>
             <EndpointRow t={t} label={t.otel_ep_dashboards} value={url}
-              href={url} onCopy={() => onToast(t.copied)} />
+              href={url} onCopy={onToast} />
             <EndpointRow t={t} label={t.otel_ep_opensearch} value={d.opensearch_url}
-              href={d.opensearch_url} onCopy={() => onToast(t.copied)} />
+              href={d.opensearch_url} onCopy={onToast} />
           </div>
         </div>
       )}
@@ -537,7 +537,7 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
         {!url && d.dashboard_portforward && (
           <>
             <span style={{ color: "var(--text-2)", fontSize: 13, fontFamily: "var(--font-mono)" }}>{t.portfwd_access}</span>
-            <Copyable text={d.dashboard_portforward} onCopy={() => onToast(t.copied)} />
+            <Copyable text={d.dashboard_portforward} t={t} onCopy={onToast} />
           </>
         )}
         <UpgradeControl d={d} lang={lang} onToast={onToast} openUpgrade={openUpgrade} />
@@ -842,7 +842,7 @@ function EndpointRow({ t, label, value, href, tag, onCopy }) {
       {tag && (
         <span className="badge" style={{ padding: "1px 6px", fontSize: 10.5 }}>{tag}</span>
       )}
-      <Copyable text={value} onCopy={() => onCopy && onCopy(t.copied)} />
+      <Copyable text={value} t={t} onCopy={onCopy} />
       {href && (
         <a href={href} target="_blank" rel="noreferrer" className="btn-link" style={{ fontSize: 12 }}>
           {t.open}<Icon name="arrowR" size={12} />
@@ -896,19 +896,13 @@ function OtelCredentials({ d, t, user, onToast, locked }) {
     <div>
       <div style={row}>
         <span style={label}>{t.cred_user}</span>
-        <Copyable text={(creds && creds.username) || user} onCopy={() => onToast(t.copied)} />
+        <Copyable text={(creds && creds.username) || user} t={t} onCopy={onToast} />
       </div>
       <div style={{ ...row, marginTop: 6 }}>
         <span style={label}>{t.cred_pass}</span>
-        <span className="copyfield">
-          <code>{creds && show ? creds.password : "•".repeat(12)}</code>
-          {creds && show && (
-            <button title={t.copy}
-              onClick={() => { navigator.clipboard?.writeText(creds.password); onToast(t.copied); }}>
-              <Icon name="copy" size={13} />
-            </button>
-          )}
-        </span>
+        {creds && show
+          ? <Copyable text={creds.password} t={t} onCopy={onToast} />
+          : <span className="copyfield"><code>{"•".repeat(12)}</code></span>}
         <Btn variant="outline" icon={show ? "eyeOff" : "eye"} disabled={busy} onClick={reveal}
           style={{ padding: "5px 10px" }}>
           {busy ? t.cred_loading : creds ? (show ? t.hide : t.show) : t.cred_reveal}
@@ -1464,8 +1458,13 @@ function CredentialsPanel({ d, lang, onToast, onReset, locked }) {
     }
   }
 
-  function copy(v) {
-    if (v) { navigator.clipboard?.writeText(v); onToast(t.copied); }
+  // The freshly generated password is shown once, so its dialog closes only
+  // once the copy really happened; on a failure it stays open with the value
+  // on screen for a manual copy (#141).
+  async function copyFresh() {
+    const ok = await copyText(fresh.password);
+    onToast(ok ? t.copied : t.copy_failed, ok);
+    if (ok) setFresh(null);
   }
 
   const label = busy ? t.cred_loading : creds ? (show ? t.hide : t.show) : t.cred_reveal;
@@ -1478,17 +1477,15 @@ function CredentialsPanel({ d, lang, onToast, onReset, locked }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14, flexWrap: "wrap", fontSize: 13 }}>
         <span style={{ color: "var(--text-2)", fontFamily: "var(--font-mono)", minWidth: 72 }}>{t.cred_user}</span>
         {creds
-          ? <Copyable text={creds.username} onCopy={() => onToast(t.copied)} />
+          ? <Copyable text={creds.username} t={t} onCopy={onToast} />
           : <code style={{ color: "var(--text-3)" }}>—</code>}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap", fontSize: 13 }}>
         <span style={{ color: "var(--text-2)", fontFamily: "var(--font-mono)", minWidth: 72 }}>{t.cred_pass}</span>
-        <span className="copyfield">
-          <code>{creds && show ? creds.password : "•".repeat(12)}</code>
-          {creds && show &&
-            <button onClick={() => copy(creds.password)} title={t.copy}><Icon name="copy" size={13} /></button>}
-        </span>
+        {creds && show
+          ? <Copyable text={creds.password} t={t} onCopy={onToast} />
+          : <span className="copyfield"><code>{"•".repeat(12)}</code></span>}
         <Btn variant="outline" icon={show ? "eyeOff" : "eye"} disabled={busy} onClick={reveal}
           data-testid="reveal-credentials" style={{ padding: "6px 12px" }}>{label}</Btn>
       </div>
@@ -1529,11 +1526,11 @@ function CredentialsPanel({ d, lang, onToast, onReset, locked }) {
         body={t.sec_new_pass_p}
         confirmLabel={t.copy}
         cancelLabel={t.close}
-        onConfirm={() => { copy(fresh.password); setFresh(null); }}
+        onConfirm={copyFresh}
         onCancel={() => setFresh(null)}
       >
         <div style={{ margin: "10px 0" }}>
-          <Copyable text={fresh ? fresh.password : ""} onCopy={() => onToast(t.copied)} />
+          <Copyable text={fresh ? fresh.password : ""} t={t} onCopy={onToast} />
         </div>
       </Confirm>
     </div>
