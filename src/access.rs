@@ -9,6 +9,7 @@
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::api::networking::v1::IngressClass;
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, ListParams, Patch, PatchParams};
 
 use crate::k8s::ns;
@@ -234,9 +235,115 @@ pub async fn ingress_classes() -> Result<Vec<String>> {
         .collect())
 }
 
+/// The CRD behind the Traefik-native OpenSearch API route: with ingress class
+/// `traefik`, `k8s::ensure_opensearch_ingress` applies an `IngressRoute`, not
+/// a plain Ingress.
+pub const INGRESSROUTE_CRD: &str = "ingressroutes.traefik.io";
+
+/// Why the routes `cfg` asks for cannot be applied on a cluster that offers
+/// `classes` and does (or does not) serve [`INGRESSROUTE_CRD`] — `None` when
+/// they can. Pure, so the rule is tested without a cluster.
+///
+/// #139: ingress mode used to be saved with a class the cluster did not have,
+/// and every create after that failed on the route. This is the one rule both
+/// the Settings save and the create/save preflight enforce.
+pub fn route_blocker(
+    cfg: &AccessConfig,
+    classes: &[String],
+    ingressroute_crd: bool,
+) -> Option<String> {
+    if cfg.mode != "ingress" {
+        return None;
+    }
+    let class = cfg.ingress_class.as_str();
+    if !classes.iter().any(|c| c == class) {
+        return Some(if classes.is_empty() {
+            "ingress mode needs an ingress controller, and this cluster has no \
+             IngressClass: install one (Traefik, ingress-nginx, ...) or use \
+             port-forward access"
+                .to_string()
+        } else {
+            format!(
+                "ingress class '{class}' does not exist on this cluster; available: {}",
+                classes.join(", ")
+            )
+        });
+    }
+    if class == "traefik" && !ingressroute_crd {
+        return Some(format!(
+            "ingress class 'traefik' exists, but the Traefik CRD {INGRESSROUTE_CRD} is \
+             not installed, and the OpenSearch API route is a Traefik IngressRoute: \
+             install Traefik's CRDs or use port-forward access"
+        ));
+    }
+    None
+}
+
+/// [`route_blocker`] against the live cluster. `Err` only when the cluster
+/// could not be asked — never read as "nothing installed".
+pub async fn route_preflight(cfg: &AccessConfig) -> Result<Option<String>> {
+    if cfg.mode != "ingress" {
+        return Ok(None);
+    }
+    let classes = ingress_classes().await?;
+    let ingressroute_crd = cfg.ingress_class == "traefik" && {
+        let client = crate::k8s::client().await?;
+        let api: Api<CustomResourceDefinition> = Api::all(client);
+        api.get_opt(INGRESSROUTE_CRD)
+            .await
+            .context("looking up the Traefik IngressRoute CRD")?
+            .is_some()
+    };
+    Ok(route_blocker(cfg, &classes, ingressroute_crd))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ingress(class: &str) -> AccessConfig {
+        AccessConfig {
+            mode: "ingress".into(),
+            base_domain: "example.test".into(),
+            ingress_class: class.into(),
+            tls_secret: String::new(),
+        }
+    }
+
+    /// #139: the v0.12.0 report — no IngressClass at all, `traefik` saved
+    /// anyway — must be refused, and so must a class the cluster lacks.
+    #[test]
+    fn ingress_mode_needs_a_class_the_cluster_has() {
+        let none: Vec<String> = vec![];
+        let why = route_blocker(&ingress("traefik"), &none, false).expect("refused");
+        assert!(why.contains("no IngressClass"), "{why}");
+
+        let nginx = vec!["nginx".to_string()];
+        let why = route_blocker(&ingress("traefik"), &nginx, true).expect("refused");
+        assert!(
+            why.contains("'traefik' does not exist") && why.contains("nginx"),
+            "{why}"
+        );
+
+        assert_eq!(route_blocker(&ingress("nginx"), &nginx, false), None);
+    }
+
+    /// The OpenSearch route on Traefik is an IngressRoute: the class alone is
+    /// not enough, its CRD has to be served too. Other classes never need it.
+    #[test]
+    fn traefik_needs_its_ingressroute_crd() {
+        let traefik = vec!["traefik".to_string()];
+        let why = route_blocker(&ingress("traefik"), &traefik, false).expect("refused");
+        assert!(why.contains(INGRESSROUTE_CRD), "{why}");
+        assert_eq!(route_blocker(&ingress("traefik"), &traefik, true), None);
+    }
+
+    /// Port-forward creates no route, so nothing about ingress can block it —
+    /// that is also the way out of a broken ingress configuration.
+    #[test]
+    fn portforward_is_never_blocked() {
+        assert_eq!(route_blocker(&AccessConfig::default(), &[], false), None);
+    }
 
     #[tokio::test]
     async fn backfill_is_a_no_op_outside_ingress_mode() {

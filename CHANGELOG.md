@@ -38,6 +38,21 @@ are called out explicitly.
   buttons had English-only tooltips or labels; they are translated in
   pt/en/es (#141). `tests/frontend_robustness_check.py` covers all three
   fixes against a stubbed API, with no cluster needed.
+- **A create that failed on its route left the deployment running (#139):**
+  with ingress mode saved for a class the cluster did not have (no Traefik,
+  no `ingressroutes.traefik.io` CRD), every create answered 500 `applying
+  opensearch route: ... 404` after its `OpenSearchCluster` was already
+  applied, so the "failed" deployment bootstrapped anyway and held the
+  cluster's capacity, and each retry added another. A create is now whole or
+  gone: when any step after the first write fails, what it wrote (CR, routes,
+  Secrets, data volumes) is removed before the error is answered, and the
+  message says so. Before anything is written, create and save refuse with a
+  409 naming the problem when the stored access settings ask for a route the
+  cluster cannot take. Settings → Access refuses (400) to save ingress mode
+  with a class the cluster does not list, or `traefik` without its
+  IngressRoute CRD, and the screen says why and disables Save instead of
+  offering made-up classes. Deleting a deployment now reports a failed CR
+  delete instead of answering 200.
 
 ## [0.12.0] - 2026-09-29
 
