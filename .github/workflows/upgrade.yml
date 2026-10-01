@@ -83,7 +83,7 @@ jobs:
         run: deploy/build-image.sh --profile release --tag "$CANDIDATE_IMAGE"
       - name: Save
         run: docker save "$CANDIDATE_IMAGE" -o candidate.tar
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: candidate-image
           path: candidate.tar
@@ -115,7 +115,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: candidate-image
 
