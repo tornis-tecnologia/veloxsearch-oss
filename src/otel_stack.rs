@@ -1235,6 +1235,63 @@ fn labels(deployment: &str) -> serde_json::Value {
     })
 }
 
+/// Does the stack's credential Secret hold a password other than `password`?
+/// `false` when there is no stack.
+pub(crate) async fn creds_stale(
+    client: &kube::Client,
+    dep: &Deployment,
+    password: &str,
+) -> Result<bool> {
+    let held =
+        crate::k8s::secret_value(client, AGENT_NS, &obj_name(dep.name(), "dp"), "ES_PASSWORD")
+            .await?;
+    Ok(held.is_some_and(|p| p != password))
+}
+
+/// Move an installed stack to a new admin login after a reset: the three
+/// password-bearing keys of its credential Secret, then the config-hash of the
+/// two Deployments that read them — to exactly what `manifests_with` computes,
+/// so the pods roll once and a later re-install changes nothing. Merge patches,
+/// not an apply: the install's apply owns the rest of these objects. Returns
+/// how many objects it wrote.
+pub(crate) async fn sync_creds(
+    client: &kube::Client,
+    dep: &Deployment,
+    user: &str,
+    password: &str,
+) -> Result<usize> {
+    let deployment = dep.name();
+    let pipelines = data_prepper_pipelines(dep, user, password);
+    crate::k8s::merge_patch_dynamic(
+        client,
+        "",
+        "v1",
+        "Secret",
+        AGENT_NS,
+        &obj_name(deployment, "dp"),
+        &serde_json::json!({ "stringData": {
+            "ES_USERNAME": user, "ES_PASSWORD": password, "pipelines.yaml": pipelines } }),
+    )
+    .await?;
+    for (part, hash) in [
+        ("os-exporter", config_hash(password)),
+        ("data-prepper", config_hash(&pipelines)),
+    ] {
+        crate::k8s::merge_patch_dynamic(
+            client,
+            "apps",
+            "v1",
+            "Deployment",
+            AGENT_NS,
+            &obj_name(deployment, part),
+            &serde_json::json!({"spec":{"template":{"metadata":{"annotations":{
+                "veloxsearch.ai/config-hash": hash }}}}}),
+        )
+        .await?;
+    }
+    Ok(3)
+}
+
 /// Hash a config into the pod template so a changed ConfigMap/Secret actually
 /// rolls the pod — subPath mounts never update live. Same trick, and same
 /// reason, as `agents::apply_agent_workload`.
@@ -1500,8 +1557,8 @@ pub fn manifests_with(
     ));
 
     // Data Prepper's pipeline carries the OpenSearch password → Secret, never a
-    // ConfigMap. (`agents.rs` puts its Fluent Bit password in a ConfigMap; that
-    // is a wart this module deliberately does not inherit.)
+    // ConfigMap (the same rule `agents.rs` follows for Fluent Bit). A reset
+    // password is carried over by `sync_creds`.
     let dp_secret = obj_name(deployment, "dp");
     v.push(K8sObject {
         group: "",

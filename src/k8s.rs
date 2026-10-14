@@ -273,6 +273,65 @@ pub(crate) async fn get_dynamic(
         .with_context(|| format!("serializing {kind}/{name}"))
 }
 
+/// Every object of one kind in a namespace, as JSON. The agents namespace is
+/// small (a handful of collectors per deployment), so no paging.
+pub(crate) async fn list_dynamic(
+    client: &Client,
+    group: &str,
+    version: &str,
+    kind: &str,
+    namespace: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(group, version, kind));
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+    api.list(&ListParams::default())
+        .await
+        .with_context(|| format!("listing {kind} in {namespace}"))?
+        .items
+        .into_iter()
+        .map(|o| serde_json::to_value(o).with_context(|| format!("serializing a {kind}")))
+        .collect()
+}
+
+/// A JSON merge patch of one object, under the default field manager — NOT
+/// `apply_dynamic`'s. Used for the few fields a reconcile changes on an object
+/// an install owns (a pod-template annotation that rolls it, one Secret key):
+/// a server-side apply of that fragment under the install's manager would
+/// prune everything else the install wrote.
+pub(crate) async fn merge_patch_dynamic(
+    client: &Client,
+    group: &str,
+    version: &str,
+    kind: &str,
+    namespace: &str,
+    name: &str,
+    patch: &serde_json::Value,
+) -> Result<()> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(group, version, kind));
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+    api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+        .with_context(|| format!("patching {kind}/{name}"))?;
+    Ok(())
+}
+
+/// One key of a Secret as UTF-8: `None` when the Secret or the key is absent.
+pub(crate) async fn secret_value(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    Ok(secrets
+        .get_opt(name)
+        .await
+        .with_context(|| format!("reading Secret/{name}"))?
+        .and_then(|s| s.data)
+        .and_then(|d| d.get(key).map(|b| b.0.clone()))
+        .and_then(|b| String::from_utf8(b).ok()))
+}
+
 fn admin_secret_name(name: &str) -> String {
     format!("{name}-admin-credentials")
 }
