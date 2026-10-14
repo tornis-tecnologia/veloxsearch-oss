@@ -8,6 +8,15 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **Parallel integration installs and uninstalls no longer lose each other's
+  state.** The `monitors` and `integration-versions` annotations were updated by
+  read-modify-write with no concurrency check, so of several concurrent catalog
+  calls the last writer won: an installed integration could run without being
+  listed, and an uninstalled one stay listed as installed, with every call
+  answering 200. Updates are now pinned to the `resourceVersion` they read and
+  retried on conflict.
+
 ## [0.12.1] - 2026-10-01
 
 ### Added
