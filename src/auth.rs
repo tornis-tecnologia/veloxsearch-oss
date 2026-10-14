@@ -50,6 +50,40 @@ enum AuthState {
 }
 
 static STATE: RwLock<AuthState> = RwLock::new(AuthState::Unknown);
+/// When `STATE` was last probed, in epoch milliseconds (0 = never).
+static PROBED_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How long a cached first-run verdict is trusted. Short: the Secret can be
+/// created by something other than this process — another replica's `/setup`,
+/// an operator restoring it, an install whose pod started before it existed —
+/// and a pod that cached "first run" for good kept serving `/setup` (and
+/// refusing every login) until it was restarted, with nothing in its log.
+const FIRST_RUN_RECHECK_MS: u64 = 2_000;
+/// How long a cached credential is trusted: a password changed through
+/// another replica reaches this one within this window.
+const RECHECK_MS: u64 = 30_000;
+
+/// Must the cached state be probed again? Pure, so the policy is unit-tested.
+fn needs_probe(state: &AuthState, age_ms: u64) -> bool {
+    match state {
+        AuthState::Unknown => true,
+        AuthState::FirstRun => age_ms >= FIRST_RUN_RECHECK_MS,
+        AuthState::Managed { .. } | AuthState::Env => age_ms >= RECHECK_MS,
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// Store a probed state and stamp it.
+fn cache_state(st: AuthState) {
+    *STATE.write().unwrap() = st;
+    PROBED_AT_MS.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+}
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -89,31 +123,30 @@ fn secret_str(s: &Secret, key: &str) -> Option<String> {
         .and_then(|b| String::from_utf8(b.0.clone()).ok())
 }
 
-/// Probe the managed Secret / env and cache the result. Probe failures are NOT
-/// cached (cluster might be briefly unreachable) — they fall back to Env rules
-/// for that request only.
+/// Probe the managed Secret / env and cache the result for a while
+/// (`needs_probe`). Probe failures are NOT cached (cluster might be briefly
+/// unreachable): a state already known is kept, otherwise they fall back to
+/// Env rules for that request only.
 async fn load_state() -> AuthState {
-    {
-        let cur = STATE.read().unwrap().clone();
-        if !matches!(cur, AuthState::Unknown) {
-            return cur;
-        }
+    let cur = STATE.read().unwrap().clone();
+    let age = now_ms().saturating_sub(PROBED_AT_MS.load(std::sync::atomic::Ordering::Relaxed));
+    if !needs_probe(&cur, age) {
+        return cur;
     }
-    let probed = match probe().await {
+    match probe().await {
         Ok(st) => {
-            *STATE.write().unwrap() = st.clone();
+            cache_state(st.clone());
             st
         }
         Err(e) => {
             tracing::warn!("auth state probe failed (not cached): {e:#}");
-            if admin_password().is_some() {
-                AuthState::Env
-            } else {
-                AuthState::FirstRun
+            match cur {
+                AuthState::Unknown if admin_password().is_some() => AuthState::Env,
+                AuthState::Unknown => AuthState::FirstRun,
+                known => known,
             }
         }
-    };
-    probed
+    }
 }
 
 async fn probe() -> Result<AuthState> {
@@ -193,11 +226,11 @@ pub async fn complete_setup(username: &str, password: &str) -> Result<()> {
     .await
     .context("persisting credentials secret")?;
 
-    *STATE.write().unwrap() = AuthState::Managed {
+    cache_state(AuthState::Managed {
         user: username.to_string(),
         hash,
         session_secret,
-    };
+    });
     Ok(())
 }
 
@@ -433,6 +466,29 @@ pub async fn auth_guard(req: Request, next: Next) -> Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_first_run_verdict_is_rechecked_within_seconds() {
+        // A pod that started before the credentials Secret existed must not
+        // serve /setup forever.
+        assert!(!needs_probe(&AuthState::FirstRun, 0));
+        assert!(needs_probe(&AuthState::FirstRun, FIRST_RUN_RECHECK_MS));
+        const { assert!(FIRST_RUN_RECHECK_MS <= 5_000) };
+    }
+
+    #[test]
+    fn known_credentials_are_rechecked_but_not_on_every_request() {
+        let managed = AuthState::Managed {
+            user: "admin".into(),
+            hash: "h".into(),
+            session_secret: "s".into(),
+        };
+        for st in [managed, AuthState::Env] {
+            assert!(!needs_probe(&st, RECHECK_MS - 1));
+            assert!(needs_probe(&st, RECHECK_MS));
+        }
+        assert!(needs_probe(&AuthState::Unknown, 0));
+    }
+
     use super::*;
 
     /// The admin token is the one shape that existed before #79. Sessions

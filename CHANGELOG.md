@@ -8,6 +8,14 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **A pod that started before its credentials Secret existed no longer stays in
+  first-run mode for good.** The auth state was probed once and cached for the
+  life of the process, so such a pod served `/setup` and refused every login
+  until restarted, logging nothing. A first-run verdict is now re-checked after
+  2 s, and known credentials every 30 s (so a password changed through another
+  replica reaches this one too); a failed probe keeps the state already known.
+
 ## [0.12.1] - 2026-10-01
 
 ### Added
