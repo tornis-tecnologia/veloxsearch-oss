@@ -8,6 +8,16 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **Enabling scheduled snapshots no longer stalls the first scheduled
+  snapshot.** Saving a snapshot configuration rolls every node, and the policy
+  was created at once, so its first run fired into a rolling cluster and
+  OpenSearch's snapshot management held it in `CREATION_START` for about 35
+  minutes. When a save restarts the nodes, the policy now waits on the
+  deployment (`veloxsearch.ai/snapshot-policy-pending`, no credentials) and is
+  applied once the roll has settled. The snapshot tab shows it as `PENDING`
+  meanwhile.
+
 ## [0.12.1] - 2026-10-01
 
 ### Added
