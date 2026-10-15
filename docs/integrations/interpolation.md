@@ -49,6 +49,15 @@ These reconcile 1:1 with the set named in ADR-039:
 > place them where credentials legitimately go (e.g. Fluent Bit `HTTP_Passwd`);
 > the reviewer of a registry PR treats any other use as a red flag. The core does
 > not distinguish — it only enforces that no *foreign* token appears.
+>
+> **What a collector actually receives.** Whatever `{os_password}` renders to,
+> the agent builder rewrites every `HTTP_Passwd` line to
+> `HTTP_Passwd ${VELOX_OS_PASSWORD}` before the ConfigMap is written; the pod
+> gets that variable from the per-deployment Secret
+> `velox-agents/velox-agent-<deployment>-creds`. So the password is never in a
+> ConfigMap, and an admin-password reset reaches every collector (the sampler
+> re-syncs the Secret and restarts the pods once OpenSearch accepts the new
+> password). A package needs no change for this.
 
 ## The rule
 

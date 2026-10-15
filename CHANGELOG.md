@@ -8,7 +8,20 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **An admin-password reset no longer silently stops every collector.** Fluent
+  Bit agents and the observability stack's Data Prepper and exporter kept the
+  password they were installed with, so after a reset every `_bulk` was a 401
+  and ingestion dropped to zero while the integration still reported data
+  arriving. The sampler now carries a reset over to every collector of the
+  deployment once OpenSearch accepts the new password, and restarts their pods.
+  A reset the backstop rolls back (ADR-064) never reaches them.
+
 ### Security
+- **The deployment's admin password is no longer stored in agent ConfigMaps.**
+  Collector configs say `HTTP_Passwd ${VELOX_OS_PASSWORD}`; the value comes from
+  the Secret `velox-agents/velox-agent-<deployment>-creds`. Collectors installed
+  by an earlier release are rewritten in place on upgrade.
 - rustls 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).
 - `cargo deny` ignores RUSTSEC-2024-0449 (unsafe-libyaml unmaintained): it is
   pulled in by kube-client's serde_yaml and has no safe upgrade.
