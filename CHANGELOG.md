@@ -9,6 +9,12 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **The postgres integration no longer indexes the platform's own database
+  logs.** Its `*postgres*` glob also matched `veloxsearch-postgres-0` in the
+  platform namespace, mixing platform internals into the customer's
+  `postgres-logs`. Every service-scoped tailer now excludes the platform
+  namespace (the catch-all `kubernetes` tailer is unchanged). Applies on the
+  next install of the integration.
 - **An admin-password reset no longer silently stops every collector.** Fluent
   Bit agents and the observability stack's Data Prepper and exporter kept the
   password they were installed with, so after a reset every `_bulk` was a 401
