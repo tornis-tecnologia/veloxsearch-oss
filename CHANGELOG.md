@@ -9,13 +9,14 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
-- **Parallel integration installs and uninstalls no longer lose each other's
-  state.** The `monitors` and `integration-versions` annotations were updated by
-  read-modify-write with no concurrency check, so of several concurrent catalog
-  calls the last writer won: an installed integration could run without being
-  listed, and an uninstalled one stay listed as installed, with every call
-  answering 200. Updates are now pinned to the `resourceVersion` they read and
-  retried on conflict.
+### Security
+- **The deployment's admin password is no longer stored in agent ConfigMaps.**
+  Collector configs say `HTTP_Passwd ${VELOX_OS_PASSWORD}`; the value comes from
+  the Secret `velox-agents/velox-agent-<deployment>-creds`. Collectors installed
+  by an earlier release are rewritten in place on upgrade.
+- rustls 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).
+- `cargo deny` ignores RUSTSEC-2024-0449 (unsafe-libyaml unmaintained): it is
+  pulled in by kube-client's serde_yaml and has no safe upgrade.
 
 ## [0.12.1] - 2026-10-01
 
