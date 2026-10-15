@@ -8,6 +8,11 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Security
+- rustls 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).
+- `cargo deny` ignores RUSTSEC-2024-0449 (unsafe-libyaml unmaintained): it is
+  pulled in by kube-client's serde_yaml and has no safe upgrade.
+
 ## [0.12.1] - 2026-10-01
 
 ### Added
