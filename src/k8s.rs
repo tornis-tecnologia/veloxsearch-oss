@@ -1894,42 +1894,94 @@ pub async fn set_monitor(dep: &Deployment, recipe: &str, enabled: bool) -> Resul
     validate_name(name)?;
     let client = client().await?;
     let api = os_api(&client, dep);
-    let obj = api
-        .get(name)
-        .await
-        .context("fetching cluster for monitor update")?;
+    update_annotations(&api, name, "monitors", |obj| {
+        let mut monitors = monitors_from(obj.metadata.annotations.as_ref());
+        monitors.retain(|m| m != recipe);
+        if enabled {
+            monitors.push(recipe.to_string());
+        }
+        // null removes the annotation key in a merge patch when nothing is left.
+        let value = if monitors.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(monitors.join(","))
+        };
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(LABEL_MONITORS.to_string(), value);
+        // Disabling drops the recorded package version along with the monitor,
+        // so an uninstalled integration is never reported back as "installed
+        // 1.0.0" (ADR-039 versioning state, #75).
+        if !enabled {
+            let mut versions = parse_integration_versions(obj);
+            if versions.remove(recipe).is_some() {
+                annotations.insert(
+                    LABEL_INTEGRATION_VERSIONS.to_string(),
+                    render_integration_versions(&versions),
+                );
+            }
+        }
+        annotations
+    })
+    .await
+}
 
-    let mut monitors = monitors_from(obj.metadata.annotations.as_ref());
-    monitors.retain(|m| m != recipe);
-    if enabled {
-        monitors.push(recipe.to_string());
-    }
-
-    // null removes the annotation key in a merge patch when nothing is left.
-    let value = if monitors.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::String(monitors.join(","))
-    };
-    let mut annotations = serde_json::Map::new();
-    annotations.insert(LABEL_MONITORS.to_string(), value);
-    // Disabling drops the recorded package version along with the monitor, so
-    // an uninstalled integration is never reported back as "installed 1.0.0"
-    // (ADR-039 versioning state, #75).
-    if !enabled {
-        let mut versions = parse_integration_versions(&obj);
-        if versions.remove(recipe).is_some() {
-            annotations.insert(
-                LABEL_INTEGRATION_VERSIONS.to_string(),
-                render_integration_versions(&versions),
-            );
+/// Read-modify-write of a deployment's annotations that cannot lose an update.
+///
+/// `monitors` and `integration-versions` are each ONE annotation holding a set,
+/// so two writers that both read the old set and both patch it back each wipe
+/// the other's change — and the catalog fires installs and uninstalls in
+/// parallel. Found live with nine concurrent installs: an agent running but
+/// absent from both annotations (invisible to the UI), and with nine concurrent
+/// uninstalls, agents gone but still listed as installed — every call a 200.
+///
+/// The patch carries the `resourceVersion` it was computed from, so the API
+/// server refuses it (409) if anything changed the object since the read; the
+/// change is then recomputed on a fresh read. `change` gets the object and
+/// returns the annotation values to merge (`null` removes a key).
+async fn update_annotations(
+    api: &Api<DynamicObject>,
+    name: &str,
+    what: &str,
+    mut change: impl FnMut(&DynamicObject) -> serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    const ATTEMPTS: u32 = 12;
+    for attempt in 1..=ATTEMPTS {
+        let obj = api
+            .get(name)
+            .await
+            .with_context(|| format!("fetching cluster for {what} update"))?;
+        let patch = annotations_cas_patch(&obj, change(&obj));
+        match api
+            .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(kube::Error::Api(e)) if e.code == 409 && attempt < ATTEMPTS => {
+                // Lost the race: spread the retries a little so a burst of
+                // writers does not collide again on the same tick.
+                let jitter = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| u64::from(d.subsec_nanos() % 50))
+                    .unwrap_or_default();
+                let ms = 20 * u64::from(attempt) + jitter;
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+            Err(e) => return Err(e).with_context(|| format!("patching {what} annotation")),
         }
     }
-    let patch = serde_json::json!({ "metadata": { "annotations": annotations } });
-    api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .context("patching monitors annotation")?;
-    Ok(())
+    unreachable!("the last attempt returns")
+}
+
+/// The merge patch `update_annotations` sends: the annotation changes, pinned
+/// to the `resourceVersion` they were computed from.
+fn annotations_cas_patch(
+    obj: &DynamicObject,
+    annotations: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({ "metadata": {
+        "resourceVersion": obj.metadata.resource_version,
+        "annotations": annotations,
+    } })
 }
 
 /// The installed package version per integration id, read off the deployment
@@ -1989,23 +2041,20 @@ pub async fn set_integration_version(
     validate_name(name)?;
     let client = client().await?;
     let api = os_api(&client, dep);
-    let obj = api
-        .get(name)
-        .await
-        .context("fetching cluster for integration version update")?;
-
-    let mut versions = parse_integration_versions(&obj);
-    match version {
-        Some(v) => versions.insert(id.to_string(), v.to_string()),
-        None => versions.remove(id),
-    };
-    let patch = serde_json::json!({ "metadata": { "annotations": {
-        LABEL_INTEGRATION_VERSIONS: render_integration_versions(&versions),
-    } } });
-    api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .context("patching integration-versions annotation")?;
-    Ok(())
+    update_annotations(&api, name, "integration-versions", |obj| {
+        let mut versions = parse_integration_versions(obj);
+        match version {
+            Some(v) => versions.insert(id.to_string(), v.to_string()),
+            None => versions.remove(id),
+        };
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(
+            LABEL_INTEGRATION_VERSIONS.to_string(),
+            render_integration_versions(&versions),
+        );
+        annotations
+    })
+    .await
 }
 
 /// Record (or clear) the OTel observability stack marker on a deployment
@@ -2893,7 +2942,8 @@ async fn status_from(
             .await
             .ok()
             .flatten()
-            .map(|o| o.data);
+            .map(|o| o.data)
+            .or_else(|| pending_policy_from(Some(&annotations)).map(|p| p.1));
         let cfg = snapshot_config_from(&obj.data, policy.as_ref());
         snapshot_state_from(&cfg, policy.as_ref(), phase.eq_ignore_ascii_case("running"))
     } else {
@@ -6748,6 +6798,8 @@ pub async fn get_snapshot_config(
         .ok()
         .flatten()
         .map(|o| o.data);
+    let policy =
+        policy.or_else(|| pending_policy_from(cr.metadata.annotations.as_ref()).map(|p| p.1));
     let cfg = snapshot_config_from(&cr.data, policy.as_ref());
     let running = cr
         .data
@@ -6860,6 +6912,8 @@ pub async fn plan_snapshot_config(
         .ok()
         .flatten()
         .map(|o| o.data);
+    let policy =
+        policy.or_else(|| pending_policy_from(cr.metadata.annotations.as_ref()).map(|p| p.1));
     let stored = snapshot_config_from(&cr.data, policy.as_ref());
     let has_creds = cfg_has_stored_credentials(&client, dep).await;
     preflight_snapshot(&client, dep, incoming, &stored, has_creds).await
@@ -6891,6 +6945,8 @@ pub async fn set_snapshot_config(
         .ok()
         .flatten()
         .map(|o| o.data);
+    let existing_policy = existing_policy
+        .or_else(|| pending_policy_from(cr.metadata.annotations.as_ref()).map(|p| p.1));
     let stored = snapshot_config_from(&cr.data, existing_policy.as_ref());
     let has_creds = cfg_has_stored_credentials(&client, dep).await;
 
@@ -6913,6 +6969,7 @@ pub async fn set_snapshot_config(
             .await
             .context("clearing the snapshot configuration on the cluster CR")?;
         let _ = policies.delete(&policy_name, &dp).await;
+        set_pending_policy(&client, dep, None).await?;
         let _ = secrets.delete(&snapshot_secret_name(name), &dp).await;
         return Ok(plan);
     }
@@ -6943,20 +7000,117 @@ pub async fn set_snapshot_config(
     .await
     .context("wiring the snapshot repository onto the cluster CR")?;
 
-    if cfg.policy.enabled {
+    let policy_cr = snapshot::policy_cr(dep.namespace(), name, &cfg);
+    if cfg.policy.enabled && plan.will_restart {
+        // The save rolls every node (plugin + keystore). A policy created now
+        // fires its first snapshot into a cluster that is still rolling, and
+        // OpenSearch's snapshot management wedges that run in CREATION_START —
+        // measured live: ~35 minutes with no scheduled snapshot right after
+        // backups were enabled. So the policy waits for the roll, on the CR
+        // (restart-safe; it carries no credentials), and the sampler applies
+        // it once the deployment has settled (`apply_pending_snapshot_policy`).
+        // A policy from an earlier save is removed for the same reason.
+        let _ = policies.delete(&policy_name, &dp).await;
+        set_pending_policy(&client, dep, Some(&policy_cr)).await?;
+    } else if cfg.policy.enabled {
         policies
-            .patch(
-                &policy_name,
-                &pp,
-                &Patch::Apply(&snapshot::policy_cr(dep.namespace(), name, &cfg)),
-            )
+            .patch(&policy_name, &pp, &Patch::Apply(&policy_cr))
             .await
             .context("applying the scheduled snapshot policy")?;
+        set_pending_policy(&client, dep, None).await?;
     } else {
         let _ = policies.delete(&policy_name, &dp).await;
+        set_pending_policy(&client, dep, None).await?;
     }
 
     Ok(plan)
+}
+
+/// Annotation on the `OpenSearchCluster` holding a snapshot policy that waits
+/// for the node roll its save started: `{"since": <epoch s>, "policy": <CR>}`.
+const POLICY_PENDING_ANNOTATION: &str = "veloxsearch.ai/snapshot-policy-pending";
+/// Owns that annotation and nothing else, so applying without it removes it.
+const POLICY_PENDING_FIELD_MANAGER: &str = "veloxsearch-snapshot-pending";
+/// A pending policy is not applied sooner than this after its save, however
+/// settled the deployment looks: the operator needs a reconcile to start the
+/// roll, and until it does the old revision is all there is — "settled".
+const POLICY_DEFER_MIN_SECS: i64 = 90;
+
+async fn set_pending_policy(
+    client: &Client,
+    dep: &Deployment,
+    policy: Option<&serde_json::Value>,
+) -> Result<()> {
+    let mut annotations = serde_json::Map::new();
+    if let Some(p) = policy {
+        annotations.insert(
+            POLICY_PENDING_ANNOTATION.into(),
+            serde_json::json!({ "since": now_secs(), "policy": p })
+                .to_string()
+                .into(),
+        );
+    }
+    let patch = serde_json::json!({
+        "apiVersion": "opensearch.org/v1",
+        "kind": "OpenSearchCluster",
+        "metadata": { "name": dep.name(), "annotations": annotations }
+    });
+    os_api(client, dep)
+        .patch(
+            dep.name(),
+            &PatchParams::apply(POLICY_PENDING_FIELD_MANAGER).force(),
+            &Patch::Apply(&patch),
+        )
+        .await
+        .context("recording the snapshot policy that waits for the roll")?;
+    Ok(())
+}
+
+/// The pending policy on a CR, if any: (since, policy CR).
+fn pending_policy_from(
+    annotations: Option<&BTreeMap<String, String>>,
+) -> Option<(i64, serde_json::Value)> {
+    let raw = annotations?.get(POLICY_PENDING_ANNOTATION)?;
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    Some((v.get("since")?.as_i64()?, v.get("policy")?.clone()))
+}
+
+/// Is a pending policy due? Pure, so the rule is unit-tested.
+fn pending_policy_due(since: i64, now: i64, settled: bool) -> bool {
+    settled && now - since >= POLICY_DEFER_MIN_SECS
+}
+
+/// Sampler step: apply a snapshot policy that was waiting for its save's node
+/// roll, once the deployment has settled. A deployment without one costs the
+/// CR read only.
+pub async fn apply_pending_snapshot_policy(dep: &Deployment) {
+    let run = async {
+        let client = client().await?;
+        let Some(cr) = os_api(&client, dep).get_opt(dep.name()).await? else {
+            return Ok(false);
+        };
+        let Some((since, policy)) = pending_policy_from(cr.metadata.annotations.as_ref()) else {
+            return Ok(false);
+        };
+        if !pending_policy_due(since, now_secs(), is_settled(dep).await?) {
+            return Ok(false);
+        }
+        policy_api(&client, dep)
+            .patch(
+                &snapshot::policy_name(dep.name()),
+                &PatchParams::apply(SNAPSHOT_FIELD_MANAGER).force(),
+                &Patch::Apply(&policy),
+            )
+            .await
+            .context("applying the scheduled snapshot policy")?;
+        set_pending_policy(&client, dep, None).await?;
+        anyhow::Ok(true)
+    };
+    match run.await {
+        Ok(true) => tracing::info!("{dep}: node roll done, scheduled snapshot policy applied"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("{dep}: pending snapshot policy: {e:#}"),
+    }
 }
 
 /// Ask OpenSearch itself whether the repository actually works — the analogue
@@ -7333,6 +7487,63 @@ pub async fn provision_tenant(t: &TenantIdentity, q: &TenantQuota) -> Result<()>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_annotation_update_is_pinned_to_the_version_it_read() {
+        // BUG-2: without the resourceVersion a stale writer's merge patch
+        // silently wins; with it the API server answers 409 and we re-read.
+        let mut obj = DynamicObject::new(
+            "logs-ab12",
+            &ApiResource::from_gvk(&GroupVersionKind::gvk(
+                "opensearch.org",
+                "v1",
+                "OpenSearchCluster",
+            )),
+        );
+        obj.metadata.resource_version = Some("4711".into());
+        let mut a = serde_json::Map::new();
+        a.insert(LABEL_MONITORS.into(), serde_json::Value::Null);
+        let patch = annotations_cas_patch(&obj, a);
+        assert_eq!(patch["metadata"]["resourceVersion"], "4711");
+        assert!(patch["metadata"]["annotations"][LABEL_MONITORS].is_null());
+        assert!(
+            patch.get("spec").is_none(),
+            "annotations only, never the spec"
+        );
+    }
+
+    #[test]
+    fn a_policy_waiting_for_the_roll_is_applied_only_once_settled_and_old_enough() {
+        // BUG-6: the policy must not land mid-roll, and "settled" seconds after
+        // the save is the old revision, not the end of the roll.
+        let since = 1_000;
+        assert!(!pending_policy_due(since, since + 10, true));
+        assert!(!pending_policy_due(
+            since,
+            since + POLICY_DEFER_MIN_SECS,
+            false
+        ));
+        assert!(pending_policy_due(
+            since,
+            since + POLICY_DEFER_MIN_SECS,
+            true
+        ));
+    }
+
+    #[test]
+    fn a_pending_policy_round_trips_through_its_annotation() {
+        let policy =
+            serde_json::json!({ "kind": "OpensearchSnapshotPolicy", "spec": { "enabled": true } });
+        let mut a = BTreeMap::new();
+        a.insert(
+            POLICY_PENDING_ANNOTATION.to_string(),
+            serde_json::json!({ "since": 42, "policy": policy }).to_string(),
+        );
+        assert_eq!(pending_policy_from(Some(&a)), Some((42, policy)));
+        assert_eq!(pending_policy_from(None), None);
+        a.insert(POLICY_PENDING_ANNOTATION.to_string(), "not json".into());
+        assert_eq!(pending_policy_from(Some(&a)), None);
+    }
+
     use super::*;
 
     // ── #27/#96 bounce target: the recovery SOURCE ─────────────────────

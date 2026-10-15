@@ -278,6 +278,9 @@ pub async fn run_sampler() {
             // OpenSearch takes it; so does the move of a pre-fix collector's
             // password out of its ConfigMap.
             crate::agents::reconcile_creds(&dep).await;
+            // A scheduled snapshot policy waits here for the node roll its
+            // save started (BUG-6).
+            crate::k8s::apply_pending_snapshot_policy(&dep).await;
             if let Err(e) = sample_once(&dep).await {
                 tracing::debug!("sampler: {dep}: {e:#}");
             }

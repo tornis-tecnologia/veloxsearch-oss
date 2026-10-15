@@ -120,6 +120,68 @@ pub(crate) fn externalize_password(conf: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// A container-log tailer scoped to one service (`*postgres*`, `*redis*`, …)
+/// with the platform's own namespace added to its `Exclude_Path`. The platform
+/// runs its own postgres (`veloxsearch-postgres-0`), and the postgres
+/// integration's `*postgres*` glob shipped those logs into the customer's
+/// `postgres-logs` index — platform internals mixed into user data, growing
+/// with the platform's activity. Container log files are named
+/// `<pod>_<namespace>_<container>-<id>.log`, so the namespace is excludable by
+/// glob. The catch-all `kubernetes` tailer (`/var/log/containers/*.log`) and
+/// the node-file tailers are left as they are: collecting everything is what
+/// they are for. Core-owned like the events prune stanza, so the registry
+/// template stays byte-identical and a package gets the same exclusion.
+fn with_platform_excluded<'a>(conf: &'a str, platform_ns: &str) -> Cow<'a, str> {
+    let exclude = format!("/var/log/containers/*_{platform_ns}_*.log");
+    let scoped = conf.lines().any(|l| {
+        let mut it = l.split_whitespace();
+        it.next().is_some_and(|k| k.eq_ignore_ascii_case("Path"))
+            && it.next().is_some_and(|p| {
+                p.starts_with("/var/log/containers/") && p != "/var/log/containers/*.log"
+            })
+    });
+    if !scoped || conf.contains(&exclude) {
+        return Cow::Borrowed(conf);
+    }
+    let mut out = String::with_capacity(conf.len() + exclude.len() + 1);
+    let mut done = false;
+    for line in conf.split_inclusive('\n') {
+        let is_exclude = line
+            .split_whitespace()
+            .next()
+            .is_some_and(|k| k.eq_ignore_ascii_case("Exclude_Path"));
+        if is_exclude && !done {
+            let body = line.trim_end_matches('\n');
+            out.push_str(&format!("{body},{exclude}"));
+            if line.ends_with('\n') {
+                out.push('\n');
+            }
+            done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !done {
+        // No Exclude_Path to extend: add one right after the Path line.
+        let mut with_line = String::with_capacity(out.len() + exclude.len() + 20);
+        for line in out.split_inclusive('\n') {
+            with_line.push_str(line);
+            if !done
+                && line
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|k| k.eq_ignore_ascii_case("Path"))
+            {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                with_line.push_str(&format!("{indent}Exclude_Path {exclude}\n"));
+                done = true;
+            }
+        }
+        out = with_line;
+    }
+    Cow::Owned(out)
+}
+
 /// Namespace + ServiceAccount + RBAC the Fluent Bit kubernetes filter needs.
 ///
 /// Shared with the OTel stack install, whose pods run as the same account: a
@@ -453,6 +515,7 @@ fn agent_manifests(
     creds_hash: &str,
 ) -> (serde_json::Value, serde_json::Value) {
     let conf = externalize_password(conf);
+    let conf = with_platform_excluded(&conf, crate::k8s::ns()).into_owned();
     let conf = with_events_prune(&conf).into_owned();
     let conf = conf.as_str();
     let prune = conf.contains(PRUNE_LUA_PATH);
@@ -920,7 +983,11 @@ mod tests {
             let conf = fluent_bit_conf(&dep(), recipe, "admin", "pw");
             let agent = agent_name(&dep(), recipe);
             let (cm, workload) = agent_manifests(&dep(), &agent, &conf, true, "h");
-            assert_eq!(deployed_conf(&cm), externalize_password(&conf), "{recipe}");
+            assert_eq!(
+                deployed_conf(&cm),
+                with_platform_excluded(&externalize_password(&conf), crate::k8s::ns()),
+                "{recipe}"
+            );
             assert!(cm["data"].get(PRUNE_LUA_KEY).is_none(), "{recipe}");
             assert_eq!(workload["kind"], "DaemonSet");
             assert!(
@@ -1092,5 +1159,43 @@ mod tests {
             externalize_password(&shipped_before),
             Cow::Owned(_)
         ));
+    }
+
+    #[test]
+    fn a_service_tailer_never_reads_the_platform_namespace() {
+        // BUG-3: the postgres glob matched the platform's own postgres pod.
+        let conf = fluent_bit_conf(&dep(), "postgres", "admin", "pw");
+        let out = with_platform_excluded(&conf, "veloxsearch-system");
+        assert!(out.contains(
+            "    Exclude_Path /var/log/containers/*velox-agent*.log,/var/log/containers/*_veloxsearch-system_*.log\n"
+        ));
+        // Exactly one line changed.
+        assert_eq!(out.lines().count(), conf.lines().count());
+        // Idempotent: a re-apply does not append it twice.
+        assert_eq!(with_platform_excluded(&out, "veloxsearch-system"), out);
+    }
+
+    #[test]
+    fn the_catch_all_and_node_tailers_are_left_alone() {
+        for recipe in ["kubernetes", "ssh", "k8s-audit", "k8s-events"] {
+            let conf = fluent_bit_conf(&dep(), recipe, "admin", "pw");
+            assert!(
+                matches!(
+                    with_platform_excluded(&conf, "veloxsearch-system"),
+                    Cow::Borrowed(_)
+                ),
+                "{recipe}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_package_without_exclude_path_gets_one_after_its_path() {
+        let conf =
+            "[INPUT]\n    Name tail\n    Path /var/log/containers/*foo*.log\n    Tag kube.*\n";
+        assert_eq!(
+            with_platform_excluded(conf, "ns1"),
+            "[INPUT]\n    Name tail\n    Path /var/log/containers/*foo*.log\n    Exclude_Path /var/log/containers/*_ns1_*.log\n    Tag kube.*\n"
+        );
     }
 }
