@@ -9,6 +9,13 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **Redis 7 logs parse.** The pipeline's stock `REDISTIMESTAMP` has no year and
+  Redis 7 writes one, so no line parsed. The timestamp now takes an optional
+  year (registry package `redis` 1.0.1).
+- **RabbitMQ warnings and errors parse.** RabbitMQ colours every line above
+  `info` with ANSI codes, which failed the grok (~half of real logs, and exactly
+  the interesting half). The codes are stripped first (registry package
+  `rabbitmq` 1.0.1).
 - **An admin-password reset no longer silently stops every collector.** Fluent
   Bit agents and the observability stack's Data Prepper and exporter kept the
   password they were installed with, so after a reset every `_bulk` was a 401

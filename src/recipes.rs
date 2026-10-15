@@ -1470,9 +1470,12 @@ pub(crate) fn recipe_teardown(
 ///   - k8s-events: the agent ships the structured Event object; the pipeline
 ///                derives @timestamp from the event's own time fields (the FB
 ///                opensearch output can't inject one).
-///   - redis:     `<pid>:<role> <REDISTIMESTAMP> <level-symbol> <message>`
-///                (Redis 3.0+ default); `role` is M/S/C/X, `level_sym` is
-///                `.`/`-`/`*`/`#`.
+///   - redis:     `<pid>:<role> <dd Mon [yyyy] HH:mm:ss.SSS> <level-symbol>
+///                <message>`; `role` is M/S/C/X, `level_sym` is `.`/`-`/`*`/`#`.
+///                Redis 7 writes the year, older releases do not — and the
+///                stock `REDISTIMESTAMP` pattern has no year, so on Redis 7 it
+///                matched nothing (0% parsed). The timestamp is captured with
+///                an optional year instead.
 ///   - mysql:     MySQL 8 / MariaDB error log `<ts> <thread> [<level>]
 ///                [<code>] [<subsystem>] <message>` — the bracketed
 ///                code/subsystem are MySQL-8-only, so optional.
@@ -1483,7 +1486,11 @@ pub(crate) fn recipe_teardown(
 ///   - mongo:     (4.4+) structured JSON per line (`{"t":{"$date":..},...}`)
 ///                parsed onto the root; @timestamp from `t.$date`.
 ///   - rabbitmq:  `<ISO8601 ts> [<level>] <<pid>> <message>` (default
-///                single-line format).
+///                single-line format). RabbitMQ 3.13+ wraps every line above
+///                `info` in ANSI colour codes (`ESC[38;5;214m … ESC[0m`) even
+///                when stdout is not a terminal; they are stripped from
+///                `message` first, or the warnings and errors — the lines that
+///                matter — never parse and keep the codes in the text.
 ///   - kafka:     log4j `[<ts>] <LEVEL> <message> (<logger>)`; trailing
 ///                `(logger)` captured when present; comma before ms.
 ///   - ssh:       SECURITY SOURCE — node auth log (syslog frame), not
@@ -1568,7 +1575,7 @@ pub(crate) fn recipe_os_config(recipe: &str) -> Option<(serde_json::Value, serde
             "VeloxSearch redis server-log pipeline",
             grok_date_processors(
                 serde_json::json!([
-                    "^%{POSINT:pid}:%{DATA:role} %{REDISTIMESTAMP:redis_time} %{DATA:level_sym} %{GREEDYDATA:redis_message}"
+                    "^%{POSINT:pid}:%{DATA:role} (?<redis_time>%{MONTHDAY} %{MONTH}(?: %{YEAR})? %{TIME}) %{DATA:level_sym} %{GREEDYDATA:redis_message}"
                 ]),
                 "redis_time",
                 serde_json::json!(["dd MMM yyyy HH:mm:ss.SSS", "dd MMM HH:mm:ss.SSS"]),
@@ -1639,13 +1646,13 @@ pub(crate) fn recipe_os_config(recipe: &str) -> Option<(serde_json::Value, serde
         ),
         "rabbitmq" => (
             "VeloxSearch rabbitmq server-log pipeline",
-            grok_date_processors(
+            strip_ansi_first(grok_date_processors(
                 serde_json::json!([
                     "^%{TIMESTAMP_ISO8601:rmq_time} \\[%{DATA:level}\\] <%{DATA:rmq_pid}> %{GREEDYDATA:rmq_message}"
                 ]),
                 "rmq_time",
                 serde_json::json!(["ISO8601", "yyyy-MM-dd HH:mm:ss.SSSSSSZ", "yyyy-MM-dd HH:mm:ss.SSSZ"]),
-            ),
+            )),
             serde_json::json!({
                 "@timestamp":  { "type": "date" },
                 "level":       { "type": "keyword" },
@@ -1775,6 +1782,17 @@ fn grok_date_processors(
         { "date": { "field": time_field, "target_field": "@timestamp",
                     "formats": time_formats, "ignore_failure": true } }
     ])
+}
+
+/// `processors` with a `gsub` in front that removes ANSI SGR colour codes
+/// (`ESC[…m`) from `message`, for services that colour their log lines.
+fn strip_ansi_first(processors: serde_json::Value) -> serde_json::Value {
+    let mut v = vec![serde_json::json!(
+        { "gsub": { "field": "message", "pattern": "\\x1B\\[[0-9;]*m", "replacement": "",
+                    "ignore_missing": true } }
+    )];
+    v.extend(processors.as_array().into_iter().flatten().cloned());
+    serde_json::Value::Array(v)
 }
 
 /// A json + date pipeline (services that log structured JSON, e.g. mongo,
