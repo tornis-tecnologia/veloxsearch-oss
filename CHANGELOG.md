@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-10-15
+
 ### Fixed
 - **The postgres integration no longer indexes the platform's own database
   logs.** Its `*postgres*` glob also matched `veloxsearch-postgres-0` in the
