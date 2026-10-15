@@ -273,6 +273,65 @@ pub(crate) async fn get_dynamic(
         .with_context(|| format!("serializing {kind}/{name}"))
 }
 
+/// Every object of one kind in a namespace, as JSON. The agents namespace is
+/// small (a handful of collectors per deployment), so no paging.
+pub(crate) async fn list_dynamic(
+    client: &Client,
+    group: &str,
+    version: &str,
+    kind: &str,
+    namespace: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(group, version, kind));
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+    api.list(&ListParams::default())
+        .await
+        .with_context(|| format!("listing {kind} in {namespace}"))?
+        .items
+        .into_iter()
+        .map(|o| serde_json::to_value(o).with_context(|| format!("serializing a {kind}")))
+        .collect()
+}
+
+/// A JSON merge patch of one object, under the default field manager — NOT
+/// `apply_dynamic`'s. Used for the few fields a reconcile changes on an object
+/// an install owns (a pod-template annotation that rolls it, one Secret key):
+/// a server-side apply of that fragment under the install's manager would
+/// prune everything else the install wrote.
+pub(crate) async fn merge_patch_dynamic(
+    client: &Client,
+    group: &str,
+    version: &str,
+    kind: &str,
+    namespace: &str,
+    name: &str,
+    patch: &serde_json::Value,
+) -> Result<()> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(group, version, kind));
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, &ar);
+    api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+        .with_context(|| format!("patching {kind}/{name}"))?;
+    Ok(())
+}
+
+/// One key of a Secret as UTF-8: `None` when the Secret or the key is absent.
+pub(crate) async fn secret_value(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    Ok(secrets
+        .get_opt(name)
+        .await
+        .with_context(|| format!("reading Secret/{name}"))?
+        .and_then(|s| s.data)
+        .and_then(|d| d.get(key).map(|b| b.0.clone()))
+        .and_then(|b| String::from_utf8(b).ok()))
+}
+
 fn admin_secret_name(name: &str) -> String {
     format!("{name}-admin-credentials")
 }
@@ -1835,42 +1894,94 @@ pub async fn set_monitor(dep: &Deployment, recipe: &str, enabled: bool) -> Resul
     validate_name(name)?;
     let client = client().await?;
     let api = os_api(&client, dep);
-    let obj = api
-        .get(name)
-        .await
-        .context("fetching cluster for monitor update")?;
+    update_annotations(&api, name, "monitors", |obj| {
+        let mut monitors = monitors_from(obj.metadata.annotations.as_ref());
+        monitors.retain(|m| m != recipe);
+        if enabled {
+            monitors.push(recipe.to_string());
+        }
+        // null removes the annotation key in a merge patch when nothing is left.
+        let value = if monitors.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(monitors.join(","))
+        };
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(LABEL_MONITORS.to_string(), value);
+        // Disabling drops the recorded package version along with the monitor,
+        // so an uninstalled integration is never reported back as "installed
+        // 1.0.0" (ADR-039 versioning state, #75).
+        if !enabled {
+            let mut versions = parse_integration_versions(obj);
+            if versions.remove(recipe).is_some() {
+                annotations.insert(
+                    LABEL_INTEGRATION_VERSIONS.to_string(),
+                    render_integration_versions(&versions),
+                );
+            }
+        }
+        annotations
+    })
+    .await
+}
 
-    let mut monitors = monitors_from(obj.metadata.annotations.as_ref());
-    monitors.retain(|m| m != recipe);
-    if enabled {
-        monitors.push(recipe.to_string());
-    }
-
-    // null removes the annotation key in a merge patch when nothing is left.
-    let value = if monitors.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::String(monitors.join(","))
-    };
-    let mut annotations = serde_json::Map::new();
-    annotations.insert(LABEL_MONITORS.to_string(), value);
-    // Disabling drops the recorded package version along with the monitor, so
-    // an uninstalled integration is never reported back as "installed 1.0.0"
-    // (ADR-039 versioning state, #75).
-    if !enabled {
-        let mut versions = parse_integration_versions(&obj);
-        if versions.remove(recipe).is_some() {
-            annotations.insert(
-                LABEL_INTEGRATION_VERSIONS.to_string(),
-                render_integration_versions(&versions),
-            );
+/// Read-modify-write of a deployment's annotations that cannot lose an update.
+///
+/// `monitors` and `integration-versions` are each ONE annotation holding a set,
+/// so two writers that both read the old set and both patch it back each wipe
+/// the other's change — and the catalog fires installs and uninstalls in
+/// parallel. Found live with nine concurrent installs: an agent running but
+/// absent from both annotations (invisible to the UI), and with nine concurrent
+/// uninstalls, agents gone but still listed as installed — every call a 200.
+///
+/// The patch carries the `resourceVersion` it was computed from, so the API
+/// server refuses it (409) if anything changed the object since the read; the
+/// change is then recomputed on a fresh read. `change` gets the object and
+/// returns the annotation values to merge (`null` removes a key).
+async fn update_annotations(
+    api: &Api<DynamicObject>,
+    name: &str,
+    what: &str,
+    mut change: impl FnMut(&DynamicObject) -> serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    const ATTEMPTS: u32 = 12;
+    for attempt in 1..=ATTEMPTS {
+        let obj = api
+            .get(name)
+            .await
+            .with_context(|| format!("fetching cluster for {what} update"))?;
+        let patch = annotations_cas_patch(&obj, change(&obj));
+        match api
+            .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(kube::Error::Api(e)) if e.code == 409 && attempt < ATTEMPTS => {
+                // Lost the race: spread the retries a little so a burst of
+                // writers does not collide again on the same tick.
+                let jitter = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| u64::from(d.subsec_nanos() % 50))
+                    .unwrap_or_default();
+                let ms = 20 * u64::from(attempt) + jitter;
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+            Err(e) => return Err(e).with_context(|| format!("patching {what} annotation")),
         }
     }
-    let patch = serde_json::json!({ "metadata": { "annotations": annotations } });
-    api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .context("patching monitors annotation")?;
-    Ok(())
+    unreachable!("the last attempt returns")
+}
+
+/// The merge patch `update_annotations` sends: the annotation changes, pinned
+/// to the `resourceVersion` they were computed from.
+fn annotations_cas_patch(
+    obj: &DynamicObject,
+    annotations: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({ "metadata": {
+        "resourceVersion": obj.metadata.resource_version,
+        "annotations": annotations,
+    } })
 }
 
 /// The installed package version per integration id, read off the deployment
@@ -1930,23 +2041,20 @@ pub async fn set_integration_version(
     validate_name(name)?;
     let client = client().await?;
     let api = os_api(&client, dep);
-    let obj = api
-        .get(name)
-        .await
-        .context("fetching cluster for integration version update")?;
-
-    let mut versions = parse_integration_versions(&obj);
-    match version {
-        Some(v) => versions.insert(id.to_string(), v.to_string()),
-        None => versions.remove(id),
-    };
-    let patch = serde_json::json!({ "metadata": { "annotations": {
-        LABEL_INTEGRATION_VERSIONS: render_integration_versions(&versions),
-    } } });
-    api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-        .context("patching integration-versions annotation")?;
-    Ok(())
+    update_annotations(&api, name, "integration-versions", |obj| {
+        let mut versions = parse_integration_versions(obj);
+        match version {
+            Some(v) => versions.insert(id.to_string(), v.to_string()),
+            None => versions.remove(id),
+        };
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(
+            LABEL_INTEGRATION_VERSIONS.to_string(),
+            render_integration_versions(&versions),
+        );
+        annotations
+    })
+    .await
 }
 
 /// Record (or clear) the OTel observability stack marker on a deployment
@@ -7274,6 +7382,30 @@ pub async fn provision_tenant(t: &TenantIdentity, q: &TenantQuota) -> Result<()>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_annotation_update_is_pinned_to_the_version_it_read() {
+        // BUG-2: without the resourceVersion a stale writer's merge patch
+        // silently wins; with it the API server answers 409 and we re-read.
+        let mut obj = DynamicObject::new(
+            "logs-ab12",
+            &ApiResource::from_gvk(&GroupVersionKind::gvk(
+                "opensearch.org",
+                "v1",
+                "OpenSearchCluster",
+            )),
+        );
+        obj.metadata.resource_version = Some("4711".into());
+        let mut a = serde_json::Map::new();
+        a.insert(LABEL_MONITORS.into(), serde_json::Value::Null);
+        let patch = annotations_cas_patch(&obj, a);
+        assert_eq!(patch["metadata"]["resourceVersion"], "4711");
+        assert!(patch["metadata"]["annotations"][LABEL_MONITORS].is_null());
+        assert!(
+            patch.get("spec").is_none(),
+            "annotations only, never the spec"
+        );
+    }
+
     use super::*;
 
     // ── #27/#96 bounce target: the recovery SOURCE ─────────────────────

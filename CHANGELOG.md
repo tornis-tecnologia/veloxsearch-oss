@@ -9,12 +9,14 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
-- **A pod that started before its credentials Secret existed no longer stays in
-  first-run mode for good.** The auth state was probed once and cached for the
-  life of the process, so such a pod served `/setup` and refused every login
-  until restarted, logging nothing. A first-run verdict is now re-checked after
-  2 s, and known credentials every 30 s (so a password changed through another
-  replica reaches this one too); a failed probe keeps the state already known.
+### Security
+- **The deployment's admin password is no longer stored in agent ConfigMaps.**
+  Collector configs say `HTTP_Passwd ${VELOX_OS_PASSWORD}`; the value comes from
+  the Secret `velox-agents/velox-agent-<deployment>-creds`. Collectors installed
+  by an earlier release are rewritten in place on upgrade.
+- rustls 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).
+- `cargo deny` ignores RUSTSEC-2024-0449 (unsafe-libyaml unmaintained): it is
+  pulled in by kube-client's serde_yaml and has no safe upgrade.
 
 ## [0.12.1] - 2026-10-01
 
