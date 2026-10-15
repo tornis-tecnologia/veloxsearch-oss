@@ -9,14 +9,14 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
-- **Enabling scheduled snapshots no longer stalls the first scheduled
-  snapshot.** Saving a snapshot configuration rolls every node, and the policy
-  was created at once, so its first run fired into a rolling cluster and
-  OpenSearch's snapshot management held it in `CREATION_START` for about 35
-  minutes. When a save restarts the nodes, the policy now waits on the
-  deployment (`veloxsearch.ai/snapshot-policy-pending`, no credentials) and is
-  applied once the roll has settled. The snapshot tab shows it as `PENDING`
-  meanwhile.
+### Security
+- **The deployment's admin password is no longer stored in agent ConfigMaps.**
+  Collector configs say `HTTP_Passwd ${VELOX_OS_PASSWORD}`; the value comes from
+  the Secret `velox-agents/velox-agent-<deployment>-creds`. Collectors installed
+  by an earlier release are rewritten in place on upgrade.
+- rustls 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).
+- `cargo deny` ignores RUSTSEC-2024-0449 (unsafe-libyaml unmaintained): it is
+  pulled in by kube-client's serde_yaml and has no safe upgrade.
 
 ## [0.12.1] - 2026-10-01
 
