@@ -12,8 +12,9 @@
 // produce byte-identical objects under the same field manager.
 use crate::k8s::{admin_creds, apply_dynamic as apply, client, delete_dynamic, get_dynamic};
 use crate::scope::Deployment;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use kube::Client;
+use std::borrow::Cow;
 
 /// Shared namespace every collection agent runs in. `pub(crate)` because the
 /// tenant NetworkPolicy set (#81) must name exactly this namespace to let
@@ -48,6 +49,138 @@ const EVENTS_PRUNE_FILTER: &str = "[FILTER]
     script /fluent-bit/etc/prune.lua
     call prune
 ";
+
+/// The collector's OpenSearch password reaches Fluent Bit as this environment
+/// variable, from the deployment's agent credentials Secret (`creds_secret`) —
+/// never as text in the ConfigMap. A ConfigMap is readable by anything that
+/// can read config, and a literal there went stale on every admin-password
+/// reset: each collector kept the old password and 401'd on every `_bulk`
+/// from then on, silently.
+const PASSWORD_ENV: &str = "VELOX_OS_PASSWORD";
+/// What the config says instead of the password. Fluent Bit expands `${VAR}`
+/// in classic-config values at load. Uppercase after the brace, so the
+/// engine's interpolation scanner passes it through untouched.
+pub(crate) const PASSWORD_REF: &str = "${VELOX_OS_PASSWORD}";
+/// Pod-template annotation carrying `creds_hash`: a changed password changes
+/// the template, which is what restarts the pods — an env var read from a
+/// Secret is only read when the container starts.
+const CREDS_HASH_ANNOTATION: &str = "veloxsearch.ai/creds-hash";
+
+/// The per-deployment Secret every collector of that deployment reads its
+/// login from, next to them in `AGENT_NS` (a `secretKeyRef` cannot cross
+/// namespaces, and the admin Secret lives in the deployment's).
+fn creds_secret_name(deployment: &Deployment) -> String {
+    format!("velox-agent-{deployment}-creds")
+}
+
+fn creds_secret(deployment: &Deployment, user: &str, password: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+        "metadata": { "name": creds_secret_name(deployment), "namespace": AGENT_NS,
+                      "labels": { "veloxsearch.ai/target": deployment.name() } },
+        "stringData": { "username": user, "password": password }
+    })
+}
+
+/// Same hasher as the config hash, over the login the pods should be running
+/// with. Only compared, never reversed.
+fn creds_hash(user: &str, password: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (user, password).hash(&mut h);
+    format!("{:x}", h.finish())
+}
+
+/// Every `HTTP_Passwd` value in a Fluent Bit config replaced by
+/// [`PASSWORD_REF`]. Applied to whatever config reaches the builder — the
+/// compiled-in recipe, a registry package rendered with the real password, or
+/// a collector shipped before this existed — so no path can put the password
+/// in a ConfigMap. Keys are case-insensitive in Fluent Bit, so the match is
+/// too. A config that already references the variable comes back borrowed.
+pub(crate) fn externalize_password(conf: &str) -> Cow<'_, str> {
+    let is_plain = |line: &str| {
+        let mut it = line.split_whitespace();
+        matches!((it.next(), it.next()), (Some(k), v)
+            if k.eq_ignore_ascii_case("HTTP_Passwd") && v != Some(PASSWORD_REF))
+    };
+    if !conf.lines().any(is_plain) {
+        return Cow::Borrowed(conf);
+    }
+    let mut out = String::with_capacity(conf.len());
+    for line in conf.split_inclusive('\n') {
+        if is_plain(line) {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let key = line.split_whitespace().next().unwrap_or("HTTP_Passwd");
+            let eol = if line.ends_with('\n') { "\n" } else { "" };
+            out.push_str(&format!("{indent}{key} {PASSWORD_REF}{eol}"));
+        } else {
+            out.push_str(line);
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// A container-log tailer scoped to one service (`*postgres*`, `*redis*`, …)
+/// with the platform's own namespace added to its `Exclude_Path`. The platform
+/// runs its own postgres (`veloxsearch-postgres-0`), and the postgres
+/// integration's `*postgres*` glob shipped those logs into the customer's
+/// `postgres-logs` index — platform internals mixed into user data, growing
+/// with the platform's activity. Container log files are named
+/// `<pod>_<namespace>_<container>-<id>.log`, so the namespace is excludable by
+/// glob. The catch-all `kubernetes` tailer (`/var/log/containers/*.log`) and
+/// the node-file tailers are left as they are: collecting everything is what
+/// they are for. Core-owned like the events prune stanza, so the registry
+/// template stays byte-identical and a package gets the same exclusion.
+fn with_platform_excluded<'a>(conf: &'a str, platform_ns: &str) -> Cow<'a, str> {
+    let exclude = format!("/var/log/containers/*_{platform_ns}_*.log");
+    let scoped = conf.lines().any(|l| {
+        let mut it = l.split_whitespace();
+        it.next().is_some_and(|k| k.eq_ignore_ascii_case("Path"))
+            && it.next().is_some_and(|p| {
+                p.starts_with("/var/log/containers/") && p != "/var/log/containers/*.log"
+            })
+    });
+    if !scoped || conf.contains(&exclude) {
+        return Cow::Borrowed(conf);
+    }
+    let mut out = String::with_capacity(conf.len() + exclude.len() + 1);
+    let mut done = false;
+    for line in conf.split_inclusive('\n') {
+        let is_exclude = line
+            .split_whitespace()
+            .next()
+            .is_some_and(|k| k.eq_ignore_ascii_case("Exclude_Path"));
+        if is_exclude && !done {
+            let body = line.trim_end_matches('\n');
+            out.push_str(&format!("{body},{exclude}"));
+            if line.ends_with('\n') {
+                out.push('\n');
+            }
+            done = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !done {
+        // No Exclude_Path to extend: add one right after the Path line.
+        let mut with_line = String::with_capacity(out.len() + exclude.len() + 20);
+        for line in out.split_inclusive('\n') {
+            with_line.push_str(line);
+            if !done
+                && line
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|k| k.eq_ignore_ascii_case("Path"))
+            {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                with_line.push_str(&format!("{indent}Exclude_Path {exclude}\n"));
+                done = true;
+            }
+        }
+        out = with_line;
+    }
+    Cow::Owned(out)
+}
 
 /// Namespace + ServiceAccount + RBAC the Fluent Bit kubernetes filter needs.
 ///
@@ -254,10 +387,12 @@ fn agent_name(deployment: &Deployment, recipe: &str) -> String {
 /// recipe's config from `fluent_bit_conf` and applies the workload. k8s-events
 /// is the sole non-tailer (API-server watcher → Deployment, not DaemonSet).
 pub async fn deploy_agent(deployment: &Deployment, recipe: &str) -> Result<()> {
-    // Authenticate the collector with the deployment's per-cluster admin creds
-    // from its Secret (via admin_creds) — never a hardcoded default.
-    let (user, password) = admin_creds(deployment).await;
-    let conf = fluent_bit_conf(deployment, recipe, &user, &password);
+    // The collector authenticates with the deployment's per-cluster admin
+    // creds (via admin_creds) — never a hardcoded default. The password itself
+    // reaches the pod through the agent credentials Secret, so the config only
+    // names the variable.
+    let (user, _) = admin_creds(deployment).await;
+    let conf = fluent_bit_conf(deployment, recipe, &user, PASSWORD_REF);
     apply_agent_workload(deployment, recipe, &conf, recipe != "k8s-events").await
 }
 
@@ -290,8 +425,30 @@ async fn apply_agent_workload(
     let client = client().await?;
     ensure_rbac(&client).await?;
 
+    // The login first: the workload's pods read it at start.
+    let (user, password) = admin_creds(deployment).await;
+    if password.is_empty() {
+        bail!("no admin credentials for {deployment}; cannot configure its collector");
+    }
+    apply(
+        &client,
+        "",
+        "v1",
+        "Secret",
+        Some(AGENT_NS),
+        &creds_secret_name(deployment),
+        &creds_secret(deployment, &user, &password),
+    )
+    .await?;
+
     let agent = agent_name(deployment, recipe);
-    let (config_map, workload) = agent_manifests(deployment, &agent, conf, tails_logs);
+    let (config_map, workload) = agent_manifests(
+        deployment,
+        &agent,
+        conf,
+        tails_logs,
+        &creds_hash(&user, &password),
+    );
     apply(
         &client,
         "",
@@ -346,15 +503,21 @@ fn with_events_prune(conf: &str) -> std::borrow::Cow<'_, str> {
 /// An events watcher gets the prune stanza (`with_events_prune`), and a config
 /// that runs the prune script (`PRUNE_LUA_PATH`, #104) gets the script as a
 /// second ConfigMap key and a second subPath mount — subPath because the
-/// directory already holds the image's own files.
+/// directory already holds the image's own files. The password is never in the
+/// ConfigMap (`externalize_password`): the container gets it as
+/// [`PASSWORD_ENV`] from the agent credentials Secret, and `creds_hash` in the
+/// template restarts the pods when it changes.
 fn agent_manifests(
     deployment: &Deployment,
     agent: &str,
     conf: &str,
     tails_logs: bool,
+    creds_hash: &str,
 ) -> (serde_json::Value, serde_json::Value) {
-    let conf = with_events_prune(conf);
-    let conf = conf.as_ref();
+    let conf = externalize_password(conf);
+    let conf = with_platform_excluded(&conf, crate::k8s::ns()).into_owned();
+    let conf = with_events_prune(&conf).into_owned();
+    let conf = conf.as_str();
     let prune = conf.contains(PRUNE_LUA_PATH);
     let mut data = serde_json::json!({ "fluent-bit.conf": conf });
     let mut mounts = vec![serde_json::json!(
@@ -391,12 +554,15 @@ fn agent_manifests(
     let template = serde_json::json!({
         "metadata":{"labels":{"app":agent},
             "annotations":{"veloxsearch.ai/target": deployment.name(),
-                           "veloxsearch.ai/config-hash": conf_hash}},
+                           "veloxsearch.ai/config-hash": conf_hash,
+                           CREDS_HASH_ANNOTATION: creds_hash}},
         "spec":{
             "serviceAccountName":AGENT_SA,
             "tolerations":[{"operator":"Exists"}],
             "containers":[{
                 "name":"fluent-bit","image":AGENT_IMAGE,
+                "env":[{"name":PASSWORD_ENV,"valueFrom":{"secretKeyRef":{
+                    "name":creds_secret_name(deployment),"key":"password"}}}],
                 "volumeMounts": mounts,
                 "resources":{"requests":{"memory":"64Mi","cpu":"50m"},"limits":{"memory":"128Mi","cpu":"200m"}}
             }],
@@ -539,7 +705,174 @@ pub async fn remove_agent(deployment: &Deployment, recipe: &str) -> Result<()> {
             delete_dynamic(&client, group, "v1", kind, Some(AGENT_NS), &agent).await;
         }
     }
+    // The last collector of the deployment takes its login with it.
+    if own_agents(&client, deployment).await?.is_empty() {
+        delete_dynamic(
+            &client,
+            "",
+            "v1",
+            "Secret",
+            Some(AGENT_NS),
+            &creds_secret_name(deployment),
+        )
+        .await;
+    }
     Ok(())
+}
+
+/// One collector workload of a deployment, as `own_agents` found it.
+struct OwnAgent {
+    kind: &'static str,
+    /// The recipe / package id: the agent name minus `velox-agent-<dep>-`.
+    id: String,
+    name: String,
+    creds_hash: Option<String>,
+}
+
+/// The deployment's collectors: velox-named for it AND annotated with it as
+/// target (`agent_manifests` writes both) — the name prefix alone would also
+/// match a deployment whose name extends this one's.
+async fn own_agents(client: &Client, dep: &Deployment) -> Result<Vec<OwnAgent>> {
+    let prefix = format!("velox-agent-{dep}-");
+    let mut out = Vec::new();
+    for kind in ["DaemonSet", "Deployment"] {
+        for w in crate::k8s::list_dynamic(client, "apps", "v1", kind, AGENT_NS).await? {
+            let name = w
+                .pointer("/metadata/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let anno = |k: &str| {
+                w.pointer("/spec/template/metadata/annotations")
+                    .and_then(|a| a.get(k))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
+            let Some(id) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            if anno("veloxsearch.ai/target").as_deref() != Some(dep.name()) {
+                continue;
+            }
+            out.push(OwnAgent {
+                kind,
+                id: id.to_string(),
+                name: name.to_string(),
+                creds_hash: anno(CREDS_HASH_ANNOTATION),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Keep every collector of `dep` — Fluent Bit agents and the OTel stack —
+/// authenticating with the deployment's CURRENT admin password. Run by the
+/// sampler on every tick; costs two lists and a Secret read when nothing
+/// changed.
+///
+/// Two things it fixes, both silent 401s on `/_bulk` before it existed:
+/// - **a reset password** (`reset_admin_password`): the admin Secret changes,
+///   the collectors still hold the old one. It waits until OpenSearch actually
+///   accepts the new password (the operator's securityconfig Job has run) —
+///   switching earlier would only move the 401s to the other side of the Job.
+///   A reset the backstop rolls back never gets here: the probe keeps failing
+///   and the Secret goes back to what the collectors already have.
+/// - **a collector shipped with the password in its ConfigMap** (before this
+///   fix): re-applied through the normal builder, which moves the password to
+///   the Secret.
+pub async fn reconcile_creds(dep: &Deployment) {
+    match reconcile_creds_inner(dep).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!("collector credentials of {dep}: {n} object(s) brought up to date"),
+        Err(e) => tracing::warn!("collector credentials of {dep}: {e:#}"),
+    }
+}
+
+async fn reconcile_creds_inner(dep: &Deployment) -> Result<usize> {
+    let (user, password) = admin_creds(dep).await;
+    if password.is_empty() {
+        return Ok(0);
+    }
+    let client = client().await?;
+    let want = creds_hash(&user, &password);
+
+    let agents = own_agents(&client, dep).await?;
+    let mut plaintext = Vec::new();
+    let mut stale = Vec::new();
+    for a in agents {
+        let conf = crate::k8s::get_dynamic(&client, "", "v1", "ConfigMap", Some(AGENT_NS), &a.name)
+            .await?
+            .and_then(|cm| {
+                cm.pointer("/data/fluent-bit.conf")?
+                    .as_str()
+                    .map(str::to_string)
+            });
+        match conf {
+            Some(c) if matches!(externalize_password(&c), Cow::Owned(_)) => plaintext.push((a, c)),
+            _ if a.creds_hash.as_deref() != Some(want.as_str()) => stale.push(a),
+            _ => {}
+        }
+    }
+    let otel_stale = crate::otel_stack::creds_stale(&client, dep, &password).await?;
+    if plaintext.is_empty() && stale.is_empty() && !otel_stale {
+        return Ok(0);
+    }
+    if !opensearch_accepts(dep, &user, &password).await {
+        return Ok(0);
+    }
+
+    let mut n = 0;
+    // The migration path goes through the builder, which also writes the
+    // Secret; the stale path patches only what changed.
+    for (a, conf) in &plaintext {
+        apply_agent_workload(dep, &a.id, conf, a.kind == "DaemonSet").await?;
+        n += 1;
+    }
+    if !stale.is_empty() {
+        apply(
+            &client,
+            "",
+            "v1",
+            "Secret",
+            Some(AGENT_NS),
+            &creds_secret_name(dep),
+            &creds_secret(dep, &user, &password),
+        )
+        .await?;
+        for a in &stale {
+            crate::k8s::merge_patch_dynamic(
+                &client,
+                "apps",
+                "v1",
+                a.kind,
+                AGENT_NS,
+                &a.name,
+                &serde_json::json!({"spec":{"template":{"metadata":{"annotations":{
+                    CREDS_HASH_ANNOTATION: want }}}}}),
+            )
+            .await?;
+            n += 1;
+        }
+    }
+    if otel_stale {
+        n += crate::otel_stack::sync_creds(&client, dep, &user, &password).await?;
+    }
+    Ok(n)
+}
+
+/// Does the deployment's OpenSearch take this login right now?
+async fn opensearch_accepts(dep: &Deployment, user: &str, password: &str) -> bool {
+    let Ok(c) = crate::recipes::http() else {
+        return false;
+    };
+    c.get(format!(
+        "{}/_plugins/_security/authinfo",
+        crate::recipes::os_base(dep)
+    ))
+    .basic_auth(user, Some(password))
+    .timeout(std::time::Duration::from_secs(10))
+    .send()
+    .await
+    .is_ok_and(|r| r.status().is_success())
 }
 
 #[cfg(test)]
@@ -562,7 +895,7 @@ mod tests {
 
     /// What the builder deploys for a fresh install: (ConfigMap, Deployment).
     fn fresh() -> (serde_json::Value, serde_json::Value) {
-        agent_manifests(&dep(), &events_agent(), &events_conf(), false)
+        agent_manifests(&dep(), &events_agent(), &events_conf(), false, "h")
     }
 
     fn deployed_conf(cm: &serde_json::Value) -> &str {
@@ -608,14 +941,18 @@ mod tests {
         assert!(conf.contains("Tag k8s_events"));
         assert!(EVENTS_PRUNE_FILTER.contains("Match k8s_events"));
         // Nothing else moved: removing the stanza gives back the render.
-        assert_eq!(conf.replace(EVENTS_PRUNE_FILTER, ""), events_conf());
+        assert_eq!(
+            conf.replace(EVENTS_PRUNE_FILTER, ""),
+            externalize_password(&events_conf())
+        );
     }
 
     #[test]
     fn a_template_that_already_calls_the_script_is_not_doubled() {
         let (cm, workload) = fresh();
         let already = deployed_conf(&cm).to_string();
-        let (again_cm, again_workload) = agent_manifests(&dep(), &events_agent(), &already, false);
+        let (again_cm, again_workload) =
+            agent_manifests(&dep(), &events_agent(), &already, false, "h");
         assert_eq!(deployed_conf(&again_cm).matches("Name lua").count(), 1);
         assert_eq!((again_cm, again_workload), (cm, workload));
     }
@@ -633,7 +970,7 @@ mod tests {
         );
         let pkg_conf =
             crate::integrations::render(&fluent_bit_conf_template("k8s-events"), &vars).unwrap();
-        let (cm, workload) = agent_manifests(&dep(), &events_agent(), &pkg_conf, false);
+        let (cm, workload) = agent_manifests(&dep(), &events_agent(), &pkg_conf, false, "h");
         assert_eq!((cm, workload), fresh());
     }
 
@@ -645,8 +982,12 @@ mod tests {
         {
             let conf = fluent_bit_conf(&dep(), recipe, "admin", "pw");
             let agent = agent_name(&dep(), recipe);
-            let (cm, workload) = agent_manifests(&dep(), &agent, &conf, true);
-            assert_eq!(deployed_conf(&cm), conf, "{recipe}");
+            let (cm, workload) = agent_manifests(&dep(), &agent, &conf, true, "h");
+            assert_eq!(
+                deployed_conf(&cm),
+                with_platform_excluded(&externalize_password(&conf), crate::k8s::ns()),
+                "{recipe}"
+            );
             assert!(cm["data"].get(PRUNE_LUA_KEY).is_none(), "{recipe}");
             assert_eq!(workload["kind"], "DaemonSet");
             assert!(
@@ -683,7 +1024,7 @@ mod tests {
         let (cm, workload) = pre_fix_collector();
         let conf = events_collector_repair(&dep(), &workload, &cm).expect("needs repair");
         assert_eq!(
-            agent_manifests(&dep(), &events_agent(), &conf, false),
+            agent_manifests(&dep(), &events_agent(), &conf, false, "h"),
             fresh()
         );
     }
@@ -703,7 +1044,7 @@ mod tests {
         cm["data"]["fluent-bit.conf"] = fixed_cm["data"]["fluent-bit.conf"].clone();
         let conf = events_collector_repair(&dep(), &workload, &cm).expect("needs repair");
         assert_eq!(
-            agent_manifests(&dep(), &events_agent(), &conf, false),
+            agent_manifests(&dep(), &events_agent(), &conf, false, "h"),
             fresh()
         );
         // A stale script is re-shipped too.
@@ -730,5 +1071,131 @@ mod tests {
         no_output["data"]["fluent-bit.conf"] =
             "[INPUT]\n    Name kubernetes_events\n    Tag k8s_events\n".into();
         assert_eq!(events_collector_repair(&dep(), &workload, &no_output), None);
+    }
+
+    #[test]
+    fn no_config_map_ever_carries_the_password() {
+        // SEC-1: every recipe, rendered with the real password the way the
+        // package path renders it, deploys a ConfigMap without it.
+        for recipe in crate::recipes::RECIPES {
+            let conf = fluent_bit_conf(&dep(), recipe, "admin", "s3cr3t-pw");
+            let (cm, workload) = agent_manifests(
+                &dep(),
+                &agent_name(&dep(), recipe),
+                &conf,
+                *recipe != "k8s-events",
+                "h",
+            );
+            let text = cm.to_string();
+            assert!(!text.contains("s3cr3t-pw"), "{recipe}");
+            assert!(
+                deployed_conf(&cm).contains(&format!("HTTP_Passwd {PASSWORD_REF}")),
+                "{recipe}"
+            );
+            // ...and the pod gets it from the Secret instead.
+            let env = &workload["spec"]["template"]["spec"]["containers"][0]["env"][0];
+            assert_eq!(env["name"], PASSWORD_ENV);
+            assert_eq!(
+                env["valueFrom"]["secretKeyRef"]["name"],
+                creds_secret_name(&dep())
+            );
+            assert!(!workload.to_string().contains("s3cr3t-pw"), "{recipe}");
+        }
+    }
+
+    #[test]
+    fn the_password_reference_survives_interpolation() {
+        // The built-in path renders the reference itself: the scanner must
+        // pass `${VELOX_OS_PASSWORD}` through, not reject it as a token.
+        let conf = fluent_bit_conf(&dep(), "nginx", "admin", PASSWORD_REF);
+        assert!(conf.contains(&format!("    HTTP_Passwd {PASSWORD_REF}\n")));
+        assert!(matches!(externalize_password(&conf), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn externalize_rewrites_only_the_password_line() {
+        let conf = "[OUTPUT]\n    Name opensearch\n    http_passwd old pw\n    HTTP_User admin\n";
+        assert_eq!(
+            externalize_password(conf),
+            format!("[OUTPUT]\n    Name opensearch\n    http_passwd {PASSWORD_REF}\n    HTTP_User admin\n")
+        );
+        // No trailing newline is kept as none.
+        assert_eq!(
+            externalize_password("  HTTP_Passwd x"),
+            format!("  HTTP_Passwd {PASSWORD_REF}")
+        );
+    }
+
+    #[test]
+    fn a_new_password_changes_the_pod_template_and_nothing_else() {
+        let conf = events_conf();
+        let (cm_a, wl_a) = agent_manifests(
+            &dep(),
+            &events_agent(),
+            &conf,
+            false,
+            &creds_hash("admin", "one"),
+        );
+        let (cm_b, wl_b) = agent_manifests(
+            &dep(),
+            &events_agent(),
+            &conf,
+            false,
+            &creds_hash("admin", "two"),
+        );
+        assert_eq!(cm_a, cm_b, "the ConfigMap does not depend on the password");
+        let anno = |w: &serde_json::Value| {
+            w["spec"]["template"]["metadata"]["annotations"][CREDS_HASH_ANNOTATION].clone()
+        };
+        assert_ne!(anno(&wl_a), anno(&wl_b));
+        assert_eq!(creds_hash("admin", "one"), creds_hash("admin", "one"));
+    }
+
+    #[test]
+    fn a_pre_fix_collector_is_detected_as_plaintext() {
+        // What reconcile_creds keys its migration on.
+        let shipped_before = fluent_bit_conf(&dep(), "redis", "admin", "s3cr3t-pw");
+        assert!(matches!(
+            externalize_password(&shipped_before),
+            Cow::Owned(_)
+        ));
+    }
+
+    #[test]
+    fn a_service_tailer_never_reads_the_platform_namespace() {
+        // BUG-3: the postgres glob matched the platform's own postgres pod.
+        let conf = fluent_bit_conf(&dep(), "postgres", "admin", "pw");
+        let out = with_platform_excluded(&conf, "veloxsearch-system");
+        assert!(out.contains(
+            "    Exclude_Path /var/log/containers/*velox-agent*.log,/var/log/containers/*_veloxsearch-system_*.log\n"
+        ));
+        // Exactly one line changed.
+        assert_eq!(out.lines().count(), conf.lines().count());
+        // Idempotent: a re-apply does not append it twice.
+        assert_eq!(with_platform_excluded(&out, "veloxsearch-system"), out);
+    }
+
+    #[test]
+    fn the_catch_all_and_node_tailers_are_left_alone() {
+        for recipe in ["kubernetes", "ssh", "k8s-audit", "k8s-events"] {
+            let conf = fluent_bit_conf(&dep(), recipe, "admin", "pw");
+            assert!(
+                matches!(
+                    with_platform_excluded(&conf, "veloxsearch-system"),
+                    Cow::Borrowed(_)
+                ),
+                "{recipe}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_package_without_exclude_path_gets_one_after_its_path() {
+        let conf =
+            "[INPUT]\n    Name tail\n    Path /var/log/containers/*foo*.log\n    Tag kube.*\n";
+        assert_eq!(
+            with_platform_excluded(conf, "ns1"),
+            "[INPUT]\n    Name tail\n    Path /var/log/containers/*foo*.log\n    Exclude_Path /var/log/containers/*_ns1_*.log\n    Tag kube.*\n"
+        );
     }
 }
