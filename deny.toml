@@ -14,7 +14,12 @@ all-features = true
 # the decision to ship anyway should be a visible `ignore` entry with a reason,
 # not a silent pass.
 yanked = "deny"
-ignore = []
+ignore = [
+    # unsafe-libyaml (archived upstream, no safe upgrade) comes in through
+    # serde_yaml, which kube-client 2.x depends on unconditionally. Revisit when
+    # kube moves off serde_yaml; our own optional serde_yaml use goes with it.
+    { id = "RUSTSEC-2024-0449", reason = "via kube-client's serde_yaml; no safe upgrade available" },
+]
 
 [licenses]
 # VeloxSearch is AGPL-3.0-only, so it may link anything permissive. The list is

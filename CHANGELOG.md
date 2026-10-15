@@ -22,6 +22,9 @@ are called out explicitly.
   Collector configs say `HTTP_Passwd ${VELOX_OS_PASSWORD}`; the value comes from
   the Secret `velox-agents/velox-agent-<deployment>-creds`. Collectors installed
   by an earlier release are rewritten in place on upgrade.
+- rustls 0.23.45 -> 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349).
+- `cargo deny` ignores RUSTSEC-2024-0449 (unsafe-libyaml unmaintained): it is
+  pulled in by kube-client's serde_yaml and has no safe upgrade.
 
 ## [0.12.1] - 2026-10-01
 
