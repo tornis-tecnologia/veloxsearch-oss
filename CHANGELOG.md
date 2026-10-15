@@ -9,6 +9,35 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **An admin-password reset no longer silently stops every collector.** Fluent
+  Bit agents and the observability stack's Data Prepper and exporter kept the
+  password they were installed with, so after a reset every `_bulk` was a 401
+  and ingestion dropped to zero while the integration still reported data
+  arriving. The sampler now carries a reset over to every collector of the
+  deployment once OpenSearch accepts the new password, and restarts their pods.
+  A reset the backstop rolls back (ADR-064) never reaches them.
+- **Parallel integration installs and uninstalls no longer lose each other's
+  state.** The `monitors` and `integration-versions` annotations were updated by
+  read-modify-write with no concurrency check, so of several concurrent catalog
+  calls the last writer won: an installed integration could run without being
+  listed, and an uninstalled one stay listed as installed, with every call
+  answering 200. Updates are now pinned to the `resourceVersion` they read and
+  retried on conflict.
+- **A pod that started before its credentials Secret existed no longer stays in
+  first-run mode for good.** The auth state was probed once and cached for the
+  life of the process, so such a pod served `/setup` and refused every login
+  until restarted, logging nothing. A first-run verdict is now re-checked after
+  2 s, and known credentials every 30 s (so a password changed through another
+  replica reaches this one too); a failed probe keeps the state already known.
+- **Enabling scheduled snapshots no longer stalls the first scheduled
+  snapshot.** Saving a snapshot configuration rolls every node, and the policy
+  was created at once, so its first run fired into a rolling cluster and
+  OpenSearch's snapshot management held it in `CREATION_START` for about 35
+  minutes. When a save restarts the nodes, the policy now waits on the
+  deployment (`veloxsearch.ai/snapshot-policy-pending`, no credentials) and is
+  applied once the roll has settled. The snapshot tab shows it as `PENDING`
+  meanwhile.
+
 ### Security
 - **The deployment's admin password is no longer stored in agent ConfigMaps.**
   Collector configs say `HTTP_Passwd ${VELOX_OS_PASSWORD}`; the value comes from

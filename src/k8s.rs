@@ -2942,7 +2942,8 @@ async fn status_from(
             .await
             .ok()
             .flatten()
-            .map(|o| o.data);
+            .map(|o| o.data)
+            .or_else(|| pending_policy_from(Some(&annotations)).map(|p| p.1));
         let cfg = snapshot_config_from(&obj.data, policy.as_ref());
         snapshot_state_from(&cfg, policy.as_ref(), phase.eq_ignore_ascii_case("running"))
     } else {
@@ -6797,6 +6798,8 @@ pub async fn get_snapshot_config(
         .ok()
         .flatten()
         .map(|o| o.data);
+    let policy =
+        policy.or_else(|| pending_policy_from(cr.metadata.annotations.as_ref()).map(|p| p.1));
     let cfg = snapshot_config_from(&cr.data, policy.as_ref());
     let running = cr
         .data
@@ -6909,6 +6912,8 @@ pub async fn plan_snapshot_config(
         .ok()
         .flatten()
         .map(|o| o.data);
+    let policy =
+        policy.or_else(|| pending_policy_from(cr.metadata.annotations.as_ref()).map(|p| p.1));
     let stored = snapshot_config_from(&cr.data, policy.as_ref());
     let has_creds = cfg_has_stored_credentials(&client, dep).await;
     preflight_snapshot(&client, dep, incoming, &stored, has_creds).await
@@ -6940,6 +6945,8 @@ pub async fn set_snapshot_config(
         .ok()
         .flatten()
         .map(|o| o.data);
+    let existing_policy = existing_policy
+        .or_else(|| pending_policy_from(cr.metadata.annotations.as_ref()).map(|p| p.1));
     let stored = snapshot_config_from(&cr.data, existing_policy.as_ref());
     let has_creds = cfg_has_stored_credentials(&client, dep).await;
 
@@ -6962,6 +6969,7 @@ pub async fn set_snapshot_config(
             .await
             .context("clearing the snapshot configuration on the cluster CR")?;
         let _ = policies.delete(&policy_name, &dp).await;
+        set_pending_policy(&client, dep, None).await?;
         let _ = secrets.delete(&snapshot_secret_name(name), &dp).await;
         return Ok(plan);
     }
@@ -6992,20 +7000,117 @@ pub async fn set_snapshot_config(
     .await
     .context("wiring the snapshot repository onto the cluster CR")?;
 
-    if cfg.policy.enabled {
+    let policy_cr = snapshot::policy_cr(dep.namespace(), name, &cfg);
+    if cfg.policy.enabled && plan.will_restart {
+        // The save rolls every node (plugin + keystore). A policy created now
+        // fires its first snapshot into a cluster that is still rolling, and
+        // OpenSearch's snapshot management wedges that run in CREATION_START —
+        // measured live: ~35 minutes with no scheduled snapshot right after
+        // backups were enabled. So the policy waits for the roll, on the CR
+        // (restart-safe; it carries no credentials), and the sampler applies
+        // it once the deployment has settled (`apply_pending_snapshot_policy`).
+        // A policy from an earlier save is removed for the same reason.
+        let _ = policies.delete(&policy_name, &dp).await;
+        set_pending_policy(&client, dep, Some(&policy_cr)).await?;
+    } else if cfg.policy.enabled {
         policies
-            .patch(
-                &policy_name,
-                &pp,
-                &Patch::Apply(&snapshot::policy_cr(dep.namespace(), name, &cfg)),
-            )
+            .patch(&policy_name, &pp, &Patch::Apply(&policy_cr))
             .await
             .context("applying the scheduled snapshot policy")?;
+        set_pending_policy(&client, dep, None).await?;
     } else {
         let _ = policies.delete(&policy_name, &dp).await;
+        set_pending_policy(&client, dep, None).await?;
     }
 
     Ok(plan)
+}
+
+/// Annotation on the `OpenSearchCluster` holding a snapshot policy that waits
+/// for the node roll its save started: `{"since": <epoch s>, "policy": <CR>}`.
+const POLICY_PENDING_ANNOTATION: &str = "veloxsearch.ai/snapshot-policy-pending";
+/// Owns that annotation and nothing else, so applying without it removes it.
+const POLICY_PENDING_FIELD_MANAGER: &str = "veloxsearch-snapshot-pending";
+/// A pending policy is not applied sooner than this after its save, however
+/// settled the deployment looks: the operator needs a reconcile to start the
+/// roll, and until it does the old revision is all there is — "settled".
+const POLICY_DEFER_MIN_SECS: i64 = 90;
+
+async fn set_pending_policy(
+    client: &Client,
+    dep: &Deployment,
+    policy: Option<&serde_json::Value>,
+) -> Result<()> {
+    let mut annotations = serde_json::Map::new();
+    if let Some(p) = policy {
+        annotations.insert(
+            POLICY_PENDING_ANNOTATION.into(),
+            serde_json::json!({ "since": now_secs(), "policy": p })
+                .to_string()
+                .into(),
+        );
+    }
+    let patch = serde_json::json!({
+        "apiVersion": "opensearch.org/v1",
+        "kind": "OpenSearchCluster",
+        "metadata": { "name": dep.name(), "annotations": annotations }
+    });
+    os_api(client, dep)
+        .patch(
+            dep.name(),
+            &PatchParams::apply(POLICY_PENDING_FIELD_MANAGER).force(),
+            &Patch::Apply(&patch),
+        )
+        .await
+        .context("recording the snapshot policy that waits for the roll")?;
+    Ok(())
+}
+
+/// The pending policy on a CR, if any: (since, policy CR).
+fn pending_policy_from(
+    annotations: Option<&BTreeMap<String, String>>,
+) -> Option<(i64, serde_json::Value)> {
+    let raw = annotations?.get(POLICY_PENDING_ANNOTATION)?;
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    Some((v.get("since")?.as_i64()?, v.get("policy")?.clone()))
+}
+
+/// Is a pending policy due? Pure, so the rule is unit-tested.
+fn pending_policy_due(since: i64, now: i64, settled: bool) -> bool {
+    settled && now - since >= POLICY_DEFER_MIN_SECS
+}
+
+/// Sampler step: apply a snapshot policy that was waiting for its save's node
+/// roll, once the deployment has settled. A deployment without one costs the
+/// CR read only.
+pub async fn apply_pending_snapshot_policy(dep: &Deployment) {
+    let run = async {
+        let client = client().await?;
+        let Some(cr) = os_api(&client, dep).get_opt(dep.name()).await? else {
+            return Ok(false);
+        };
+        let Some((since, policy)) = pending_policy_from(cr.metadata.annotations.as_ref()) else {
+            return Ok(false);
+        };
+        if !pending_policy_due(since, now_secs(), is_settled(dep).await?) {
+            return Ok(false);
+        }
+        policy_api(&client, dep)
+            .patch(
+                &snapshot::policy_name(dep.name()),
+                &PatchParams::apply(SNAPSHOT_FIELD_MANAGER).force(),
+                &Patch::Apply(&policy),
+            )
+            .await
+            .context("applying the scheduled snapshot policy")?;
+        set_pending_policy(&client, dep, None).await?;
+        anyhow::Ok(true)
+    };
+    match run.await {
+        Ok(true) => tracing::info!("{dep}: node roll done, scheduled snapshot policy applied"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("{dep}: pending snapshot policy: {e:#}"),
+    }
 }
 
 /// Ask OpenSearch itself whether the repository actually works — the analogue
@@ -7404,6 +7509,39 @@ mod tests {
             patch.get("spec").is_none(),
             "annotations only, never the spec"
         );
+    }
+
+    #[test]
+    fn a_policy_waiting_for_the_roll_is_applied_only_once_settled_and_old_enough() {
+        // BUG-6: the policy must not land mid-roll, and "settled" seconds after
+        // the save is the old revision, not the end of the roll.
+        let since = 1_000;
+        assert!(!pending_policy_due(since, since + 10, true));
+        assert!(!pending_policy_due(
+            since,
+            since + POLICY_DEFER_MIN_SECS,
+            false
+        ));
+        assert!(pending_policy_due(
+            since,
+            since + POLICY_DEFER_MIN_SECS,
+            true
+        ));
+    }
+
+    #[test]
+    fn a_pending_policy_round_trips_through_its_annotation() {
+        let policy =
+            serde_json::json!({ "kind": "OpensearchSnapshotPolicy", "spec": { "enabled": true } });
+        let mut a = BTreeMap::new();
+        a.insert(
+            POLICY_PENDING_ANNOTATION.to_string(),
+            serde_json::json!({ "since": 42, "policy": policy }).to_string(),
+        );
+        assert_eq!(pending_policy_from(Some(&a)), Some((42, policy)));
+        assert_eq!(pending_policy_from(None), None);
+        a.insert(POLICY_PENDING_ANNOTATION.to_string(), "not json".into());
+        assert_eq!(pending_policy_from(Some(&a)), None);
     }
 
     use super::*;
