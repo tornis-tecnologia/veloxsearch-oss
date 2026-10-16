@@ -16,6 +16,11 @@ are called out explicitly.
   `info` with ANSI codes, which failed the grok (~half of real logs, and exactly
   the interesting half). The codes are stripped first (registry package
   `rabbitmq` 1.0.1).
+- **Traefik's own log lines parse.** Traefik's application log (startup,
+  provider and error lines) shares the stream with the access log, is
+  ANSI-coloured, and matched no pattern (~7% of a real traefik index). The codes
+  are stripped first and the lines parse into `level` and `traefik_message`,
+  their time into `@timestamp` (registry package `traefik` 1.0.1).
 
 ## [0.12.2] - 2026-10-15
 

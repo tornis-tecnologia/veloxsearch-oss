@@ -1482,7 +1482,15 @@ pub(crate) fn recipe_teardown(
 ///   - traefik:   access log (CLF): leading fields match
 ///                `%{COMBINEDAPACHELOG}` (clientip/verb/request/response/bytes
 ///                land exactly like nginx); optional trailing
-///                router/service/duration captured when present.
+///                router/service/duration captured when present. The same
+///                stream carries traefik's own application log (`<ISO8601 ts>
+///                <LVL> <message>`, LVL = INF/WRN/ERR/…), ANSI-coloured even
+///                when stdout is not a terminal; the codes are stripped from
+///                `message` first and those lines parse into
+///                `traefik_time`/`level`/`traefik_message`. Their time stays in
+///                its own field (with its own date processor) so `timestamp`
+///                never gets dynamically mapped as a date by an app line and
+///                then rejects the CLF access lines.
 ///   - mongo:     (4.4+) structured JSON per line (`{"t":{"$date":..},...}`)
 ///                parsed onto the root; @timestamp from `t.$date`.
 ///   - rabbitmq:  `<ISO8601 ts> [<level>] <<pid>> <message>` (default
@@ -1610,14 +1618,22 @@ pub(crate) fn recipe_os_config(recipe: &str) -> Option<(serde_json::Value, serde
         ),
         "traefik" => (
             "VeloxSearch traefik access-log pipeline",
-            grok_date_processors(
-                serde_json::json!([
-                    "%{COMBINEDAPACHELOG} %{NUMBER:request_count} \"%{DATA:traefik_router}\" \"%{DATA:traefik_service}\" %{NUMBER:duration_ms}ms",
-                    "%{COMBINEDAPACHELOG}"
-                ]),
-                "timestamp",
-                serde_json::json!(["dd/MMM/yyyy:HH:mm:ss Z"]),
-            ),
+            strip_ansi_first({
+                let mut p = grok_date_processors(
+                    serde_json::json!([
+                        "%{COMBINEDAPACHELOG} %{NUMBER:request_count} \"%{DATA:traefik_router}\" \"%{DATA:traefik_service}\" %{NUMBER:duration_ms}ms",
+                        "%{COMBINEDAPACHELOG}",
+                        "^%{TIMESTAMP_ISO8601:traefik_time} %{WORD:level}(?: %{GREEDYDATA:traefik_message})?$"
+                    ]),
+                    "timestamp",
+                    serde_json::json!(["dd/MMM/yyyy:HH:mm:ss Z"]),
+                );
+                p.as_array_mut().expect("processor list").push(serde_json::json!(
+                    { "date": { "field": "traefik_time", "target_field": "@timestamp",
+                                "formats": ["ISO8601"], "ignore_failure": true } }
+                ));
+                p
+            }),
             serde_json::json!({
                 "@timestamp":      { "type": "date" },
                 "clientip":        { "type": "ip" },
@@ -1628,7 +1644,10 @@ pub(crate) fn recipe_os_config(recipe: &str) -> Option<(serde_json::Value, serde
                 "duration_ms":     { "type": "float" },
                 "traefik_router":  { "type": "text",
                                      "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
-                "traefik_service": { "type": "keyword" }
+                "traefik_service": { "type": "keyword" },
+                "level":           { "type": "keyword" },
+                "traefik_message": { "type": "text",
+                                     "fields": { "keyword": { "type": "keyword", "ignore_above": 512 } } }
             }),
         ),
         "mongo" => (
@@ -1873,6 +1892,42 @@ mod tests {
         assert_eq!(recipe_index("kafka"), KAFKA_INDEX);
         assert_eq!(recipe_index("ssh"), SSH_INDEX);
         assert_eq!(recipe_index("k8s-audit"), K8S_AUDIT_INDEX);
+    }
+
+    /// #163: traefik's own application log is ANSI-coloured
+    /// (`ESC[90m<ts>ESC[0m ESC[32mINFESC[0m …`), so the SGR codes are stripped
+    /// from `message` before the grok — like rabbitmq (#155) — and a pattern
+    /// for the stripped app line follows the access-log ones, with its time in
+    /// its own field and its own date processor.
+    #[test]
+    fn traefik_strips_ansi_and_parses_its_app_log() {
+        let (pipeline, template) = recipe_os_config("traefik").expect("traefik pipeline");
+        let procs = pipeline["processors"].as_array().expect("processors");
+        assert_eq!(procs[0]["gsub"]["field"], "message");
+        assert_eq!(procs[0]["gsub"]["pattern"], "\\x1B\\[[0-9;]*m");
+        assert!(
+            procs[1].get("grok").is_some(),
+            "grok must run after the strip"
+        );
+
+        let patterns = procs[1]["grok"]["patterns"].as_array().unwrap();
+        assert!(patterns[0]
+            .as_str()
+            .unwrap()
+            .starts_with("%{COMBINEDAPACHELOG}"));
+        assert_eq!(
+            patterns.last().unwrap(),
+            "^%{TIMESTAMP_ISO8601:traefik_time} %{WORD:level}(?: %{GREEDYDATA:traefik_message})?$"
+        );
+        let dates: Vec<&str> = procs
+            .iter()
+            .filter_map(|p| p["date"]["field"].as_str())
+            .collect();
+        assert_eq!(dates, ["timestamp", "traefik_time"]);
+
+        let props = &template["template"]["mappings"]["properties"];
+        assert_eq!(props["level"]["type"], "keyword");
+        assert_eq!(props["traefik_message"]["type"], "text");
     }
 
     /// Every catalog id has a velox-* dashboard slug, and they are all unique
