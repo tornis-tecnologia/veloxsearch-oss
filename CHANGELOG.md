@@ -19,6 +19,10 @@ are called out explicitly.
   15 minutes. Fresh installs now get operator `3.0.0` (chart 3.0.14), which
   fixes the leak (upstream #1523) and creates StatefulSets `Parallel` from the
   start, without recovery mode (upstream #1329). The CRDs only gain fields.
+  Operator 3.0.0 also keeps a `Securityconfig: Ready` entry in the cluster's
+  `componentsStatus` for good. VeloxSearch now reads `Ready` as done.
+  Otherwise a new deployment would never count as settled and would hold back
+  Dashboards until the 20-minute ceiling.
   Existing installs keep their running operator (ADR-057) and show the R9
   drift notice. Upgrading the operator by hand restarts each node pool's pods
   once, because the StatefulSet is recreated for the new `podManagementPolicy`.
