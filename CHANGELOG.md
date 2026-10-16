@@ -9,6 +9,19 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **A new deployment no longer rolls all its nodes a second time (#160).** The
+  vendored OpenSearch operator `3.0.0-alpha` changed each node StatefulSet's pod
+  template seconds after creating it (it leaked its `opensearch.org/last-applied`
+  annotation into the template), then restarted every node onto the "new"
+  revision. Mid-restart its parallel-recovery mode recreated the StatefulSet
+  with a different `podManagementPolicy` and rolled them all again. A create
+  took 10–25 minutes and day-2 operations sometimes did not settle within
+  15 minutes. Fresh installs now get operator `3.0.0` (chart 3.0.14), which
+  fixes the leak (upstream #1523) and creates StatefulSets `Parallel` from the
+  start, without recovery mode (upstream #1329). The CRDs only gain fields.
+  Existing installs keep their running operator (ADR-057) and show the R9
+  drift notice. Upgrading the operator by hand restarts each node pool's pods
+  once, because the StatefulSet is recreated for the new `podManagementPolicy`.
 - **Redis 7 logs parse.** The pipeline's stock `REDISTIMESTAMP` has no year and
   Redis 7 writes one, so no line parsed. The timestamp now takes an optional
   year (registry package `redis` 1.0.1).

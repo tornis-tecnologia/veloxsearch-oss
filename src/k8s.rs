@@ -851,7 +851,7 @@ fn parse_mem_mib(s: &str) -> Option<u64> {
 /// the nodePool memory request, 512 MiB when the request is missing or
 /// unparseable. This is a display-side mirror of the operator's
 /// `CalculateJvmHeapSizeSettings` (verified in the vendored operator, image
-/// v3.0.0-alpha / chart 3.0.2) — VeloxSearch no longer renders JVM flags into
+/// v3.0.0 / chart 3.0.14) — VeloxSearch no longer renders JVM flags into
 /// the CR, it only PREDICTS what the operator will set so the wizard/status
 /// can show it. Keep in lockstep with the vendored operator on upgrades.
 fn heap_mib(mem: &str) -> u64 {
@@ -909,7 +909,7 @@ async fn ensure_admin_secret(client: &Client, dep: &Deployment) -> Result<()> {
 ///     explicit `-Xms/-Xmx`, the operator computes them as **half the memory
 ///     request** and injects `OPENSEARCH_JAVA_OPTS` itself
 ///     (`CalculateJvmHeapSizeSettings` + `AppendJvmHeapSizeSettings`, verified
-///     in the vendored operator — image v3.0.0-alpha, chart 3.0.2). An
+///     in the vendored operator — image v3.0.0, chart 3.0.14). An
 ///     explicit `jvm` would OVERRIDE that capability, which is exactly what
 ///     the previous hand-rendered `-Xms/-Xmx` string did.
 ///  2. **Memory request = limit** (Guaranteed QoS). One user-facing number:
@@ -9518,7 +9518,7 @@ mod tests {
         // ADR-035: our display heap must equal what the operator computes —
         // CalculateJvmHeapSizeSettings = memory request / 2 in MiB, default
         // 512 MiB when the request is missing/unparseable (verified in the
-        // vendored operator, image v3.0.0-alpha / chart 3.0.2).
+        // vendored operator, image v3.0.0 / chart 3.0.14).
         assert_eq!(heap_mib("4Gi"), 2048);
         assert_eq!(heap_mib("3Gi"), 1536);
         assert_eq!(heap_mib("2Gi"), 1024);
