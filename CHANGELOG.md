@@ -16,6 +16,14 @@ are called out explicitly.
   `info` with ANSI codes, which failed the grok (~half of real logs, and exactly
   the interesting half). The codes are stripped first (registry package
   `rabbitmq` 1.0.1).
+- **A dead collector no longer reads as "receiving".** `monitoring_status`
+  derived `receiving` from the index's lifetime document count, so in the
+  0.12.1 password-reset outage every collector got 401s while the UI stayed
+  green. `receiving` now means a document with `@timestamp` in the last
+  5 minutes (60 of the agents' 5 s flushes), and the response adds
+  `last_doc_at` and a `state` code (`waiting`, `receiving`, `stale`,
+  `untimed`); `doc_count` is unchanged. The Integrations tab shows "no recent
+  data" with the time of the last document.
 
 ## [0.12.2] - 2026-10-15
 
