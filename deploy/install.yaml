@@ -215,6 +215,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["daemonsets", "deployments"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # The OTel stack's recovery (#125) deletes its ReplicaSets stuck on the
+  # missing ServiceAccount; their Deployments recreate them.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list", "delete"]
   # The OTel observability stack (ADR-053) puts its five components in this same
   # namespace: services (the OTLP/Cortex/Alertmanager endpoints), secrets (the
   # Data Prepper pipeline carries the deployment's OpenSearch password, so it is
