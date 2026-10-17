@@ -24,6 +24,11 @@ are called out explicitly.
   `last_doc_at` and a `state` code (`waiting`, `receiving`, `stale`,
   `untimed`); `doc_count` is unchanged. The Integrations tab shows "no recent
   data" with the time of the last document.
+- **The OTel stack's stuck-ReplicaSet recovery runs on a real install.** It
+  lists and deletes ReplicaSets in `velox-agents`, but the runtime Role there
+  granted no access to them, so every attempt was logged as `forbidden` and the
+  stack stayed stuck on the missing ServiceAccount (#125). The Role now grants
+  `list` and `delete` on `replicasets`. Applies with the next `upgrade.yaml`.
 
 ## [0.12.2] - 2026-10-15
 
