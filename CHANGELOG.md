@@ -9,6 +9,13 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **Scaling a deployment down no longer deletes a node that still holds
+  shards.** The CR never turned on the operator's smart scaler
+  (`spec.confMgmt.smartScaler`), so a scale-down deleted the highest-ordinal
+  node at once. If that node held the only copy of a shard, the index went
+  red. The operator now excludes the node, waits until it holds no shard, and
+  only then removes it. An existing deployment picks this up on the save that
+  scales it (#161).
 - **Redis 7 logs parse.** The pipeline's stock `REDISTIMESTAMP` has no year and
   Redis 7 writes one, so no line parsed. The timestamp now takes an optional
   year (registry package `redis` 1.0.1).
