@@ -140,7 +140,7 @@ const API = {
   verifySnapshotRepo: (name) => call("verify_snapshot_repo", { name }),
 
   // ── monitoring ───────────────────────────────────────────────
-  monitoringStatus: (deployment, recipe) => call("monitoring_status", { deployment, recipe }), // -> { doc_count, receiving }
+  monitoringStatus: (deployment, recipe) => call("monitoring_status", { deployment, recipe }), // -> { doc_count, receiving, last_doc_at, state } (#165)
   discover: () => call("discover", null, "GET"),
 
   // ── integrations catalog (ADR-039/ADR-047, #75/#76) ──────────

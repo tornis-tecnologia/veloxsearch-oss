@@ -176,6 +176,8 @@ const STR = {
     integ_lead: "Instale uma integração do catálogo — o VeloxSearch aplica o pacote e implanta o agente de coleta (Fluent Bit) automaticamente, e mostra os dados conforme chegam.",
     enabled: "ativado", enable: "Ativar", disable: "desativar",
     receiving: "recebendo", docs: "docs", no_data: "sem dados ainda",
+    integ_no_recent: "sem dados recentes", integ_last_data: "último dado {age}",
+    integ_recency_unknown: "sem @timestamp, recência desconhecida",
     // integrations catalog (#76 — o catálogo vem do registro em tempo de
     // execução, então os estados de degradação são tela, não erro)
     integ_loading: "Carregando o catálogo…",
@@ -819,6 +821,8 @@ const STR = {
     integ_lead: "Install an integration from the catalog — VeloxSearch applies the package, deploys the collection agent (Fluent Bit) automatically, and shows data as it arrives.",
     enabled: "enabled", enable: "Enable", disable: "disable",
     receiving: "receiving", docs: "docs", no_data: "no data yet",
+    integ_no_recent: "no recent data", integ_last_data: "last data {age}",
+    integ_recency_unknown: "no @timestamp, recency unknown",
     // integrations catalog (#76 — the catalog is fetched from the registry at
     // runtime, so its degraded states are screens, not errors)
     integ_loading: "Loading the catalog…",
@@ -1461,6 +1465,8 @@ const STR = {
     integ_lead: "Instala una integración del catálogo — VeloxSearch aplica el paquete, despliega el agente de recolección (Fluent Bit) automáticamente y muestra los datos a medida que llegan.",
     enabled: "activada", enable: "Activar", disable: "desactivar",
     receiving: "recibiendo", docs: "docs", no_data: "aún sin datos",
+    integ_no_recent: "sin datos recientes", integ_last_data: "último dato {age}",
+    integ_recency_unknown: "sin @timestamp, recencia desconocida",
     // catálogo de integraciones (#76 — el catálogo se obtiene del registry en
     // tiempo de ejecución, así que sus estados degradados son pantallas, no errores)
     integ_loading: "Cargando el catálogo…",
