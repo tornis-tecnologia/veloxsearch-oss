@@ -23,6 +23,11 @@ are called out explicitly.
   `componentsStatus` for good. VeloxSearch now reads `Ready` as done.
   Otherwise a new deployment would never count as settled and would hold back
   Dashboards until the 20-minute ceiling.
+- **Dashboards no longer stays at zero replicas forever after an early boot
+  (#160).** When the operator started Dashboards during the first-boot hold
+  and it went Ready, VeloxSearch dropped the hold but left the cluster asking
+  for 0 replicas. The operator then removed the serving Dashboards, and the
+  deployment stayed "stuck at dashboards". The hold is now released at 1.
   Existing installs keep their running operator (ADR-057) and show the R9
   drift notice. Upgrading the operator by hand restarts each node pool's pods
   once, because the StatefulSet is recreated for the new `podManagementPolicy`.

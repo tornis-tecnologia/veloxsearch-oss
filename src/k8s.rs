@@ -4738,6 +4738,9 @@ enum HoldStep {
     /// A Dashboards replica is already Ready — the hold was lost and the
     /// first boot happened anyway. Scaling a serving Dashboards to zero
     /// would be an outage that protects nothing, so only the annotation goes.
+    /// Only when the CR already asks for replicas: one still at 0 is a
+    /// [`HoldStep::Release`], or the operator scales the serving replica
+    /// away and nothing is left to bring it back (#160).
     ClearStale,
 }
 
@@ -4751,9 +4754,9 @@ fn dashboards_hold_step(
 ) -> HoldStep {
     if !held {
         HoldStep::Nothing
-    } else if dashboards_serving {
+    } else if dashboards_serving && stored_replicas != 0 {
         HoldStep::ClearStale
-    } else if release_due {
+    } else if dashboards_serving || release_due {
         HoldStep::Release
     } else if stored_replicas != 0 {
         HoldStep::Enforce
@@ -7731,10 +7734,20 @@ mod tests {
     fn a_serving_dashboards_is_never_scaled_by_the_hold() {
         // the hold was lost and Dashboards already booted: only the
         // annotation goes, whatever the cluster's state
-        for (replicas, release_due) in [(1, false), (1, true), (0, false)] {
+        for release_due in [false, true] {
             assert_eq!(
-                dashboards_hold_step(true, replicas, true, release_due),
+                dashboards_hold_step(true, 1, true, release_due),
                 HoldStep::ClearStale
+            );
+        }
+        // #160: the operator rendered a Deployment from the dropped zero, it
+        // booted and went Ready while the CR is back at 0. Clearing only the
+        // annotation left the CR at 0: the operator scaled the serving replica
+        // away and nothing ever released it. Release keeps it at 1.
+        for release_due in [false, true] {
+            assert_eq!(
+                dashboards_hold_step(true, 0, true, release_due),
+                HoldStep::Release
             );
         }
         let p = hold_step_patch(HoldStep::ClearStale, "42").unwrap();
