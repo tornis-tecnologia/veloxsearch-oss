@@ -1191,7 +1191,7 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
   const t = STR[lang];
   const [view, setView] = useState(null);   // CatalogView, null until loaded
   const [loadErr, setLoadErr] = useState("");
-  const [counts, setCounts] = useState({});
+  const [status, setStatus] = useState({}); // id → MonitoringStatus
   const [busy, setBusy] = useState({});     // id → "install" | "uninstall"
   const [itemErr, setItemErr] = useState({});
 
@@ -1217,7 +1217,7 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
   const isInstalled = (it) => it.installed_version != null || monitors.includes(it.id);
   const installedSig = items.filter(isInstalled).map(it => it.id).join(",");
 
-  // Keep the live doc-count polling for what's installed.
+  // Keep the live ingestion-status polling for what's installed.
   useEffect(() => {
     if (!installedSig) return undefined;
     let alive = true;
@@ -1227,10 +1227,10 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
         try {
           const s = await API.monitoringStatus(d.id, k);
           if (!alive) return;
-          setCounts(c => ({ ...c, [k]: s.doc_count }));
+          setStatus(c => ({ ...c, [k]: s }));
         } catch {
           if (!alive) return;
-          setCounts(c => ({ ...c, [k]: undefined }));
+          setStatus(c => ({ ...c, [k]: undefined }));
         }
       }
     };
@@ -1333,7 +1333,15 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
           {items.map(it => {
             const installed = isInstalled(it);
             const state = !installed ? "available" : it.update_available ? "update" : "installed";
-            const count = counts[it.id];
+            const st = installed ? status[it.id] : undefined;
+            const count = st ? st.doc_count : 0;
+            // #165: "receiving" means documents arrived recently, not "the
+            // index was ever written to" — a dead collector with history reads
+            // as no recent data, with when the last document landed.
+            const lastMs = st && st.last_doc_at ? Date.parse(st.last_doc_at) : NaN;
+            const lastAge = Number.isFinite(lastMs)
+              ? Math.max(0, Math.round((Date.now() - lastMs) / 1000))
+              : null;
             const working = busy[it.id];
             const err = itemErr[it.id];
             return (
@@ -1351,10 +1359,14 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
                 </div>
                 <div className="rd">{loc(it.summary, lang, "")}</div>
 
-                <div className={`rstat ${installed && count > 0 ? "live" : "idle"}`}>
-                  {installed && count > 0
+                <div className={`rstat ${st && st.receiving ? "live" : "idle"}`}>
+                  {st && st.receiving
                     ? <><Icon name="spark" size={14} />{t.receiving} — {count.toLocaleString()} {t.docs}</>
-                    : <>{t.no_data}</>}
+                    : !st || count === 0
+                      ? <>{t.no_data}</>
+                      : st.state === "untimed"
+                        ? <>{count.toLocaleString()} {t.docs} — {t.integ_recency_unknown}</>
+                        : <>{t.integ_no_recent}{lastAge != null && <> — {t.integ_last_data.replace("{age}", fmtAge(lastAge, t))}</>} · {count.toLocaleString()} {t.docs}</>}
                 </div>
 
                 <div className="ractions">

@@ -8,6 +8,64 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-17
+
+### Fixed
+- **A new deployment no longer rolls all its nodes a second time (#160).** The
+  vendored OpenSearch operator `3.0.0-alpha` changed each node StatefulSet's pod
+  template seconds after creating it (it leaked its `opensearch.org/last-applied`
+  annotation into the template), then restarted every node onto the "new"
+  revision. Mid-restart its parallel-recovery mode recreated the StatefulSet
+  with a different `podManagementPolicy` and rolled them all again. A create
+  took 10–25 minutes and day-2 operations sometimes did not settle within
+  15 minutes. Fresh installs now get operator `3.0.0` (chart 3.0.14), which
+  fixes the leak (upstream #1523) and creates StatefulSets `Parallel` from the
+  start, without recovery mode (upstream #1329). The CRDs only gain fields.
+  Operator 3.0.0 also keeps a `Securityconfig: Ready` entry in the cluster's
+  `componentsStatus` for good. VeloxSearch now reads `Ready` as done.
+  Otherwise a new deployment would never count as settled and would hold back
+  Dashboards until the 20-minute ceiling.
+- **Dashboards no longer stays at zero replicas forever after an early boot
+  (#160).** When the operator started Dashboards during the first-boot hold
+  and it went Ready, VeloxSearch dropped the hold but left the cluster asking
+  for 0 replicas. The operator then removed the serving Dashboards, and the
+  deployment stayed "stuck at dashboards". The hold is now released at 1.
+  Existing installs keep their running operator (ADR-057) and show the R9
+  drift notice. Upgrading the operator by hand restarts each node pool's pods
+  once, because the StatefulSet is recreated for the new `podManagementPolicy`.
+- **Scaling a deployment down no longer deletes a node that still holds
+  shards.** The CR never turned on the operator's smart scaler
+  (`spec.confMgmt.smartScaler`), so a scale-down deleted the highest-ordinal
+  node at once. If that node held the only copy of a shard, the index went
+  red. The operator now excludes the node, waits until it holds no shard, and
+  only then removes it. An existing deployment picks this up on the save that
+  scales it (#161).
+- **Redis 7 logs parse.** The pipeline's stock `REDISTIMESTAMP` has no year and
+  Redis 7 writes one, so no line parsed. The timestamp now takes an optional
+  year (registry package `redis` 1.0.1).
+- **RabbitMQ warnings and errors parse.** RabbitMQ colours every line above
+  `info` with ANSI codes, which failed the grok (~half of real logs, and exactly
+  the interesting half). The codes are stripped first (registry package
+  `rabbitmq` 1.0.1).
+- **Traefik's own log lines parse.** Traefik's application log (startup,
+  provider and error lines) shares the stream with the access log, is
+  ANSI-coloured, and matched no pattern (~7% of a real traefik index). The codes
+  are stripped first and the lines parse into `level` and `traefik_message`,
+  their time into `@timestamp` (registry package `traefik` 1.0.1).
+- **A dead collector no longer reads as "receiving".** `monitoring_status`
+  derived `receiving` from the index's lifetime document count, so in the
+  0.12.1 password-reset outage every collector got 401s while the UI stayed
+  green. `receiving` now means a document with `@timestamp` in the last
+  5 minutes (60 of the agents' 5 s flushes), and the response adds
+  `last_doc_at` and a `state` code (`waiting`, `receiving`, `stale`,
+  `untimed`); `doc_count` is unchanged. The Integrations tab shows "no recent
+  data" with the time of the last document.
+- **The OTel stack's stuck-ReplicaSet recovery runs on a real install.** It
+  lists and deletes ReplicaSets in `velox-agents`, but the runtime Role there
+  granted no access to them, so every attempt was logged as `forbidden` and the
+  stack stayed stuck on the missing ServiceAccount (#125). The Role now grants
+  `list` and `delete` on `replicasets`. Applies with the next `upgrade.yaml`.
+
 ## [0.12.2] - 2026-10-15
 
 ### Fixed

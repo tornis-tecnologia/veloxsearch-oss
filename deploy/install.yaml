@@ -215,6 +215,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["daemonsets", "deployments"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
+  # The OTel stack's recovery (#125) deletes its ReplicaSets stuck on the
+  # missing ServiceAccount; their Deployments recreate them.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list", "delete"]
   # The OTel observability stack (ADR-053) puts its five components in this same
   # namespace: services (the OTLP/Cortex/Alertmanager endpoints), secrets (the
   # Data Prepper pipeline carries the deployment's OpenSearch password, so it is
@@ -367,7 +372,7 @@ spec:
           # not Cargo.toml's `version` (ci.yml, `manifest-version`), so applying
           # this file from `main` can never roll an install back (#54); the
           # release job pins its published copy to the image digest.
-          image: docker.io/tornistecnologia/veloxsearch-oss:0.12.2
+          image: docker.io/tornistecnologia/veloxsearch-oss:0.13.0
           imagePullPolicy: IfNotPresent
           # Container hardening (#118). The image already runs as uid 10001, but
           # an image USER is a default a cluster can override; this makes it a
