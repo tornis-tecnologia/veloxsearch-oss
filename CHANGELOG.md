@@ -9,6 +9,13 @@ are called out explicitly.
 ## [Unreleased]
 
 ### Fixed
+- **Scaling a deployment down no longer deletes a node that still holds
+  shards.** The CR never turned on the operator's smart scaler
+  (`spec.confMgmt.smartScaler`), so a scale-down deleted the highest-ordinal
+  node at once. If that node held the only copy of a shard, the index went
+  red. The operator now excludes the node, waits until it holds no shard, and
+  only then removes it. An existing deployment picks this up on the save that
+  scales it (#161).
 - **Redis 7 logs parse.** The pipeline's stock `REDISTIMESTAMP` has no year and
   Redis 7 writes one, so no line parsed. The timestamp now takes an optional
   year (registry package `redis` 1.0.1).
@@ -21,6 +28,19 @@ are called out explicitly.
   ANSI-coloured, and matched no pattern (~7% of a real traefik index). The codes
   are stripped first and the lines parse into `level` and `traefik_message`,
   their time into `@timestamp` (registry package `traefik` 1.0.1).
+- **A dead collector no longer reads as "receiving".** `monitoring_status`
+  derived `receiving` from the index's lifetime document count, so in the
+  0.12.1 password-reset outage every collector got 401s while the UI stayed
+  green. `receiving` now means a document with `@timestamp` in the last
+  5 minutes (60 of the agents' 5 s flushes), and the response adds
+  `last_doc_at` and a `state` code (`waiting`, `receiving`, `stale`,
+  `untimed`); `doc_count` is unchanged. The Integrations tab shows "no recent
+  data" with the time of the last document.
+- **The OTel stack's stuck-ReplicaSet recovery runs on a real install.** It
+  lists and deletes ReplicaSets in `velox-agents`, but the runtime Role there
+  granted no access to them, so every attempt was logged as `forbidden` and the
+  stack stayed stuck on the missing ServiceAccount (#125). The Role now grants
+  `list` and `delete` on `replicasets`. Applies with the next `upgrade.yaml`.
 
 ## [0.12.2] - 2026-10-15
 

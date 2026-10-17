@@ -1854,6 +1854,145 @@ pub async fn doc_count_of(deployment: &Deployment, pattern: &str) -> Result<u64>
     Ok(body.get("count").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
+/// How far back a document still counts as "arriving" (#165). Every built-in
+/// collector flushes every 5 s (`Flush 5`, `agents::fluent_bit_conf_template`),
+/// so 5 min is 60 flushes: it rides out a retried flush, the tail input's 60 s
+/// scan for new pods' log files and a bursty source's quiet minute, yet a dead
+/// collector flips within minutes rather than never.
+pub const RECENT_WINDOW: &str = "now-5m";
+
+/// Recency of a recipe's index, from `@timestamp` (#165). Every recipe's
+/// documents carry one: Fluent Bit stamps tail records, the ingest pipelines
+/// overwrite it with the parsed event time, and k8s-events derives it from the
+/// Event's own times. `timed` is still counted so a foreign writer that sends
+/// none reads as "recency unknown" rather than as a dead collector.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Recency {
+    /// Documents that carry `@timestamp` at all.
+    pub timed: u64,
+    /// Documents with `@timestamp` inside `RECENT_WINDOW`.
+    pub recent: u64,
+    /// The newest `@timestamp`, ISO-8601; None when no document has one.
+    pub newest: Option<String>,
+}
+
+/// One `size: 0` search answers all three `Recency` fields.
+pub(crate) fn recency_query() -> serde_json::Value {
+    serde_json::json!({
+        "size": 0,
+        "aggs": {
+            "timed":  { "filter": { "exists": { "field": "@timestamp" } } },
+            "recent": { "filter": { "range": { "@timestamp": { "gte": RECENT_WINDOW } } } },
+            "newest": { "max": { "field": "@timestamp", "format": "strict_date_optional_time" } }
+        }
+    })
+}
+
+/// Read `recency_query`'s response. A wildcard that matches no index answers
+/// with empty aggregations, which is "nothing timed", not an error. The
+/// newest stamp is trusted only when the max has a `value`: an empty max can
+/// still carry a formatted -Infinity in `value_as_string`.
+pub(crate) fn parse_recency(body: &serde_json::Value) -> Recency {
+    let aggs = &body["aggregations"];
+    Recency {
+        timed: aggs["timed"]["doc_count"].as_u64().unwrap_or(0),
+        recent: aggs["recent"]["doc_count"].as_u64().unwrap_or(0),
+        newest: aggs["newest"]["value_as_string"]
+            .as_str()
+            .filter(|_| !aggs["newest"]["value"].is_null())
+            .map(str::to_owned),
+    }
+}
+
+/// `Recency` of a recipe's index. Same rule as `doc_count_of`: a non-success
+/// response is an ERROR, never "nothing recent".
+pub async fn recency(deployment: &Deployment, recipe: &str) -> Result<Recency> {
+    let base = os_base(deployment);
+    let c = http()?;
+    let (u, p) = crate::k8s::admin_creds(deployment).await;
+    let resp = c
+        .post(format!("{base}/{}*/_search", recipe_index(recipe)))
+        .basic_auth(&u, Some(&p))
+        .json(&recency_query())
+        .send()
+        .await
+        .context("querying doc recency")?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("doc recency query returned {status}");
+    }
+    let body: serde_json::Value = resp.json().await.context("parsing recency")?;
+    Ok(parse_recency(&body))
+}
+
+#[cfg(test)]
+mod recency_tests {
+    use super::*;
+
+    /// #165: recency is judged on `@timestamp` inside the window, and the
+    /// newest stamp comes back as a date string, not epoch millis.
+    #[test]
+    fn the_query_counts_the_window_and_formats_the_newest_stamp() {
+        let q = recency_query();
+        assert_eq!(q["size"], 0, "counts only, no hits");
+        assert_eq!(
+            q["aggs"]["recent"]["filter"]["range"]["@timestamp"]["gte"],
+            "now-5m"
+        );
+        assert_eq!(
+            q["aggs"]["timed"]["filter"]["exists"]["field"],
+            "@timestamp"
+        );
+        assert_eq!(q["aggs"]["newest"]["max"]["field"], "@timestamp");
+        assert_eq!(
+            q["aggs"]["newest"]["max"]["format"],
+            "strict_date_optional_time"
+        );
+    }
+
+    #[test]
+    fn a_response_parses_into_counts_and_the_newest_stamp() {
+        let body = serde_json::json!({
+            "hits": { "total": { "value": 7816, "relation": "eq" }, "hits": [] },
+            "aggregations": {
+                "timed":  { "doc_count": 7816 },
+                "recent": { "doc_count": 0 },
+                "newest": { "value": 1791833286000.0,
+                            "value_as_string": "2026-10-12T19:28:06.000Z" }
+            }
+        });
+        assert_eq!(
+            parse_recency(&body),
+            Recency {
+                timed: 7816,
+                recent: 0,
+                newest: Some("2026-10-12T19:28:06.000Z".into()),
+            }
+        );
+    }
+
+    /// No document has `@timestamp` (or no index matched): OpenSearch answers
+    /// the max with `value: null`, and that is "no newest", never a date.
+    #[test]
+    fn no_timed_documents_parse_as_no_newest_stamp() {
+        let body = serde_json::json!({
+            "aggregations": {
+                "timed":  { "doc_count": 0 },
+                "recent": { "doc_count": 0 },
+                "newest": { "value": null }
+            }
+        });
+        assert_eq!(parse_recency(&body), Recency::default());
+        assert_eq!(parse_recency(&serde_json::json!({})), Recency::default());
+        // Some engines still format the empty max's -Infinity into a string.
+        let formatted_empty = serde_json::json!({
+            "aggregations": { "newest": { "value": null,
+                                          "value_as_string": "-292275055-05-16T16:47:04.192Z" } }
+        });
+        assert_eq!(parse_recency(&formatted_empty).newest, None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
