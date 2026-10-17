@@ -95,6 +95,12 @@ Without the variable these tests **skip locally with a loud banner**, and are a
 **hard failure in CI** — a lane without the checkout would go green while
 proving nothing.
 
+CI checks out the registry's `main`, unless the pull request's head branch also
+exists in the registry: then it checks out that branch. To land a recipe change
+together with its regenerated package, push both on the **same branch name**;
+the registry's CI does the same in reverse against this repo's `develop`. Merge
+the two back to back: until both land, the first trunk is red against the other.
+
 ### End-to-end checks
 
 `tests/` holds standalone Python scripts, not a Rust test target. See

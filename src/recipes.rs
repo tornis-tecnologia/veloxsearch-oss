@@ -1482,7 +1482,15 @@ pub(crate) fn recipe_teardown(
 ///   - traefik:   access log (CLF): leading fields match
 ///                `%{COMBINEDAPACHELOG}` (clientip/verb/request/response/bytes
 ///                land exactly like nginx); optional trailing
-///                router/service/duration captured when present.
+///                router/service/duration captured when present. The same
+///                stream carries traefik's own application log (`<ISO8601 ts>
+///                <LVL> <message>`, LVL = INF/WRN/ERR/…), ANSI-coloured even
+///                when stdout is not a terminal; the codes are stripped from
+///                `message` first and those lines parse into
+///                `traefik_time`/`level`/`traefik_message`. Their time stays in
+///                its own field (with its own date processor) so `timestamp`
+///                never gets dynamically mapped as a date by an app line and
+///                then rejects the CLF access lines.
 ///   - mongo:     (4.4+) structured JSON per line (`{"t":{"$date":..},...}`)
 ///                parsed onto the root; @timestamp from `t.$date`.
 ///   - rabbitmq:  `<ISO8601 ts> [<level>] <<pid>> <message>` (default
@@ -1610,14 +1618,22 @@ pub(crate) fn recipe_os_config(recipe: &str) -> Option<(serde_json::Value, serde
         ),
         "traefik" => (
             "VeloxSearch traefik access-log pipeline",
-            grok_date_processors(
-                serde_json::json!([
-                    "%{COMBINEDAPACHELOG} %{NUMBER:request_count} \"%{DATA:traefik_router}\" \"%{DATA:traefik_service}\" %{NUMBER:duration_ms}ms",
-                    "%{COMBINEDAPACHELOG}"
-                ]),
-                "timestamp",
-                serde_json::json!(["dd/MMM/yyyy:HH:mm:ss Z"]),
-            ),
+            strip_ansi_first({
+                let mut p = grok_date_processors(
+                    serde_json::json!([
+                        "%{COMBINEDAPACHELOG} %{NUMBER:request_count} \"%{DATA:traefik_router}\" \"%{DATA:traefik_service}\" %{NUMBER:duration_ms}ms",
+                        "%{COMBINEDAPACHELOG}",
+                        "^%{TIMESTAMP_ISO8601:traefik_time} %{WORD:level}(?: %{GREEDYDATA:traefik_message})?$"
+                    ]),
+                    "timestamp",
+                    serde_json::json!(["dd/MMM/yyyy:HH:mm:ss Z"]),
+                );
+                p.as_array_mut().expect("processor list").push(serde_json::json!(
+                    { "date": { "field": "traefik_time", "target_field": "@timestamp",
+                                "formats": ["ISO8601"], "ignore_failure": true } }
+                ));
+                p
+            }),
             serde_json::json!({
                 "@timestamp":      { "type": "date" },
                 "clientip":        { "type": "ip" },
@@ -1628,7 +1644,10 @@ pub(crate) fn recipe_os_config(recipe: &str) -> Option<(serde_json::Value, serde
                 "duration_ms":     { "type": "float" },
                 "traefik_router":  { "type": "text",
                                      "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
-                "traefik_service": { "type": "keyword" }
+                "traefik_service": { "type": "keyword" },
+                "level":           { "type": "keyword" },
+                "traefik_message": { "type": "text",
+                                     "fields": { "keyword": { "type": "keyword", "ignore_above": 512 } } }
             }),
         ),
         "mongo" => (
@@ -1835,6 +1854,145 @@ pub async fn doc_count_of(deployment: &Deployment, pattern: &str) -> Result<u64>
     Ok(body.get("count").and_then(|v| v.as_u64()).unwrap_or(0))
 }
 
+/// How far back a document still counts as "arriving" (#165). Every built-in
+/// collector flushes every 5 s (`Flush 5`, `agents::fluent_bit_conf_template`),
+/// so 5 min is 60 flushes: it rides out a retried flush, the tail input's 60 s
+/// scan for new pods' log files and a bursty source's quiet minute, yet a dead
+/// collector flips within minutes rather than never.
+pub const RECENT_WINDOW: &str = "now-5m";
+
+/// Recency of a recipe's index, from `@timestamp` (#165). Every recipe's
+/// documents carry one: Fluent Bit stamps tail records, the ingest pipelines
+/// overwrite it with the parsed event time, and k8s-events derives it from the
+/// Event's own times. `timed` is still counted so a foreign writer that sends
+/// none reads as "recency unknown" rather than as a dead collector.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Recency {
+    /// Documents that carry `@timestamp` at all.
+    pub timed: u64,
+    /// Documents with `@timestamp` inside `RECENT_WINDOW`.
+    pub recent: u64,
+    /// The newest `@timestamp`, ISO-8601; None when no document has one.
+    pub newest: Option<String>,
+}
+
+/// One `size: 0` search answers all three `Recency` fields.
+pub(crate) fn recency_query() -> serde_json::Value {
+    serde_json::json!({
+        "size": 0,
+        "aggs": {
+            "timed":  { "filter": { "exists": { "field": "@timestamp" } } },
+            "recent": { "filter": { "range": { "@timestamp": { "gte": RECENT_WINDOW } } } },
+            "newest": { "max": { "field": "@timestamp", "format": "strict_date_optional_time" } }
+        }
+    })
+}
+
+/// Read `recency_query`'s response. A wildcard that matches no index answers
+/// with empty aggregations, which is "nothing timed", not an error. The
+/// newest stamp is trusted only when the max has a `value`: an empty max can
+/// still carry a formatted -Infinity in `value_as_string`.
+pub(crate) fn parse_recency(body: &serde_json::Value) -> Recency {
+    let aggs = &body["aggregations"];
+    Recency {
+        timed: aggs["timed"]["doc_count"].as_u64().unwrap_or(0),
+        recent: aggs["recent"]["doc_count"].as_u64().unwrap_or(0),
+        newest: aggs["newest"]["value_as_string"]
+            .as_str()
+            .filter(|_| !aggs["newest"]["value"].is_null())
+            .map(str::to_owned),
+    }
+}
+
+/// `Recency` of a recipe's index. Same rule as `doc_count_of`: a non-success
+/// response is an ERROR, never "nothing recent".
+pub async fn recency(deployment: &Deployment, recipe: &str) -> Result<Recency> {
+    let base = os_base(deployment);
+    let c = http()?;
+    let (u, p) = crate::k8s::admin_creds(deployment).await;
+    let resp = c
+        .post(format!("{base}/{}*/_search", recipe_index(recipe)))
+        .basic_auth(&u, Some(&p))
+        .json(&recency_query())
+        .send()
+        .await
+        .context("querying doc recency")?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("doc recency query returned {status}");
+    }
+    let body: serde_json::Value = resp.json().await.context("parsing recency")?;
+    Ok(parse_recency(&body))
+}
+
+#[cfg(test)]
+mod recency_tests {
+    use super::*;
+
+    /// #165: recency is judged on `@timestamp` inside the window, and the
+    /// newest stamp comes back as a date string, not epoch millis.
+    #[test]
+    fn the_query_counts_the_window_and_formats_the_newest_stamp() {
+        let q = recency_query();
+        assert_eq!(q["size"], 0, "counts only, no hits");
+        assert_eq!(
+            q["aggs"]["recent"]["filter"]["range"]["@timestamp"]["gte"],
+            "now-5m"
+        );
+        assert_eq!(
+            q["aggs"]["timed"]["filter"]["exists"]["field"],
+            "@timestamp"
+        );
+        assert_eq!(q["aggs"]["newest"]["max"]["field"], "@timestamp");
+        assert_eq!(
+            q["aggs"]["newest"]["max"]["format"],
+            "strict_date_optional_time"
+        );
+    }
+
+    #[test]
+    fn a_response_parses_into_counts_and_the_newest_stamp() {
+        let body = serde_json::json!({
+            "hits": { "total": { "value": 7816, "relation": "eq" }, "hits": [] },
+            "aggregations": {
+                "timed":  { "doc_count": 7816 },
+                "recent": { "doc_count": 0 },
+                "newest": { "value": 1791833286000.0,
+                            "value_as_string": "2026-10-12T19:28:06.000Z" }
+            }
+        });
+        assert_eq!(
+            parse_recency(&body),
+            Recency {
+                timed: 7816,
+                recent: 0,
+                newest: Some("2026-10-12T19:28:06.000Z".into()),
+            }
+        );
+    }
+
+    /// No document has `@timestamp` (or no index matched): OpenSearch answers
+    /// the max with `value: null`, and that is "no newest", never a date.
+    #[test]
+    fn no_timed_documents_parse_as_no_newest_stamp() {
+        let body = serde_json::json!({
+            "aggregations": {
+                "timed":  { "doc_count": 0 },
+                "recent": { "doc_count": 0 },
+                "newest": { "value": null }
+            }
+        });
+        assert_eq!(parse_recency(&body), Recency::default());
+        assert_eq!(parse_recency(&serde_json::json!({})), Recency::default());
+        // Some engines still format the empty max's -Infinity into a string.
+        let formatted_empty = serde_json::json!({
+            "aggregations": { "newest": { "value": null,
+                                          "value_as_string": "-292275055-05-16T16:47:04.192Z" } }
+        });
+        assert_eq!(parse_recency(&formatted_empty).newest, None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1873,6 +2031,42 @@ mod tests {
         assert_eq!(recipe_index("kafka"), KAFKA_INDEX);
         assert_eq!(recipe_index("ssh"), SSH_INDEX);
         assert_eq!(recipe_index("k8s-audit"), K8S_AUDIT_INDEX);
+    }
+
+    /// #163: traefik's own application log is ANSI-coloured
+    /// (`ESC[90m<ts>ESC[0m ESC[32mINFESC[0m …`), so the SGR codes are stripped
+    /// from `message` before the grok — like rabbitmq (#155) — and a pattern
+    /// for the stripped app line follows the access-log ones, with its time in
+    /// its own field and its own date processor.
+    #[test]
+    fn traefik_strips_ansi_and_parses_its_app_log() {
+        let (pipeline, template) = recipe_os_config("traefik").expect("traefik pipeline");
+        let procs = pipeline["processors"].as_array().expect("processors");
+        assert_eq!(procs[0]["gsub"]["field"], "message");
+        assert_eq!(procs[0]["gsub"]["pattern"], "\\x1B\\[[0-9;]*m");
+        assert!(
+            procs[1].get("grok").is_some(),
+            "grok must run after the strip"
+        );
+
+        let patterns = procs[1]["grok"]["patterns"].as_array().unwrap();
+        assert!(patterns[0]
+            .as_str()
+            .unwrap()
+            .starts_with("%{COMBINEDAPACHELOG}"));
+        assert_eq!(
+            patterns.last().unwrap(),
+            "^%{TIMESTAMP_ISO8601:traefik_time} %{WORD:level}(?: %{GREEDYDATA:traefik_message})?$"
+        );
+        let dates: Vec<&str> = procs
+            .iter()
+            .filter_map(|p| p["date"]["field"].as_str())
+            .collect();
+        assert_eq!(dates, ["timestamp", "traefik_time"]);
+
+        let props = &template["template"]["mappings"]["properties"];
+        assert_eq!(props["level"]["type"], "keyword");
+        assert_eq!(props["traefik_message"]["type"], "text");
     }
 
     /// Every catalog id has a velox-* dashboard slug, and they are all unique

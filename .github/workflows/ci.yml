@@ -119,6 +119,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # A PR whose head branch also exists in the registry is tested against
+      # that branch, so a recipe change and its regenerated package can both go
+      # green before either merges (#164).
+      - name: Pick the registry ref
+        id: registry-ref
+        env:
+          HEAD: ${{ github.head_ref }}
+        run: |
+          ref=main
+          if [ -n "$HEAD" ] && git ls-remote --exit-code --heads https://github.com/tornis-tecnologia/veloxsearch-registry "refs/heads/$HEAD" >/dev/null; then ref=$HEAD; fi
+          echo "registry ref: $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Check out the integration registry
         # The golden gates (src/registry_golden.rs) compare the in-binary recipe
         # catalog against the canonical packages in the registry repo, and they
@@ -127,6 +140,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: tornis-tecnologia/veloxsearch-registry
+          ref: ${{ steps.registry-ref.outputs.ref }}
           path: .registry
 
       - uses: dtolnay/rust-toolchain@stable
