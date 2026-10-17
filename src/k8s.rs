@@ -727,10 +727,15 @@ fn disk_resize_check(cur: &str, new: &str, sc_allows_expansion: Option<bool>) ->
 const MIN_NODE_MEM_MIB: u64 = 1024;
 const MAX_NODE_MEM_MIB: u64 = 62 * 1024;
 
-/// Node-scaling guard (#52). Scaling up AND down are supported (the operator
-/// drains on scale-down) — the one unsupported value is zero: a deployment
-/// with no nodes is not "paused", it is unreachable, and the CR would sit
-/// broken. The supported way to stop paying for a deployment is deleting it.
+/// Node-scaling guard (#52). Scaling up AND down are supported. A scale-down
+/// is safe because every apply turns on the operator's smart scaler
+/// (`cluster_spec`, #161): it removes one node at a time, highest ordinal
+/// first, and only after excluding it from allocation and waiting until it
+/// holds no shard. A drain that cannot finish (nowhere left to put a shard)
+/// holds the scale-down instead of dropping data. The one unsupported value
+/// is zero: a deployment with no nodes is not "paused", it is unreachable,
+/// and the CR would sit broken. The supported way to stop paying for a
+/// deployment is deleting it.
 fn node_scale_check(replicas: u32) -> Result<()> {
     if replicas == 0 {
         bail!(
@@ -1200,17 +1205,12 @@ pub async fn create_cluster(
             "labels": labels,
             "annotations": annotations
         },
-        "spec": {
-            "general": general,
-            "security": {
-                // TLS generate:true is REQUIRED or the operator never initializes
-                // security and the node hangs at "Security not initialized".
-                "tls": { "transport": { "generate": true }, "http": { "generate": true } },
-                "config": { "adminCredentialsSecret": { "name": admin_secret_name(name) } }
-            },
-            "dashboards": dashboards_spec(&dash_version, dashboards_replicas),
-            "nodePools": [node_pool(replicas, &disk, &mem, s.cpu_req, s.cpu_lim, longhorn_sc)]
-        }
+        "spec": cluster_spec(
+            name,
+            general,
+            dashboards_spec(&dash_version, dashboards_replicas),
+            node_pool(replicas, &disk, &mem, s.cpu_req, s.cpu_lim, longhorn_sc),
+        )
     });
     os_api(&client, dep)
         .patch(name, &pp, &Patch::Apply(&manifest))
@@ -1230,6 +1230,39 @@ pub async fn create_cluster(
     ensure_dashboards_ingress(&client, &access, dep).await?;
     ensure_opensearch_ingress(&client, &access, dep).await?;
     Ok(())
+}
+
+/// `spec` of the OpenSearchCluster as `create_cluster` applies it. Pure, so
+/// what every apply carries is testable without a cluster.
+///
+/// `create_cluster` is the create AND the save path, and its manifest is
+/// server-side applied whole, so whatever is here reaches an existing CR on
+/// its next save — the same apply that carries a replica change (#161).
+fn cluster_spec(
+    name: &str,
+    general: serde_json::Value,
+    dashboards: serde_json::Value,
+    node_pool: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "general": general,
+        "security": {
+            // TLS generate:true is REQUIRED or the operator never initializes
+            // security and the node hangs at "Security not initialized".
+            "tls": { "transport": { "generate": true }, "http": { "generate": true } },
+            "config": { "adminCredentialsSecret": { "name": admin_secret_name(name) } }
+        },
+        // #161: the operator drains a node (allocation exclusion, wait until
+        // it holds no shard, then shrink the StatefulSet) on scale-down ONLY
+        // when `smartScaler` is on. The CRD default never applies, because
+        // it sits inside `confMgmt` and an absent object is not defaulted —
+        // without this the highest-ordinal node is deleted with its shards.
+        // `general.drainDataNodes` is a different switch: it drains on
+        // rolling restarts and upgrades, and is deliberately left off.
+        "confMgmt": { "smartScaler": true },
+        "dashboards": dashboards,
+        "nodePools": [node_pool]
+    })
 }
 
 /// Render the dashboards Ingress manifest for one deployment (pure — testable
@@ -9464,6 +9497,37 @@ mod tests {
         let err = node_scale_check(0).unwrap_err().to_string();
         assert!(err.contains("0 nodes"), "names the refused value: {err}");
         assert!(err.contains("delete"), "points at the supported op: {err}");
+    }
+
+    /// #161: a scale-down drains only when the smart scaler is on, and the
+    /// CRD default cannot switch it on for us (it lives inside `confMgmt`,
+    /// which nothing defaults). Every apply carries it: a create, and a save
+    /// of an existing CR written before this field existed — the save that
+    /// lowers the replicas is the same apply that turns draining on.
+    #[test]
+    fn every_apply_turns_on_the_smart_scaler() {
+        let old_cr = serde_json::json!({ "spec": {
+            "general": { "version": "3.0.0" },
+            "dashboards": { "version": "3.0.0", "replicas": 1 },
+            "nodePools": [{ "component": "nodes", "replicas": 4 }]
+        }});
+        assert!(old_cr.pointer("/spec/confMgmt").is_none());
+        // A create, and the 4 → 3 save of the CR above.
+        for existing in [None, Some(&old_cr)] {
+            let (nodes, dash) = versions_of(existing);
+            let general = serde_json::json!({ "serviceName": "prod", "version": nodes });
+            let dash_replicas = existing.map_or(0, dashboards_replicas_of);
+            let spec = cluster_spec(
+                "prod",
+                general,
+                dashboards_spec(&dash, dash_replicas),
+                node_pool(3, "10Gi", "2Gi", "500m", "1", true),
+            );
+            assert_eq!(spec["confMgmt"]["smartScaler"], true, "{spec}");
+            // drainDataNodes is the rolling-restart switch, not this one.
+            assert!(spec["general"].get("drainDataNodes").is_none(), "{spec}");
+            assert_eq!(spec["nodePools"][0]["replicas"], 3);
+        }
     }
 
     /// #52: memory can move up AND down, but a garbage quantity or a value the
