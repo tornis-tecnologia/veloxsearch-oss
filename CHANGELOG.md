@@ -36,6 +36,11 @@ are called out explicitly.
   `last_doc_at` and a `state` code (`waiting`, `receiving`, `stale`,
   `untimed`); `doc_count` is unchanged. The Integrations tab shows "no recent
   data" with the time of the last document.
+- **Traefik's own log lines parse.** Traefik's application log (startup,
+  provider and error lines) shares the stream with the access log, is
+  ANSI-coloured, and matched no pattern (~7% of a real traefik index). The codes
+  are stripped first and the lines parse into `level` and `traefik_message`,
+  their time into `@timestamp` (registry package `traefik` 1.0.1).
 
 ## [0.12.2] - 2026-10-15
 
