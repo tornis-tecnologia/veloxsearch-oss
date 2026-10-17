@@ -2183,7 +2183,7 @@ parameters:
 
     /// The `OpenSearchCluster` CRD names the operator chart REALLY installs,
     /// copied verbatim out of `deploy/bootstrap/operator.yaml` (chart
-    /// opensearch-operator-3.0.2) — the same name sidecar waits on in
+    /// opensearch-operator-3.0.14) — the same name sidecar waits on in
     /// `ansible/roles/opensearch_stack/tasks/main.yml`.
     const REAL_OPERATOR_CRDS: &[&str] = &[
         "opensearchclusters.opensearch.org",
@@ -2208,7 +2208,7 @@ parameters:
         }
     }
 
-    const VENDORED_IMAGE_FIXTURE: &str = "opensearchproject/opensearch-operator:3.0.0-alpha";
+    const VENDORED_IMAGE_FIXTURE: &str = "opensearchproject/opensearch-operator:3.0.0";
 
     /// Our own operator as the scan reports the bundle's Deployment.
     fn ours(ready: bool) -> OperatorPresence {

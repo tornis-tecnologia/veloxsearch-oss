@@ -442,13 +442,18 @@ pub struct ActivityInput {
 /// `componentsStatus` values that mean "this reconciler is done". Anything else
 /// present means something is still moving.
 ///
+/// `Ready` is the securityconfig reconciler's resting state from operator
+/// 3.0.0 on: it keeps a `Securityconfig` entry for good (`Running` while its
+/// Job works, `Failed` when it gave up), so a deployment would otherwise
+/// never settle (#160). No other reconciler writes `Ready`.
+///
 /// Public because `k8s.rs`'s short-circuit has to test the same clause it is
 /// standing in for — the fast path must be strictly stronger than the predicate
 /// (ADR-050 invariant 5), which it cannot be if it re-spells the rule.
 pub fn component_is_terminal(status: &str) -> bool {
     matches!(
         status.to_ascii_lowercase().as_str(),
-        "finished" | "upgraded" | "completed" | "done" | ""
+        "finished" | "upgraded" | "completed" | "done" | "ready" | ""
     )
 }
 
@@ -957,6 +962,22 @@ mod tests {
                 ..steady()
             };
             assert!(evaluate(&i).settled, "`{done}` should count as terminal");
+        }
+    }
+
+    #[test]
+    fn a_ready_securityconfig_settles_and_a_running_or_failed_one_does_not() {
+        // Operator 3.0.0 keeps `Securityconfig` in componentsStatus for good;
+        // `Ready` is its resting state (#160).
+        let with = |status: &str| ActivityInput {
+            components: vec![("Securityconfig".into(), status.into())],
+            ..steady()
+        };
+        assert!(evaluate(&with("Ready")).settled);
+        assert!(nodes_settled_of(&with("Ready")));
+        for busy in ["Running", "Failed"] {
+            assert!(!evaluate(&with(busy)).settled, "`{busy}` is not done");
+            assert!(!nodes_settled_of(&with(busy)), "`{busy}` is not done");
         }
     }
 
