@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-17
+
 ### Fixed
 - **A new deployment no longer rolls all its nodes a second time (#160).** The
   vendored OpenSearch operator `3.0.0-alpha` changed each node StatefulSet's pod
