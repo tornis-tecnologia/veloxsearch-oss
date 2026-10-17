@@ -158,6 +158,7 @@ jobs:
         run: cargo test --all-targets
 
       - name: cargo test (ignored — needs Postgres)
+        if: ${{ !cancelled() }}
         env:
           VELOX_PG_TEST_URL: postgres://postgres:t@127.0.0.1:5432/postgres
           VELOX_REGISTRY_PATH: ${{ github.workspace }}/.registry
