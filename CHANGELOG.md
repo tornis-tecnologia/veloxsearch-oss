@@ -16,6 +16,28 @@ are called out explicitly.
   red. The operator now excludes the node, waits until it holds no shard, and
   only then removes it. An existing deployment picks this up on the save that
   scales it (#161).
+- **A new deployment no longer rolls all its nodes a second time (#160).** The
+  vendored OpenSearch operator `3.0.0-alpha` changed each node StatefulSet's pod
+  template seconds after creating it (it leaked its `opensearch.org/last-applied`
+  annotation into the template), then restarted every node onto the "new"
+  revision. Mid-restart its parallel-recovery mode recreated the StatefulSet
+  with a different `podManagementPolicy` and rolled them all again. A create
+  took 10–25 minutes and day-2 operations sometimes did not settle within
+  15 minutes. Fresh installs now get operator `3.0.0` (chart 3.0.14), which
+  fixes the leak (upstream #1523) and creates StatefulSets `Parallel` from the
+  start, without recovery mode (upstream #1329). The CRDs only gain fields.
+  Operator 3.0.0 also keeps a `Securityconfig: Ready` entry in the cluster's
+  `componentsStatus` for good. VeloxSearch now reads `Ready` as done.
+  Otherwise a new deployment would never count as settled and would hold back
+  Dashboards until the 20-minute ceiling.
+- **Dashboards no longer stays at zero replicas forever after an early boot
+  (#160).** When the operator started Dashboards during the first-boot hold
+  and it went Ready, VeloxSearch dropped the hold but left the cluster asking
+  for 0 replicas. The operator then removed the serving Dashboards, and the
+  deployment stayed "stuck at dashboards". The hold is now released at 1.
+  Existing installs keep their running operator (ADR-057) and show the R9
+  drift notice. Upgrading the operator by hand restarts each node pool's pods
+  once, because the StatefulSet is recreated for the new `podManagementPolicy`.
 - **Redis 7 logs parse.** The pipeline's stock `REDISTIMESTAMP` has no year and
   Redis 7 writes one, so no line parsed. The timestamp now takes an optional
   year (registry package `redis` 1.0.1).

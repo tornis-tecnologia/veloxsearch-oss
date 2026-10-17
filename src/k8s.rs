@@ -856,7 +856,7 @@ fn parse_mem_mib(s: &str) -> Option<u64> {
 /// the nodePool memory request, 512 MiB when the request is missing or
 /// unparseable. This is a display-side mirror of the operator's
 /// `CalculateJvmHeapSizeSettings` (verified in the vendored operator, image
-/// v3.0.0-alpha / chart 3.0.2) — VeloxSearch no longer renders JVM flags into
+/// v3.0.0 / chart 3.0.14) — VeloxSearch no longer renders JVM flags into
 /// the CR, it only PREDICTS what the operator will set so the wizard/status
 /// can show it. Keep in lockstep with the vendored operator on upgrades.
 fn heap_mib(mem: &str) -> u64 {
@@ -914,7 +914,7 @@ async fn ensure_admin_secret(client: &Client, dep: &Deployment) -> Result<()> {
 ///     explicit `-Xms/-Xmx`, the operator computes them as **half the memory
 ///     request** and injects `OPENSEARCH_JAVA_OPTS` itself
 ///     (`CalculateJvmHeapSizeSettings` + `AppendJvmHeapSizeSettings`, verified
-///     in the vendored operator — image v3.0.0-alpha, chart 3.0.2). An
+///     in the vendored operator — image v3.0.0, chart 3.0.14). An
 ///     explicit `jvm` would OVERRIDE that capability, which is exactly what
 ///     the previous hand-rendered `-Xms/-Xmx` string did.
 ///  2. **Memory request = limit** (Guaranteed QoS). One user-facing number:
@@ -4771,6 +4771,9 @@ enum HoldStep {
     /// A Dashboards replica is already Ready — the hold was lost and the
     /// first boot happened anyway. Scaling a serving Dashboards to zero
     /// would be an outage that protects nothing, so only the annotation goes.
+    /// Only when the CR already asks for replicas: one still at 0 is a
+    /// [`HoldStep::Release`], or the operator scales the serving replica
+    /// away and nothing is left to bring it back (#160).
     ClearStale,
 }
 
@@ -4784,9 +4787,9 @@ fn dashboards_hold_step(
 ) -> HoldStep {
     if !held {
         HoldStep::Nothing
-    } else if dashboards_serving {
+    } else if dashboards_serving && stored_replicas != 0 {
         HoldStep::ClearStale
-    } else if release_due {
+    } else if dashboards_serving || release_due {
         HoldStep::Release
     } else if stored_replicas != 0 {
         HoldStep::Enforce
@@ -7764,10 +7767,20 @@ mod tests {
     fn a_serving_dashboards_is_never_scaled_by_the_hold() {
         // the hold was lost and Dashboards already booted: only the
         // annotation goes, whatever the cluster's state
-        for (replicas, release_due) in [(1, false), (1, true), (0, false)] {
+        for release_due in [false, true] {
             assert_eq!(
-                dashboards_hold_step(true, replicas, true, release_due),
+                dashboards_hold_step(true, 1, true, release_due),
                 HoldStep::ClearStale
+            );
+        }
+        // #160: the operator rendered a Deployment from the dropped zero, it
+        // booted and went Ready while the CR is back at 0. Clearing only the
+        // annotation left the CR at 0: the operator scaled the serving replica
+        // away and nothing ever released it. Release keeps it at 1.
+        for release_due in [false, true] {
+            assert_eq!(
+                dashboards_hold_step(true, 0, true, release_due),
+                HoldStep::Release
             );
         }
         let p = hold_step_patch(HoldStep::ClearStale, "42").unwrap();
@@ -9582,7 +9595,7 @@ mod tests {
         // ADR-035: our display heap must equal what the operator computes —
         // CalculateJvmHeapSizeSettings = memory request / 2 in MiB, default
         // 512 MiB when the request is missing/unparseable (verified in the
-        // vendored operator, image v3.0.0-alpha / chart 3.0.2).
+        // vendored operator, image v3.0.0 / chart 3.0.14).
         assert_eq!(heap_mib("4Gi"), 2048);
         assert_eq!(heap_mib("3Gi"), 1536);
         assert_eq!(heap_mib("2Gi"), 1024);
