@@ -1529,6 +1529,28 @@ mod server {
         Ok(Json(crate::build_info::collect().await))
     }
 
+    /// Operator upgrade from Settings (#176, ADR-066): the impact report, the
+    /// grant and the job. Installation-level, like the operator itself.
+    async fn operator_upgrade_status(
+        scope: Scope,
+    ) -> Result<Json<crate::operator_upgrade::Report>, ApiError> {
+        scope.require_admin()?;
+        crate::operator_upgrade::report()
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
+
+    /// Start the operator upgrade. The verdict is recomputed server-side; a
+    /// refusal says why (409), never a silent no-op.
+    async fn operator_upgrade(scope: Scope) -> Result<StatusCode, ApiError> {
+        scope.require_admin()?;
+        crate::operator_upgrade::start()
+            .await
+            .map(|()| StatusCode::ACCEPTED)
+            .map_err(ApiError::conflict)
+    }
+
     async fn bootstrap_ensure(scope: Scope) -> Result<Json<BootstrapStatus>, ApiError> {
         scope.require_admin()?;
         crate::bootstrap::ensure()
@@ -3135,6 +3157,8 @@ mod server {
             .route(p("/build_info"), get(build_info))
             .route(p("/bootstrap_status"), get(bootstrap_status))
             .route(p("/bootstrap_ensure"), post(bootstrap_ensure))
+            .route(p("/operator_upgrade_status"), get(operator_upgrade_status))
+            .route(p("/operator_upgrade"), post(operator_upgrade))
             .route(p("/storage_status"), get(storage_status))
             .route(p("/discover"), get(discover))
             .route(p("/list_deployments"), get(list_deployments))

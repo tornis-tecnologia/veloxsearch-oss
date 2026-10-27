@@ -61,6 +61,9 @@ mod install_env;
 #[cfg(feature = "ssr")]
 pub mod bootstrap;
 
+// Operator upgrade from Settings, impact report first (#176, ADR-066).
+pub mod operator_upgrade;
+
 // #55: which build is serving — compiled-in version + commit, plus the image
 // digest and operator image read back from the cluster.
 #[cfg(feature = "ssr")]

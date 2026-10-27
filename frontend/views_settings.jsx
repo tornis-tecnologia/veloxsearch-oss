@@ -160,6 +160,160 @@ function RetentionBlock({ t, onToast }) {
   );
 }
 
+// OpenSearch operator upgrade (#176, ADR-066). Every verdict is the server's:
+// what changes, what it costs each deployment, what blocks it. The button
+// arms only once a cluster admin has created the one-time grant, and the
+// server re-checks everything when it is pressed.
+function OperatorBlock({ t, onToast }) {
+  const [r, setR] = useState(null);
+  const [err, setErr] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    try {
+      setR(await API.operatorUpgradeStatus());
+      setErr("");
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+  useEffect(() => { load(); }, []);
+
+  // Poll while something can change under us: the job running, or the grant
+  // the admin is about to create in another terminal.
+  const watching = r && (r.job.state === "running" || (r.state === "available" && !r.grant.present));
+  useEffect(() => {
+    if (!watching) return undefined;
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, [watching]);
+
+  async function start() {
+    setConfirm(false);
+    setBusy(true);
+    try {
+      await API.operatorUpgrade();
+      await load();
+    } catch (e) {
+      onToast(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // One sentence per finding code; the server's English `detail` when a
+  // code is new to this build.
+  const say = f => (t["opu_f_" + f.code]
+    ? fmtS(t["opu_f_" + f.code], f.deployment, f.subject)
+    : f.detail);
+
+  const card = children => (
+    <div className="card pad" style={{ maxWidth: 560, marginTop: 18 }} data-testid="operator-upgrade">
+      <h3 className="section-title" style={{ marginTop: 0 }}>{t.opu_h}</h3>
+      {children}
+    </div>
+  );
+  if (err) return card(<p className="hint" style={{ color: "var(--danger)" }}>{err}</p>);
+  if (!r) return card(<p className="hint">{t.opu_loading}</p>);
+  if (r.state === "unmanaged") {
+    return card(<p className="hint" data-testid="opu-unmanaged">{r.blockers.map(say).join(" ")}</p>);
+  }
+
+  const job = r.job;
+  const downPools = r.warnings.filter(w => w.code === "single_replica_pool");
+  const removed = r.crds.flatMap(c => c.removed_fields.map(f => `${c.name} ${f}`));
+  const versionsGone = r.crds.flatMap(c => c.removed_versions.map(v => `${c.name} ${v}`));
+
+  return card(<>
+    <div className="kvrow"><span className="k">{t.opu_running}</span><span className="v" data-testid="opu-running">{r.running}</span></div>
+    <div className="kvrow"><span className="k">{t.opu_vendored}</span><span className="v">{r.vendored}</span></div>
+
+    {r.state === "up_to_date" && job.state !== "done" && (
+      <p className="hint" data-testid="opu-up-to-date">{t.opu_up_to_date}</p>
+    )}
+
+    {job.state === "running" && (
+      <p className="hint" data-testid="opu-job-running">{fmtS(t["opu_step_" + job.step] || job.step, job.to)}</p>
+    )}
+    {job.state === "done" && (
+      <p className="hint" style={{ color: "var(--accent)" }} data-testid="opu-job-done">{fmtS(t.opu_done, job.from, job.to)}</p>
+    )}
+    {job.state === "failed" && (
+      <p className="hint" style={{ color: "var(--danger)", overflowWrap: "anywhere" }} data-testid="opu-job-failed">
+        {fmtS(t.opu_failed, job.error)}
+      </p>
+    )}
+
+    {r.state === "available" && job.state !== "running" && (<>
+      <p style={{ fontSize: 12.5, color: "var(--text-3)" }}>{t.opu_lead}</p>
+
+      <h4 className="section-title" style={{ fontSize: 13 }}>{t.opu_impact_h}</h4>
+      <p className="hint" data-testid="opu-crds">
+        {removed.length || versionsGone.length
+          ? fmtS(t.opu_crd_removes, [...versionsGone, ...removed].join(", "))
+          : t.opu_crd_additive}
+      </p>
+      {r.deployments.length === 0 && <p className="hint">{t.opu_no_deployments}</p>}
+      {r.deployments.map(d => (
+        <div className="kvrow" key={`${d.namespace}/${d.name}`}>
+          <span className="k">{d.name}</span>
+          <span className="v">
+            {d.health} · {d.pools.map(p => `${p.name} ×${p.replicas}`).join(", ")}
+          </span>
+        </div>
+      ))}
+      <p className="hint">{t.opu_restart_note}</p>
+
+      {r.blockers.length > 0 && (
+        <div data-testid="opu-blockers">
+          <h4 className="section-title" style={{ fontSize: 13, color: "var(--danger)" }}>{t.opu_blockers_h}</h4>
+          {r.blockers.map((b, n) => <p key={n} className="hint" style={{ color: "var(--danger)" }}>{say(b)}</p>)}
+        </div>
+      )}
+      {r.warnings.length > 0 && (
+        <div data-testid="opu-warnings">
+          <h4 className="section-title" style={{ fontSize: 13, color: "var(--warn)" }}>{t.opu_warnings_h}</h4>
+          {r.warnings.map((w, n) => <p key={n} className="hint" style={{ color: "var(--warn)" }}>{say(w)}</p>)}
+        </div>
+      )}
+
+      <h4 className="section-title" style={{ fontSize: 13 }}>{t.opu_grant_h}</h4>
+      {r.grant.present
+        ? <p className="hint" data-testid="opu-grant-present">
+            {fmtS(t.opu_grant_present, String(Math.ceil(r.grant.expires_in_secs / 60)))}
+          </p>
+        : <>
+            <p className="hint">{t.opu_grant_needed}</p>
+            <Copyable text={r.grant.command} display={r.grant.command} t={t} onCopy={onToast} />
+          </>}
+
+      <div style={{ marginTop: 12 }}>
+        <Btn variant="primary" icon="layers" disabled={busy || !r.can_upgrade}
+          onClick={() => setConfirm(true)} data-testid="opu-start">
+          {fmtS(t.opu_button, r.vendored)}
+        </Btn>
+        {!r.can_upgrade && (
+          <p className="hint" style={{ marginTop: 6 }}>
+            {r.blockers.length ? t.opu_why_blocked : !r.grant.present ? t.opu_why_grant : ""}
+          </p>
+        )}
+      </div>
+
+      <Confirm open={confirm} title={fmtS(t.opu_button, r.vendored)}
+        body={fmtS(t.opu_confirm, r.running, r.vendored)}
+        confirmLabel={t.opu_confirm_go} cancelLabel={t.cancel} icon="layers" variant="primary"
+        confirmTestid="opu-confirm" onCancel={() => setConfirm(false)} onConfirm={start}>
+        {downPools.length > 0 && (
+          <p className="hint" style={{ color: "var(--warn)" }}>
+            {fmtS(t.opu_confirm_downtime, downPools.map(p => `${p.deployment} ${p.subject}`).join(", "))}
+          </p>
+        )}
+      </Confirm>
+    </>)}
+  </>);
+}
+
 function SettingsView({ lang, onToast, buildInfo, isTenant }) {
   const t = STR[lang];
   const [access, setAccess] = useState("portforward");
@@ -320,6 +474,8 @@ function SettingsView({ lang, onToast, buildInfo, isTenant }) {
       </div>
 
       {!isTenant && <RetentionBlock t={t} onToast={onToast} />}
+
+      {!isTenant && <OperatorBlock t={t} onToast={onToast} />}
 
       {buildInfo && <AboutBlock info={buildInfo} t={t} onToast={onToast} />}
     </div>

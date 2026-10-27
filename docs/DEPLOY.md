@@ -237,7 +237,27 @@ changed. What to do depends on why:
 - **You run a different operator on purpose.** Nothing to do. R9 is
   informational and never blocks anything.
 - **You want the operator this release vendors.** That is an operator upgrade,
-  and you own it. Read the operator's release notes for CRD changes, take a
+  and you own it. **Settings → OpenSearch operator** (ADR-066) shows what it
+  changes before it runs:
+  - CRD fields and versions removed. A removed field that one of your
+    deployments sets blocks the upgrade.
+  - Every deployment's node pools. Each may restart once, and a pool of one is
+    down while it does.
+  - Anything that blocks it: a deployment that is not green, a version upgrade
+    in flight, an operator that is not Ready.
+
+  To arm its button, a cluster admin grants the app cluster-admin for this one
+  job:
+
+  ```sh
+  kubectl create clusterrolebinding veloxsearch-operator-upgrade \
+    --clusterrole=cluster-admin --serviceaccount=veloxsearch-system:veloxsearch
+  ```
+
+  The app deletes that binding when the upgrade ends, whether it worked or not.
+  If nobody presses the button, it deletes the binding after 30 minutes.
+
+  The upgrade by hand, which is the same apply the button runs: take a
   snapshot, then apply the bundle from the release tag, retargeted from the
   namespace it was rendered into to the app namespace:
 

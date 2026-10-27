@@ -41,7 +41,7 @@ const LONGHORN_BUNDLE: &str = include_str!(concat!(
 /// occurrence of that token semantically means "the operator's namespace", so
 /// retargeting it to wherever the app actually runs is a plain token replace
 /// (a no-op on a cluster that already has it, ADR-027).
-fn operator_bundle() -> String {
+pub(crate) fn operator_bundle() -> String {
     OPERATOR_BUNDLE.replace("veloxsearch-test", ns())
 }
 
@@ -62,7 +62,7 @@ const CERT_MANAGER_DEPLOYS: &[&str] = &[
     "cert-manager-webhook",
     "cert-manager-cainjector",
 ];
-const OPERATOR_DEPLOY: &str = "opensearch-operator";
+pub(crate) const OPERATOR_DEPLOY: &str = "opensearch-operator";
 
 // --- Storage self-bootstrap (Longhorn, ADR-031/043) -------------------------
 const LONGHORN_NS: &str = "longhorn-system";
@@ -946,6 +946,51 @@ pub async fn operator_images() -> Result<OperatorImages> {
     Ok(OperatorImages::from_presence(&presence))
 }
 
+/// The running operator as the Settings upgrade (#176) needs it: whether it is
+/// ours and serving, what it runs, what this release vendors.
+pub(crate) struct OperatorState {
+    /// `(image, ready)` when the running operator is the one we installed.
+    pub ours: Option<(Option<String>, bool)>,
+    pub vendored: Option<String>,
+    pub drift: bool,
+    /// Why `ours` is `None`.
+    pub note: String,
+}
+
+pub(crate) async fn operator_state(client: &Client) -> Result<OperatorState> {
+    let presence = scan_operators(client)
+        .await
+        .context("probing the OpenSearch operator")?;
+    let images = OperatorImages::from_presence(&presence);
+    let (ours, note) = match &presence {
+        OperatorPresence::Ours { image, ready, .. } => {
+            (Some((image.clone(), *ready)), String::new())
+        }
+        OperatorPresence::Absent | OperatorPresence::UnmanagedCrds => (
+            None,
+            "no operator is running — bootstrap installs the vendored one".to_string(),
+        ),
+        OperatorPresence::Foreign {
+            namespace, name, ..
+        } => (
+            None,
+            format!("the running operator ({namespace}/{name}) was not installed by VeloxSearch"),
+        ),
+        OperatorPresence::Unknown(e) => (None, format!("operator probe failed: {e}")),
+    };
+    Ok(OperatorState {
+        ours,
+        vendored: images.vendored.map(str::to_string),
+        drift: images.drift,
+        note,
+    })
+}
+
+/// A bootstrap install is running (it owns the operator while it does).
+pub(crate) fn install_running() -> bool {
+    job_snapshot().0.is_some()
+}
+
 /// The R9 row. Never `fail`: a drifted operator is still an operator that
 /// serves, and refusing on it would turn "a release vendors a newer operator"
 /// into "every existing install is locked out until it upgrades the operator"
@@ -1375,7 +1420,7 @@ async fn run_install() -> Result<()> {
     Ok(())
 }
 
-const BOOTSTRAP_BINDING: &str = "veloxsearch-bootstrap";
+pub(crate) const BOOTSTRAP_BINDING: &str = "veloxsearch-bootstrap";
 
 /// Delete the `veloxsearch-bootstrap` ClusterRoleBinding if it still exists.
 /// Best-effort: a failure only means the binding lingers (= today's manual
@@ -1394,7 +1439,7 @@ async fn revoke_bootstrap(client: &Client) {
 }
 
 /// The ServiceAccount `deploy/install.yaml` binds both RBAC phases to.
-const APP_SERVICE_ACCOUNT: &str = "veloxsearch";
+pub(crate) const APP_SERVICE_ACCOUNT: &str = "veloxsearch";
 
 /// How often the running app looks for a re-created bootstrap binding. One
 /// GET per interval while the binding is absent, which is the steady state.
@@ -1405,7 +1450,10 @@ const REVOKE_WATCH_SECS: u64 = 60;
 /// only ever deletes the binding that names this very app: a dev binary running
 /// off-cluster resolves `ns()` to the inert `veloxsearch-dev` namespace
 /// (CONTRIBUTING, off-cluster safety) and therefore never matches a real one.
-fn binding_is_ours(b: &k8s_openapi::api::rbac::v1::ClusterRoleBinding, own_ns: &str) -> bool {
+pub(crate) fn binding_is_ours(
+    b: &k8s_openapi::api::rbac::v1::ClusterRoleBinding,
+    own_ns: &str,
+) -> bool {
     b.subjects.as_ref().is_some_and(|subjects| {
         subjects.iter().any(|s| {
             s.kind == "ServiceAccount"
@@ -1470,6 +1518,9 @@ pub async fn run_revoke_watch() {
         let Ok(client) = crate::k8s::client().await else {
             continue;
         };
+        // The operator-upgrade grant (#176) has its own lifetime: deleted after
+        // the upgrade, or here once it has sat unused past its TTL.
+        crate::operator_upgrade::expire_grant(&client).await;
         let api: Api<ClusterRoleBinding> = Api::all(client.clone());
         match api.get_opt(BOOTSTRAP_BINDING).await {
             Ok(Some(b)) if binding_is_ours(&b, ns()) => {}
@@ -2052,7 +2103,8 @@ fn kind_priority(kind: &str) -> u8 {
 /// Apply a multi-doc YAML bundle with server-side apply, in rounds: docs that
 /// fail (kind not yet discoverable, webhook still starting…) are retried with
 /// a fresh API discovery until none remain or rounds are exhausted.
-pub async fn apply_bundle(client: &Client, bundle: &str, field_manager: &str) -> Result<()> {
+/// The object documents of a multi-document YAML bundle, in file order.
+pub(crate) fn bundle_docs(bundle: &str) -> Result<Vec<serde_json::Value>> {
     let mut docs: Vec<serde_json::Value> = Vec::new();
     for de in serde_yaml::Deserializer::from_str(bundle) {
         let v: serde_json::Value =
@@ -2061,6 +2113,11 @@ pub async fn apply_bundle(client: &Client, bundle: &str, field_manager: &str) ->
             docs.push(v);
         }
     }
+    Ok(docs)
+}
+
+pub async fn apply_bundle(client: &Client, bundle: &str, field_manager: &str) -> Result<()> {
+    let mut docs = bundle_docs(bundle)?;
     docs.sort_by_key(|d| kind_priority(d.get("kind").and_then(|k| k.as_str()).unwrap_or("")));
 
     let mut last_err: Option<anyhow::Error> = None;
