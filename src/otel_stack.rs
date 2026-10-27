@@ -4671,6 +4671,40 @@ mod tests {
         assert!(!stuck_on_missing_sa(&resolved, &owners));
     }
 
+    /// `release_stuck_replicasets` lists and deletes ReplicaSets in
+    /// `AGENT_NS`; the Role shipped there must allow both, or the recovery is
+    /// a logged `forbidden` and the stack stays stuck (#162).
+    #[test]
+    fn agents_role_lets_the_recovery_list_and_delete_replica_sets() {
+        use serde::Deserialize;
+        let yaml = include_str!("../deploy/install.yaml");
+        let role = serde_yaml::Deserializer::from_str(yaml)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .find(|v| {
+                v["kind"].as_str() == Some("Role")
+                    && v["metadata"]["name"].as_str() == Some("veloxsearch-runtime")
+                    && v["metadata"]["namespace"].as_str() == Some(AGENT_NS)
+            })
+            .expect("runtime Role in the agents namespace");
+        let grants = |verb: &str| {
+            role["rules"].as_sequence().into_iter().flatten().any(|r| {
+                let has = |k: &str, x: &str| {
+                    r[k].as_sequence()
+                        .into_iter()
+                        .flatten()
+                        .any(|e| e.as_str() == Some(x))
+                };
+                has("apiGroups", "apps") && has("resources", "replicasets") && has("verbs", verb)
+            })
+        };
+        for verb in ["list", "delete"] {
+            assert!(
+                grants(verb),
+                "the {AGENT_NS} Role cannot `{verb}` replicasets"
+            );
+        }
+    }
+
     #[test]
     fn the_pipeline_emits_red_metrics() {
         // The reason the topology is upstream's and not a simpler one: only

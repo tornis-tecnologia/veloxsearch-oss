@@ -46,7 +46,7 @@ stays transport-agnostic.
 ```yaml
 signature:
   algorithm: ed25519
-  key_id: velox-registry-2026
+  key_id: velox-registry-2026-10
   value: <base64 ed25519 signature over `digest`>
 ```
 

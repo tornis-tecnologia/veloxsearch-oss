@@ -429,10 +429,41 @@ pub struct Discovery {
     pub telemetry: Vec<TelemetrySource>,
 }
 
+/// An integration's ingestion state (#165). `doc_count` is the lifetime count
+/// of its index, kept for compatibility; `receiving` means documents arrived
+/// within `recipes::RECENT_WINDOW`, so a dead collector stops reading healthy.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MonitoringStatus {
     pub doc_count: u64,
     pub receiving: bool,
+    /// Newest `@timestamp` in the index (ISO-8601), or null when none has one.
+    #[serde(default)]
+    pub last_doc_at: Option<String>,
+    /// A code (ADR-019): `waiting` (no documents yet), `receiving`, `stale`
+    /// (documents, none recent) or `untimed` (documents, none carrying
+    /// `@timestamp`, so recency is unknown rather than false).
+    #[serde(default)]
+    pub state: String,
+}
+
+impl MonitoringStatus {
+    pub fn from_counts(doc_count: u64, r: crate::recipes::Recency) -> Self {
+        let state = if r.recent > 0 {
+            "receiving"
+        } else if doc_count == 0 {
+            "waiting"
+        } else if r.timed == 0 {
+            "untimed"
+        } else {
+            "stale"
+        };
+        Self {
+            doc_count,
+            receiving: r.recent > 0,
+            last_doc_at: r.newest,
+            state: state.into(),
+        }
+    }
 }
 
 /// What the OTel stack costs and what it is made of — read once by the panel so
@@ -2334,10 +2365,10 @@ mod server {
         let n = crate::recipes::doc_count(&dep, &req.recipe)
             .await
             .map_err(ApiError::internal)?;
-        Ok(Json(MonitoringStatus {
-            doc_count: n,
-            receiving: n > 0,
-        }))
+        let r = crate::recipes::recency(&dep, &req.recipe)
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(Json(MonitoringStatus::from_counts(n, r)))
     }
 
     // -- catalog routes (#75) -------------------------------------------
@@ -3172,6 +3203,69 @@ mod server {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn recency(timed: u64, recent: u64, newest: Option<&str>) -> crate::recipes::Recency {
+            crate::recipes::Recency {
+                timed,
+                recent,
+                newest: newest.map(str::to_owned),
+            }
+        }
+
+        /// #165: the 0.12.1 outage — 7816 lifetime documents, none in the
+        /// window — reads `stale`, not `receiving`, and says when data stopped.
+        #[test]
+        fn a_dead_collector_with_history_is_not_receiving() {
+            let s = MonitoringStatus::from_counts(
+                7816,
+                recency(7816, 0, Some("2026-10-12T19:28:06.000Z")),
+            );
+            assert!(!s.receiving);
+            assert_eq!(s.state, "stale");
+            assert_eq!(s.doc_count, 7816, "doc_count keeps its lifetime meaning");
+            assert_eq!(s.last_doc_at.as_deref(), Some("2026-10-12T19:28:06.000Z"));
+        }
+
+        #[test]
+        fn the_state_follows_recency_not_the_lifetime_count() {
+            let at = Some("2026-10-16T12:00:00.000Z");
+            let live = MonitoringStatus::from_counts(10, recency(10, 3, at));
+            assert!(live.receiving);
+            assert_eq!(live.state, "receiving");
+            let never = MonitoringStatus::from_counts(0, recency(0, 0, None));
+            assert!(!never.receiving);
+            assert_eq!(never.state, "waiting");
+            assert_eq!(never.last_doc_at, None);
+        }
+
+        /// Documents with no `@timestamp` at all cannot be judged: the state
+        /// says so instead of passing for a dead collector.
+        #[test]
+        fn untimed_documents_are_unknown_not_stale() {
+            let s = MonitoringStatus::from_counts(42, recency(0, 0, None));
+            assert!(!s.receiving);
+            assert_eq!(s.state, "untimed");
+        }
+
+        /// The wire shape: the old fields are untouched and the new ones are
+        /// always present (`last_doc_at` as null, never absent).
+        #[test]
+        fn the_response_shape_keeps_old_fields_and_adds_new_ones() {
+            let v = serde_json::to_value(MonitoringStatus::from_counts(0, recency(0, 0, None)))
+                .unwrap();
+            assert_eq!(
+                v,
+                serde_json::json!({
+                    "doc_count": 0, "receiving": false,
+                    "last_doc_at": null, "state": "waiting"
+                })
+            );
+            // A pre-#165 body still deserializes.
+            let old: MonitoringStatus =
+                serde_json::from_value(serde_json::json!({"doc_count": 5, "receiving": true}))
+                    .unwrap();
+            assert_eq!(old.last_doc_at, None);
+        }
 
         /// #52: the monitor selection is respected verbatim at create — the
         /// old forced baseline (empty selection re-seeded `kubernetes`) is

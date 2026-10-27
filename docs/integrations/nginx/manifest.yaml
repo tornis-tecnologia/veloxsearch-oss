@@ -71,5 +71,5 @@ teardown:
 # (custody and rotation: keys/README.md).
 signature:
   algorithm: ed25519
-  key_id: velox-registry-2026
+  key_id: velox-registry-2026-10
   value: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw==
