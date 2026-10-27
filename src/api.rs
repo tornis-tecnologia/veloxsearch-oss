@@ -3070,6 +3070,8 @@ mod server {
         RoutePolicy { path: "/build_info", policy: AdminOnly, note: "version + commit, this Pod's image digest and the operator image (#55) — install-level facts a tenant has no use for." },
         RoutePolicy { path: "/bootstrap_status", policy: AdminOnly, note: "operator/cert-manager/Longhorn state of the HOST cluster." },
         RoutePolicy { path: "/bootstrap_ensure", policy: AdminOnly, note: "installs cluster-wide components; never a tenant action." },
+        RoutePolicy { path: "/operator_upgrade_status", policy: AdminOnly, note: "the operator-upgrade impact report (#176): every deployment across tenants, CRDs, the grant — install-level." },
+        RoutePolicy { path: "/operator_upgrade", policy: AdminOnly, note: "replaces the cluster-wide operator behind a one-time admin grant (#176, ADR-066); never a tenant action." },
         RoutePolicy { path: "/storage_status", policy: AdminOnly, note: "host StorageClass classification (ADR-043)." },
         RoutePolicy { path: "/discover", policy: AdminOnly, note: "enumerates workloads across host namespaces — a window onto other tenants." },
         RoutePolicy { path: "/cluster_capacity", policy: AdminOnly, note: "host node CPU/mem/disk; aggregate info about everyone's footprint. A tenant's headroom is its quota (#84)." },
@@ -3227,6 +3229,14 @@ mod server {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The mount-time gate (`p`) only fires when the router is built: build
+        /// it, so a route mounted without a [`ROUTES`] entry fails here and not
+        /// on the first boot of a release (#176 shipped one to the fabric).
+        #[test]
+        fn every_mounted_route_is_declared() {
+            let _ = routes();
+        }
 
         fn recency(timed: u64, recent: u64, newest: Option<&str>) -> crate::recipes::Recency {
             crate::recipes::Recency {
