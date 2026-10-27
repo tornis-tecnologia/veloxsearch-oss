@@ -8,6 +8,22 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- **Upgrade the OpenSearch operator from Settings, with an impact report first
+  (#176, ADR-066).** When this release ships a newer operator than the one
+  running, Settings → OpenSearch operator shows what the upgrade would do:
+  - CRD fields and versions removed. A removed field that a deployment sets
+    blocks the upgrade.
+  - Each deployment's node pools. Each pool may restart once, and a pool of one
+    is down while it does.
+  - Deployments without a scheduled snapshot.
+  - What blocks the upgrade: a deployment that is not green, a version upgrade
+    in flight, an operator that is not Ready.
+
+  The app keeps no standing cluster-admin. A cluster admin arms the button with
+  a one-time `veloxsearch-operator-upgrade` binding. The app deletes it after
+  the upgrade, success or failure, or after 30 minutes unused.
+
 ## [0.13.0] - 2026-10-27
 
 ### Changed

@@ -207,6 +207,20 @@ const API = {
   bootstrapStatus: () => call("bootstrap_status", null, "GET"),
   bootstrapEnsure: () => call("bootstrap_ensure", {}),
 
+  // ── operator upgrade (#176, ADR-066) ─────────────────────────
+  // -> { running, vendored, state: up_to_date|available|unmanaged,
+  //      crds: [{ name, new, removed_versions, added_versions,
+  //               removed_fields, added_fields }],
+  //      deployments: [{ namespace, name, health, snapshot_policy,
+  //                      pools: [{ name, replicas, downtime }] }],
+  //      blockers / warnings: [{ code, deployment, subject, detail }],
+  //      grant: { present, expires_in_secs, command },
+  //      job: { state: idle|running|done|failed, step, from, to, error },
+  //      can_upgrade }
+  operatorUpgradeStatus: () => call("operator_upgrade_status", null, "GET"),
+  // 202, or an Error carrying the server's reason (409).
+  operatorUpgrade: () => call("operator_upgrade", {}),
+
   // ── storage (ADR-031) ────────────────────────────────────────
   // Read-only classification of the cluster's default storage. The create flow
   // polls it to learn whether creating a cluster will auto-install Longhorn

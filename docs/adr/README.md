@@ -109,6 +109,7 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 | ADR-063 | The Dashboards first-boot fix goes through the CR: `spec.dashboards.replicas` held at 0 until the cluster settles, remediation holds the same way, no write on the operator's Deployment (supersedes ADR-055 decision 1, #46) |
 | ADR-064 | *(proposed)* Admin-password reset safety — refused (409) unless the deployment is settled and no reset is pending; a failed operator nudge rolls the Secret back (or says the password changed); a failed securityconfig Job restores the previous password (#115) |
 | ADR-065 | *(proposed)* Longhorn by default, with an opt-out — an explicit, recorded storage choice at first run with Longhorn pre-selected on a node-local default; node prerequisites pre-flighted before the question; the bootstrap binding held open until the recorded choice is satisfied (amends ADR-061) |
+| ADR-066 | *(proposed)* Operator upgrade from Settings — a read-only impact report (CRD fields/versions removed, a removed field a live cluster sets blocks; per-pool restarts, single-node pools down; not-green, mid-upgrade, not-ready block) and a button armed by a one-time `veloxsearch-operator-upgrade` cluster-admin grant the app deletes after the upgrade or after 30 min unused (amends ADR-057, #176) |
 
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and

@@ -95,7 +95,7 @@ pub async fn client() -> Result<Client> {
         .context("failed to build kube client (KUBECONFIG / in-cluster)")
 }
 
-fn cluster_resource() -> ApiResource {
+pub(crate) fn cluster_resource() -> ApiResource {
     ApiResource::from_gvk(&GroupVersionKind::gvk(
         "opensearch.org",
         "v1",
