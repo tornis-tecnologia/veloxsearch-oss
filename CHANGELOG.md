@@ -21,6 +21,13 @@ are called out explicitly.
   packages as `UNKNOWN KEY`. Integrations they already installed keep running,
   but installing or updating one needs 0.13.0. See `keys/README.md`.
 
+### Security
+- Dependency updates for advisories published after 0.12.2: `rustls-webpki`
+  0.103.16 (RUSTSEC-2026-0382, distrusted emSign intermediates),
+  `webpki-roots` 1.0.11 (distrusted emSign roots), `ctutils` 0.4.6
+  (RUSTSEC-2026-0385, non-constant-time masks) and `tokio` 1.54.1
+  (RUSTSEC-2026-0386, `AsyncFd` I/O safety).
+
 ### Fixed
 - **A new deployment no longer rolls all its nodes a second time (#160).** The
   vendored OpenSearch operator `3.0.0-alpha` changed each node StatefulSet's pod
