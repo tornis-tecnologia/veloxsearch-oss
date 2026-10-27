@@ -15,7 +15,7 @@
 //! 2. **Trust** ([`verify_package`]) — `docs/integrations/signing.md` followed literally:
 //!    canonical package digest (JCS over a sorted `[relpath, sha256]` list) and
 //!    an ed25519 signature checked against a keyring **compiled into the core**
-//!    (`keys/velox-registry-2026.pub`, vendored here). Fail closed: unsigned,
+//!    (`keys/velox-registry-2026-10.pub`, vendored here). Fail closed: unsigned,
 //!    unknown-key and tampered are three distinct hard rejects, and nothing is
 //!    applied to a customer's cluster before this passes.
 //! 3. **State** — installed id+version per deployment, recorded next to the
@@ -62,8 +62,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// a key is a core release — the same review gate everything cluster-touching
 /// already goes through.
 const KEYRING: &[(&str, &str)] = &[(
-    "velox-registry-2026",
-    include_str!("../keys/velox-registry-2026.pub"),
+    "velox-registry-2026-10",
+    include_str!("../keys/velox-registry-2026-10.pub"),
 )];
 
 /// The `#74` staging placeholder (bytes `0x00..0x3f`, base64). The registry's
@@ -1190,7 +1190,7 @@ mod tests {
         let value =
             base64::engine::general_purpose::STANDARD.encode((0u8..64).collect::<Vec<u8>>());
         let yaml = format!(
-            "id: x\nassets: {{}}\nsignature:\n  algorithm: ed25519\n  key_id: velox-registry-2026\n  value: {value}\n"
+            "id: x\nassets: {{}}\nsignature:\n  algorithm: ed25519\n  key_id: velox-registry-2026-10\n  value: {value}\n"
         );
         let err = verify_package(&yaml, &BTreeMap::new()).unwrap_err();
         assert!(err.to_string().contains("UNSIGNED"), "unhelpful: {err:#}");
@@ -1204,7 +1204,7 @@ mod tests {
         let pkg = FetchedPackage::load_from_dir(&root.join("integrations/nginx")).unwrap();
         let edited = pkg
             .manifest_yaml
-            .replace("key_id: velox-registry-2026", "key_id: attacker-2026");
+            .replace("key_id: velox-registry-2026-10", "key_id: attacker-2026");
         let err = verify_package(&edited, &pkg.assets).unwrap_err();
         assert!(
             err.to_string().contains("UNKNOWN KEY"),
@@ -1216,10 +1216,11 @@ mod tests {
     #[test]
     fn keyring_matches_the_registry_key() {
         let Some(root) = checkout() else { return };
-        let on_disk = std::fs::read_to_string(root.join("keys/velox-registry-2026.pub")).unwrap();
+        let on_disk =
+            std::fs::read_to_string(root.join("keys/velox-registry-2026-10.pub")).unwrap();
         let compiled = KEYRING
             .iter()
-            .find(|(id, _)| *id == "velox-registry-2026")
+            .find(|(id, _)| *id == "velox-registry-2026-10")
             .map(|(_, k)| *k)
             .unwrap();
         assert_eq!(on_disk.trim(), compiled.trim(), "vendored key drifted");
@@ -1251,7 +1252,7 @@ mod tests {
              id: toy\n\
              signature:\n  \
              algorithm: ed25519\n  \
-             key_id: velox-registry-2026\n  \
+             key_id: velox-registry-2026-10\n  \
              value: {sig_value}\n"
         );
         let mut assets = BTreeMap::new();
@@ -1301,7 +1302,7 @@ mod tests {
         let (manifest, _) = toy_package("PLACEHOLDER");
         let rewritten = replace_signature_value(&manifest, "NEW").unwrap();
         assert!(rewritten.contains("# a comment that a YAML round-trip would destroy"));
-        assert!(rewritten.contains("key_id: velox-registry-2026"));
+        assert!(rewritten.contains("key_id: velox-registry-2026-10"));
         assert!(rewritten.contains("  value: NEW"));
         assert!(!rewritten.contains("PLACEHOLDER"));
         assert_eq!(manifest.lines().count(), rewritten.lines().count());
