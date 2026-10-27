@@ -98,6 +98,12 @@ explicit step" ADR-057 called for, now with a button and a report.
   the same power the first bootstrap had.
 - "Each pool may restart once" can overstate the restarts, but it never
   understates them. The admin plans for the worst case.
+- **Restarts are not hitless, even with replicas.** On the fabric
+  (2026-10-27: 0.12.2 → candidate, operator 3.0.0-alpha → 3.0.0, one pool of
+  3 nodes, 500 probe documents), the new operator restarted all 3 nodes over
+  368 s. It moved to the next node while the cluster was still yellow, and
+  health was **red for about a minute** during the third restart. No document
+  was lost. The card says so instead of promising availability.
 - The report does not look inside OpenSearch: an index with zero replicas still
   loses availability while its node restarts, even in a green cluster with
   several nodes. Covering that needs a per-index query and is left out until
