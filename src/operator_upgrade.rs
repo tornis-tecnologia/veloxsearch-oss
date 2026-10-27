@@ -709,13 +709,41 @@ async fn run() -> Result<()> {
     .await
     .context("applying the vendored operator bundle")?;
     job_set(|j| j.step = "waiting".into());
-    crate::bootstrap::wait_deploy(
-        &client,
-        crate::k8s::ns(),
-        crate::bootstrap::OPERATOR_DEPLOY,
-        OPERATOR_READY_SECS,
-    )
-    .await
+    wait_rollout(&client).await
+}
+
+/// The operator Deployment has rolled out its new spec: observed, every pod
+/// updated and available, no pod of the old ReplicaSet left. "Ready" alone is
+/// not it — the old controller stays Ready through the whole rollout, which on
+/// the fabric reported a 6-second "done" while 3.0.0-alpha still ran.
+pub fn rollout_complete(d: &k8s_openapi::api::apps::v1::Deployment) -> bool {
+    let (Some(spec), Some(st)) = (d.spec.as_ref(), d.status.as_ref()) else {
+        return false;
+    };
+    let want = spec.replicas.unwrap_or(1);
+    st.observed_generation.unwrap_or(0) >= d.metadata.generation.unwrap_or(1)
+        && st.updated_replicas.unwrap_or(0) == want
+        && st.available_replicas.unwrap_or(0) == want
+        && st.replicas.unwrap_or(0) == want
+}
+
+async fn wait_rollout(client: &Client) -> Result<()> {
+    use k8s_openapi::api::apps::v1::Deployment;
+    let ns = crate::k8s::ns();
+    let name = crate::bootstrap::OPERATOR_DEPLOY;
+    let api: Api<Deployment> = Api::namespaced(client.clone(), ns);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(OPERATOR_READY_SECS);
+    loop {
+        if let Ok(Some(d)) = api.get_opt(name).await {
+            if rollout_complete(&d) {
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("{ns}/{name} did not finish rolling out within {OPERATOR_READY_SECS}s");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
 }
 
 #[cfg(test)]
@@ -928,6 +956,34 @@ mod tests {
         assert!(!grant_due_for_revoke(GRANT_TTL_SECS - 1, false));
         assert!(grant_due_for_revoke(GRANT_TTL_SECS, false));
         assert!(!grant_due_for_revoke(GRANT_TTL_SECS * 4, true));
+    }
+
+    fn deploy(
+        generation: i64,
+        observed: i64,
+        want: i32,
+        total: i32,
+        updated: i32,
+        available: i32,
+    ) -> k8s_openapi::api::apps::v1::Deployment {
+        serde_json::from_value(json!({
+            "metadata": { "generation": generation },
+            "spec": { "replicas": want, "selector": {}, "template": {} },
+            "status": { "observedGeneration": observed, "replicas": total,
+                        "updatedReplicas": updated, "availableReplicas": available }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_rollout_is_complete_only_when_the_old_pod_is_gone() {
+        // The fabric's 6-second "done": new spec observed, old pod still Ready.
+        assert!(!rollout_complete(&deploy(2, 2, 1, 2, 1, 1)));
+        // Spec not observed yet.
+        assert!(!rollout_complete(&deploy(2, 1, 1, 1, 1, 1)));
+        // New pod not available yet.
+        assert!(!rollout_complete(&deploy(2, 2, 1, 1, 1, 0)));
+        assert!(rollout_complete(&deploy(2, 2, 1, 1, 1, 1)));
     }
 
     #[test]
