@@ -1,7 +1,9 @@
 # ADR-057 — The upgrade contract: an upgrade changes VeloxSearch, not what it manages
 
 **Status:** proposed
-**Date:** 2026-09-14 (amended 2026-09-28, #128: an upgrade keeps `veloxsearch-env`)
+**Date:** 2026-09-14 (amended 2026-09-28, #128: an upgrade keeps `veloxsearch-env`;
+amended 2026-10-27 by [ADR-066](ADR-066-operator-upgrade-from-settings.md): the
+explicit operator upgrade has a Settings button behind a one-time grant)
 
 ## Context
 
