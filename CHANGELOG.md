@@ -8,6 +8,8 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-27
+
 ### Added
 - **Upgrade the OpenSearch operator from Settings, with an impact report first
   (#176, ADR-066).** When this release ships a newer operator than the one
