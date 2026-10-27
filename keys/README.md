@@ -8,7 +8,8 @@ install (`docs/integrations/signing.md` §2, option A).
 
 | Key id | File | Status | Scope |
 | --- | --- | --- | --- |
-| `velox-registry-2026` | `velox-registry-2026.pub` | active | Packages published to [`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry) |
+| `velox-registry-2026-10` | `velox-registry-2026-10.pub` | active (since 0.13.0) | Packages published to [`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry) |
+| `velox-registry-2026` | — | retired in 0.13.0, private half lost | Nothing: every package was re-signed with `velox-registry-2026-10` |
 
 ## File format
 
@@ -18,7 +19,7 @@ bytes straight to `aws_lc_rs::signature::ED25519`. To derive this form from a
 PEM private key:
 
 ```sh
-openssl pkey -in velox-registry-2026.priv.pem -pubout -outform DER \
+openssl pkey -in velox-registry-2026-10.priv.pem -pubout -outform DER \
   | tail -c 32 | base64 -w0
 ```
 
@@ -33,7 +34,7 @@ a GitHub Actions secret or private object storage, per ADR-054. It is used
 only by `velox sign`, run by a maintainer with key-file access:
 
 ```sh
-velox sign integrations/<id> --key velox-registry-2026.priv.pem
+velox sign integrations/<id> --key velox-registry-2026-10.priv.pem
 velox sign integrations/<id> --key -    # from stdin, so it never lands on disk
 ```
 
@@ -66,3 +67,10 @@ The procedure:
 
 Never remove an old key in the same release that adds its replacement: that
 strands every already-published package between the two rollouts.
+
+The one exception is a key whose private half is **lost**. Overlap then buys
+nothing — the old key can sign no new package — and only keeps trusting a
+secret nobody controls. `velox-registry-2026` went this way in 0.13.0: it was
+dropped in the same release that added `velox-registry-2026-10`, and the
+registry was re-signed in full. Cores up to 0.12.x cannot verify the re-signed
+packages (`UNKNOWN KEY`); upgrade the core to install or update integrations.

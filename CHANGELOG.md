@@ -8,7 +8,25 @@ are called out explicitly.
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-10-17
+## [0.13.0] - 2026-10-27
+
+### Changed
+- **Integration packages are signed with a new key, `velox-registry-2026-10`
+  (breaking for older cores).** The private half of `velox-registry-2026` was
+  lost, so no package could be signed. The redis, rabbitmq and traefik fixes
+  below could not reach the registry. The old key is removed from the
+  compiled-in keyring rather than kept for an overlap: it can sign nothing new,
+  and trusting a lost secret is a risk with no benefit. Every registry package
+  is re-signed with the new key. Cores up to 0.12.x reject the re-signed
+  packages as `UNKNOWN KEY`. Integrations they already installed keep running,
+  but installing or updating one needs 0.13.0. See `keys/README.md`.
+
+### Security
+- Dependency updates for advisories published after 0.12.2: `rustls-webpki`
+  0.103.16 (RUSTSEC-2026-0382, distrusted emSign intermediates),
+  `webpki-roots` 1.0.11 (distrusted emSign roots), `ctutils` 0.4.6
+  (RUSTSEC-2026-0385, non-constant-time masks) and `tokio` 1.54.1
+  (RUSTSEC-2026-0386, `AsyncFd` I/O safety).
 
 ### Fixed
 - **A new deployment no longer rolls all its nodes a second time (#160).** The
