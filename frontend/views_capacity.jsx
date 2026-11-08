@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 import { STR, sizeMeta } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Gauge, MiniMeter, StatTile, Icon, Btn } from "./ui.jsx";
+import { Gauge, MiniMeter, StatTile, Icon, Btn, PageHeader, Dialog, locale } from "./ui.jsx";
 
 const MiB = 1024 ** 2, GiB = 1024 ** 3, TiB = 1024 ** 4;
 const HIST = 60; // ring-buffer length (~5 min at 5s)
@@ -104,12 +104,6 @@ function ProfileDialog({ t, onClose }) {
       });
   }, [names]);
 
-  useEffect(() => {
-    const onKey = e => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   const save = () => {
     let stamp = "";
     try { stamp = JSON.parse(text).generated_at || ""; } catch (e) { /* preview is the source of truth */ }
@@ -124,14 +118,8 @@ function ProfileDialog({ t, onClose }) {
   };
 
   return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 300,
-      background: "rgb(0 0 0 / 0.55)", backdropFilter: "blur(3px)",
-      display: "grid", placeItems: "center", padding: 20,
-    }} onClick={onClose}>
-      <div className="card pad profile-dialog" role="dialog" aria-modal="true" aria-labelledby="profile-title"
-        data-testid="profile-dialog" onClick={e => e.stopPropagation()}>
-        <h3 id="profile-title" style={{ margin: "0 0 6px", fontFamily: "var(--font-mono)", fontSize: 16 }}>{t.prof_title}</h3>
+    <Dialog open onClose={onClose} title={t.prof_title} width={760} testid="profile-dialog">
+      <div className="profile-dialog" style={{ maxHeight: "none" }}>
         <p style={{ margin: "0 0 12px", color: "var(--text-2)", fontSize: 14 }}>{t.prof_lead}</p>
         <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
           <input type="checkbox" checked={names} onChange={e => setNames(e.target.checked)}
@@ -144,13 +132,13 @@ function ProfileDialog({ t, onClose }) {
         {err
           ? <p className="hint" style={{ color: "var(--danger)" }} data-testid="profile-error">{t.prof_error} {err}</p>
           : <pre className="profile-pre" data-testid="profile-preview" aria-busy={loading}>{loading ? t.prof_loading : text}</pre>}
-        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 14 }}>
+        <div className="dialog-actions">
           <Btn variant="outline" onClick={onClose} data-testid="profile-close">{t.prof_close}</Btn>
           <Btn variant="primary" icon="download" disabled={loading || !!err || !text} onClick={save}
             data-testid="profile-save">{t.prof_save}</Btn>
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -218,20 +206,15 @@ function CapacityView({ lang }) {
 
   return (
     <div className="view-enter">
-      <div className="cap-head">
-        <div>
-          <h1 className="page-title" style={{ marginBottom: 4 }}>{t.cap_title}</h1>
-          <p className="lead" style={{ margin: 0 }}>{t.cap_lead}</p>
-        </div>
-        <div className="cap-actions">
+      <PageHeader title={t.cap_title} lead={t.cap_lead}
+        actions={<div className="cap-actions">
           <div className="cap-live">
             <span className="statusdot green" />
             <span>{t.cap_live}</span>
-            {updated && <span className="cap-ts">{t.cap_updated} {updated.toLocaleTimeString(lang === "pt" ? "pt-BR" : lang === "es" ? "es-ES" : "en-US")}</span>}
+            {updated && <span className="cap-ts">{t.cap_updated} {updated.toLocaleTimeString(locale(lang))}</span>}
           </div>
           <Btn variant="outline" icon="download" onClick={() => setProfileOpen(true)} data-testid="profile-open">{t.prof_btn}</Btn>
-        </div>
-      </div>
+        </div>} />
       {profileOpen && <ProfileDialog t={t} onClose={() => setProfileOpen(false)} />}
 
       {!on && (
@@ -240,22 +223,23 @@ function CapacityView({ lang }) {
 
       {/* ── "room for new deployments" — the one actionable answer on this
              page, so it leads instead of sitting between two metric blocks ── */}
-      <div className="stat-row">
+      <h3 className="section-title">{t.cap_fit_h}</h3>
+      <div className="stat-row" style={{ gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
         {(cap.fit || []).map(f => {
           const ft = fitText(t, f);
           return (
             <StatTile key={f.size}
-              label={sizeMeta(f.size).label}
+              label={t[`size_${f.size}`] || sizeMeta(f.size).label}
               value={f.count > 0 ? f.count : "0"}
               sub={f.count > 0 ? limitText(t, f.limited_by) : ft.head}
-              tone={f.count > 0 ? "ok" : "warn"} />
+              tone={f.count > 0 ? "" : "warn"} />
           );
         })}
       </div>
       <p className="hint" style={{ marginTop: -6, marginBottom: 22 }}>{t.cap_fit_hint}</p>
 
       {/* ── cluster-wide gauges ── */}
-      <h3 className="section-title">{t.cap_title}</h3>
+      <h3 className="section-title">{t.cap_cpu} · {t.cap_mem} · {t.cap_storage}</h3>
       <div className="cap-gauges">
         <Gauge label={t.cap_cpu} pct={pctOf(cpuLive, cap.cpu.total)}
           sub={`${fmtCores(cpuLive)} / ${fmtCores(cap.cpu.total)}`} />
@@ -277,8 +261,8 @@ function CapacityView({ lang }) {
           const hot = n.pressures.length > 0 || !n.ready;
           return (
             <div className={`node-row ${n.storage ? "wide" : ""} ${hot ? "hot" : ""}`} key={n.name}>
-              <div className="nname" style={{ flexDirection: "column", alignItems: "flex-start", gap: 4 }}>
-                <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+              <div className="nname">
+                <span className="nm">
                   <span className={`statusdot ${dot}`} title={n.ready ? t.cap_ready : t.cap_notready} />
                   <span title={n.name}>{n.name}</span>
                 </span>
@@ -286,7 +270,6 @@ function CapacityView({ lang }) {
                   {n.roles.map(r => <span className="badge" key={r}>{r}</span>)}
                   {n.pressures.map(p => <span className="badge red" key={p}>{p}</span>)}
                 </span>
-                <Spark values={hist.current.nodes[n.name] || []} max={100} />
               </div>
               <MiniMeter label={t.cap_cpu} value={`${fmtCores(cpuV)} / ${fmtCores(n.cpu.total)}`} pct={pctOf(cpuV, n.cpu.total)} />
               <MiniMeter label={t.cap_mem} value={`${fmtBytes(memV)} / ${fmtBytes(n.mem.total)}`} pct={pctOf(memV, n.mem.total)} />

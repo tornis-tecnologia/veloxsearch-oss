@@ -10,22 +10,44 @@
    Setup mirrors auth::complete_setup (src/auth.rs):
      username trimmed, 1–64 chars; password ≥ 8 chars; confirm must match.
    On success the cookie is set server-side; we re-probe boot via onAuthed().
+
+   The server's refusal is translated here, not echoed: a 401 on /api/login
+   has exactly one meaning, and "Invalid username or password" under a
+   Portuguese form read as a bug.
    ============================================================ */
 import { useState } from "react";
 import { API } from "./api.jsx";
 import { STR } from "./i18n.jsx";
 import { Icon, Logo, Field, Btn } from "./ui.jsx";
 
-function AuthPrefs({ lang, setLang, theme, setTheme }) {
-  const t = STR[lang] || STR.pt;
+function AuthPrefs({ lang, setLang, theme, setTheme, t }) {
   return (
-    <div className="prefs" style={{ position: "absolute", top: 16, right: 16, display: "flex", gap: 8, alignItems: "center" }}>
-      <button className="iconbtn" title={theme === "dark" ? t.theme_to_light : t.theme_to_dark} onClick={() => setTheme(th => th === "dark" ? "light" : "dark")}>
+    <div className="prefs">
+      <button type="button" className="iconbtn" title={theme === "dark" ? t.theme_to_light : t.theme_to_dark}
+        onClick={() => setTheme(th => th === "dark" ? "light" : "dark")}>
         <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
       </button>
-      <button className="iconbtn" style={{ width: "auto", padding: "0 12px", fontFamily: "var(--font-mono)", fontSize: 13 }}
+      <button type="button" className="iconbtn" style={{ width: "auto", padding: "0 12px", fontFamily: "var(--font-mono)", fontSize: 13 }}
         title={t.language} onClick={() => setLang(lang === "pt" ? "en" : lang === "en" ? "es" : "pt")}>
         {lang === "pt" ? "EN" : lang === "en" ? "ES" : "PT"}
+      </button>
+    </div>
+  );
+}
+
+// A password input with a show/hide toggle — on setup the person is choosing
+// a password they will have to remember, and seeing it typed is how typos
+// get caught before the confirm field does.
+function PasswordInput({ id, name, value, onChange, autoComplete, invalid, minLength, t, testid }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="pw-wrap">
+      <input id={id} className={`input${invalid ? " invalid" : ""}`} type={show ? "text" : "password"}
+        name={name} autoComplete={autoComplete} value={value} onChange={onChange} required
+        minLength={minLength} data-testid={testid} />
+      <button type="button" className="iconbtn pw-toggle" onClick={() => setShow(s => !s)}
+        aria-label={show ? t.auth_hide_pw : t.auth_show_pw} title={show ? t.auth_hide_pw : t.auth_show_pw}>
+        <Icon name={show ? "eyeOff" : "eye"} size={15} />
       </button>
     </div>
   );
@@ -39,8 +61,6 @@ function AuthView({ mode, lang, setLang, theme, setTheme, onAuthed }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
-  // One dictionary for the whole app. This screen used to carry its own copy of
-  // every string, which drifts from STR the moment either side is edited.
   const t = STR[lang] || STR.pt;
 
   // Live field validation on setup: the rules are known before the click, so
@@ -66,7 +86,9 @@ function AuthView({ mode, lang, setLang, theme, setTheme, onAuthed }) {
       else await API.login(username, password);
       onAuthed();
     } catch (ex) {
-      setErr(ex.message || t.auth_e_generic);
+      // One meaning per status: the login route answers 401 only for a bad
+      // pair. Anything else is shown as the server said it.
+      setErr(!isSetup && ex.status === 401 ? t.auth_e_invalid : (ex.message || t.auth_e_generic));
     } finally {
       setBusy(false);
     }
@@ -74,16 +96,16 @@ function AuthView({ mode, lang, setLang, theme, setTheme, onAuthed }) {
 
   return (
     <div className="app">
-      <AuthPrefs lang={lang} setLang={setLang} theme={theme} setTheme={setTheme} />
+      <AuthPrefs lang={lang} setLang={setLang} theme={theme} setTheme={setTheme} t={t} />
       <main className="page">
         <div style={{ maxWidth: 380, margin: "84px auto 0" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "center", marginBottom: 8 }}>
             <span style={{ color: "var(--accent)" }}><Logo size={26} /></span>
-            <h1 className="page-title" style={{ margin: 0 }}>VeloxSearch</h1>
+            <h1 className="page-title mono" style={{ margin: 0 }}>VeloxSearch</h1>
           </div>
-          <p className="lead" style={{ textAlign: "center" }}>{isSetup ? t.setup_sub : t.login_sub}</p>
+          <p className="lead" style={{ textAlign: "center", margin: "0 auto" }}>{isSetup ? t.setup_sub : t.login_sub}</p>
 
-          <form className="card pad" onSubmit={submit} style={{ marginTop: 16 }}>
+          <form className="card pad auth-card" onSubmit={submit}>
             <Field label={t.auth_user} htmlFor="auth-user" error={userErr}>
               <input id="auth-user" className={`input${userErr ? " invalid" : ""}`} type="text"
                 name="username" autoComplete="username"
@@ -91,24 +113,21 @@ function AuthView({ mode, lang, setLang, theme, setTheme, onAuthed }) {
             </Field>
             <Field label={t.auth_pass} hint={isSetup ? t.auth_hint8 : undefined}
               htmlFor="auth-pass" error={passErr}>
-              <input id="auth-pass" className={`input${passErr ? " invalid" : ""}`} type="password"
-                name="password"
+              <PasswordInput id="auth-pass" name="password" t={t}
                 autoComplete={isSetup ? "new-password" : "current-password"}
-                value={password} onChange={e => setPassword(e.target.value)} required
-                minLength={isSetup ? 8 : undefined} />
+                value={password} onChange={e => setPassword(e.target.value)}
+                invalid={!!passErr} minLength={isSetup ? 8 : undefined} />
             </Field>
             {isSetup && (
               <Field label={t.auth_confirm} htmlFor="auth-confirm" error={matchErr}>
-                <input id="auth-confirm" className={`input${matchErr ? " invalid" : ""}`} type="password"
-                  name="confirm" autoComplete="new-password"
-                  value={confirm} onChange={e => setConfirm(e.target.value)} required minLength={8} />
+                <PasswordInput id="auth-confirm" name="confirm" t={t} autoComplete="new-password"
+                  value={confirm} onChange={e => setConfirm(e.target.value)} invalid={!!matchErr} minLength={8} />
               </Field>
             )}
             {/* role="alert" so a screen reader announces a rejected login
                 instead of leaving the user waiting for nothing. */}
             {err && (
-              <p className="err" role="alert"
-                style={{ color: "var(--danger)", fontFamily: "var(--font-mono)", fontSize: 13, margin: "0 0 12px" }}>
+              <p className="err" role="alert" style={{ color: "var(--danger-text)", fontSize: 13.5, margin: "0 0 12px" }}>
                 {err}
               </p>
             )}

@@ -434,9 +434,31 @@ fn has_valid_session(req: &Request) -> bool {
         .is_some()
 }
 
+/// Where to send a browser that landed on an in-app page without a session.
+/// The page it wanted rides along as `?next=` so the SPA can return to it
+/// after the login — a deep link into a deployment (an alert, a ticket) must
+/// not dead-end on the list. Only a plain in-app path qualifies: the value is
+/// echoed into a redirect, so anything with a scheme, a query or a character
+/// outside the SPA's own route alphabet is dropped rather than carried.
+fn login_redirect(path: &str) -> String {
+    let plain = path.starts_with('/')
+        && !path.starts_with("//")
+        && path != "/"
+        && path != "/login"
+        && path.len() <= 200
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'-' || b == b'_');
+    if plain {
+        format!("/login?next={path}")
+    } else {
+        "/login".to_string()
+    }
+}
+
 /// Axum middleware. First-run mode funnels everything to /setup; afterwards,
 /// allow public paths and valid sessions, redirect browser navigations to
-/// /login, and reject API calls with 401.
+/// /login (keeping the page they wanted), and reject API calls with 401.
 pub async fn auth_guard(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if is_asset(&path) {
@@ -460,7 +482,7 @@ pub async fn auth_guard(req: Request, next: Next) -> Response {
     } else if path.starts_with("/api/") {
         StatusCode::UNAUTHORIZED.into_response()
     } else {
-        Redirect::to("/login").into_response()
+        Redirect::to(&login_redirect(&path)).into_response()
     }
 }
 
@@ -596,5 +618,23 @@ mod tests {
         assert!(is_public("/api/login"));
         assert!(is_public("/api/auth_state"));
         assert!(is_public("/login"));
+    }
+
+    #[test]
+    fn login_redirect_keeps_a_plain_in_app_path_and_drops_the_rest() {
+        assert_eq!(
+            login_redirect("/deployments/logs-a1b2/backup"),
+            "/login?next=/deployments/logs-a1b2/backup"
+        );
+        assert_eq!(login_redirect("/capacity"), "/login?next=/capacity");
+        // Nothing to come back to.
+        assert_eq!(login_redirect("/"), "/login");
+        assert_eq!(login_redirect("/login"), "/login");
+        // Not an in-app path: a scheme-relative URL, a query, a dot, a space.
+        assert_eq!(login_redirect("//evil.example"), "/login");
+        assert_eq!(login_redirect("/deployments?x=1"), "/login");
+        assert_eq!(login_redirect("/a.b"), "/login");
+        assert_eq!(login_redirect("/a b"), "/login");
+        assert_eq!(login_redirect(&format!("/{}", "x".repeat(300))), "/login");
     }
 }

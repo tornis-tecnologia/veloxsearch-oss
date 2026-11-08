@@ -102,7 +102,7 @@ with sync_playwright() as p:
 
     # 1. boot + authenticate (first-run setup or login), then home.
     page.goto(base, wait_until="domcontentloaded")
-    page.wait_for_selector('input[name="username"], nav.tabs', timeout=30000)
+    page.wait_for_selector('input[name="username"], [data-testid="nav-deployments"]', timeout=30000)
     if page.locator('input[name="username"]').count():
         is_setup = page.locator('input[name="confirm"]').count() > 0
         page.fill('input[name="username"]', user)
@@ -110,10 +110,10 @@ with sync_playwright() as p:
         if is_setup:
             page.fill('input[name="confirm"]', pw)
         page.click('button[type="submit"]')
-    page.wait_for_selector("nav.tabs", timeout=600000)
+    page.wait_for_selector('[data-testid="nav-deployments"]', timeout=600000)
 
     # 2. wizard to review: name -> size (pick a preset) -> backup (skip) -> review.
-    page.click("nav.tabs button:nth-child(2)")
+    page.click('[data-testid="create-deployment"], [data-testid="create-first"]')
     page.wait_for_selector(".stepper", timeout=10000)
     page.fill('input[name="name"]', "doubleclick")
     page.locator('[data-testid="wizard-next"]').click()

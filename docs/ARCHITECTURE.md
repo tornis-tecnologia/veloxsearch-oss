@@ -125,8 +125,9 @@ wrapper in `frontend/api.jsx`.
 
 ## Frontend
 
-Plain React 18 + Vite. **No router and no state library.** Flat `.jsx` files at
-the top level, not a `src/` tree.
+Plain React 19 + Vite, a minimal History-API router (`router.jsx`, no
+library) and **no state library**. Flat `.jsx` files at the top level, not a
+`src/` tree.
 
 `app.jsx` is the root. It boots off `GET /api/auth_state` and swaps screens by
 state:
@@ -135,24 +136,38 @@ state:
 first_run                 → setup
 !authenticated            → login
 authenticated && !ready   → bootstrap
-otherwise                 → the main app
+otherwise                 → the shell (sidebar + top bar + the routed screen)
+```
+
+Every screen has a URL (ADR-067). The server redirects an unauthenticated
+page request to `/login?next=<path>` and the SPA returns there after login:
+
+```
+/deployments                  the list
+/deployments/new              the create wizard
+/deployments/:id/:tab         overview | data | backup | access | config | activity
+/capacity
+/settings
 ```
 
 Deployments arrive over the SSE stream. `localStorage` holds **only** UI
-preferences (theme, language) — never server state, never mock data.
+preferences (theme, language, a dismissed checklist) — never server state,
+never mock data.
 
 | File | Contents |
 | --- | --- |
+| `router.jsx` | Path ↔ route, `useRouter()`, the `next` after login |
 | `api.jsx` | Every REST wrapper plus the DTO adapters (`adaptDeployment`, …) |
-| `i18n.jsx` | All UI strings, pt + en. UI text goes here, never inline in a view |
-| `ui.jsx` | Shared primitives (Logo, Icon, Toast) |
+| `i18n.jsx` | All UI strings, pt + en + es. UI text goes here, never inline in a view |
+| `ui.jsx` | The design-system primitives: Banner, Dialog/Confirm, Tabs, Menu, PageHeader, StatusPill, FormSection, Toast, per-language formatters |
 | `views_*.jsx` | One file per screen; `views_deployment.jsx` is the big one |
-| `styles.css` | The design system (CSS custom properties, IBM Plex, green accent) |
-| `tweaks-panel.jsx` | The live design-tweak panel |
+| `styles.css` | The design system (CSS custom properties; IBM Plex Sans for the interface, Mono for data; green accent; state tokens readable on both themes) |
+| `tweaks-panel.jsx`, `tweaks-dev.jsx` | The design-tweak panel, loaded only in dev |
 
-Because the end-to-end tests drive rendered widgets rather than URLs, renaming a
-form field or reshaping a `nav.tabs` structure can break `tests/*_check.py`.
-Check them when you reshape a screen.
+The end-to-end tests drive stable `data-testid` hooks and assert URLs. Keep
+the hooks (`nav-*`, `create-deployment`, `dep-open-<id>`, `dep-tab-<key>`,
+`delete-deployment`, `wizard-next`, `create-submit`) when you reshape a screen,
+and check `tests/*_check.py`.
 
 ## Integration packages are data
 

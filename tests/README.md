@@ -4,10 +4,12 @@ Standalone Python scripts, **not** a Rust test target — `cargo test` does not
 run them. Each one drives a live VeloxSearch against a live cluster and exits
 non-zero on the first thing that is wrong.
 
-They drive **rendered widgets, not URLs**: the app has no router, so there is no
-path to navigate to. That is why renaming a form field or reshaping a `nav.tabs`
-structure can break these even when nothing about routing changed. Check them
-when you reshape a screen.
+They drive the app through its stable **`data-testid` hooks** (`nav-*`,
+`create-deployment`, `dep-open-<id>`, `dep-tab-<key>`, `delete-deployment`,
+`wizard-next`, `create-submit`, …) and assert the **URLs** the router gives
+each screen (`/deployments/:id/:tab`, ADR-067). Renaming a hook or a form
+field can break them even when nothing about routing changed. Check them when
+you reshape a screen.
 
 ## What each one needs
 

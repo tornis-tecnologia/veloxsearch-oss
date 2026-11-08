@@ -82,8 +82,8 @@ def fail(msg):
 
 
 def open_settings(page):
-    page.wait_for_selector("nav.tabs", timeout=600000)
-    page.click("nav.tabs button:nth-child(4)")
+    page.wait_for_selector('[data-testid="nav-deployments"]', timeout=600000)
+    page.click('[data-testid="nav-settings"]')
     page.wait_for_selector('[data-testid="access-save"]', timeout=15000)
 
 
@@ -100,7 +100,7 @@ with sync_playwright() as p:
 
     # 1. boot + authenticate, then Settings (fourth in nav.tabs).
     page.goto(base, wait_until="domcontentloaded")
-    page.wait_for_selector('input[name="username"], nav.tabs', timeout=30000)
+    page.wait_for_selector('input[name="username"], [data-testid="nav-deployments"]', timeout=30000)
     if page.locator('input[name="username"]').count():
         is_setup = page.locator('input[name="confirm"]').count() > 0
         page.fill('input[name="username"]', user)
@@ -123,7 +123,7 @@ with sync_playwright() as p:
     print("  no IngressClass -> reason shown, Save disabled, only the stored class listed")
 
     # 3. port-forward is the way out: Save re-enabled.
-    page.locator("button.purpose").nth(0).click()
+    page.locator('[data-testid="access-portforward"]').click()
     if save.is_disabled():
         fail("Save stays disabled in port-forward mode")
     print("  port-forward -> Save enabled")

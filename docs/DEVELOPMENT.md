@@ -187,11 +187,13 @@ secrets among them are inventoried in [SECRETS.md](SECRETS.md).
 ## Things that will surprise you
 
 - **Two binaries.** `cargo run` alone fails; pass `--bin`.
-- **`frontend/` is flat.** No `src/` tree, no router, no state library. That is
-  the design, not an oversight.
+- **`frontend/` is flat.** No `src/` tree, no state library; the router is
+  forty lines over the History API (`router.jsx`). That is the design, not an
+  oversight.
 - **UI strings live in `i18n.jsx`.** A string inline in a view will not be
   translatable and will fail review.
-- **The e2e tests drive widgets, not URLs.** Renaming a form field can break
-  `tests/*_check.py` even though nothing about routing changed.
+- **The e2e tests drive `data-testid` hooks and assert URLs.** Renaming a
+  hook or a form field can break `tests/*_check.py`; keep them when you
+  reshape a screen.
 - **`ADR-0xx` citations are everywhere.** See [adr/README.md](adr/README.md) for
   what they refer to.
