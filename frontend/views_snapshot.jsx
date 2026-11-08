@@ -24,7 +24,7 @@
    ============================================================ */
 import React, { useState, useEffect } from "react";
 import { STR } from "./i18n.jsx";
-import { Icon, Field, Btn, Confirm } from "./ui.jsx";
+import { Icon, Field, Btn, Confirm, Banner } from "./ui.jsx";
 import { LockNotice } from "./views_activity.jsx";
 import { API } from "./api.jsx";
 
@@ -115,13 +115,13 @@ function SnapshotForm({ cfg, onChange, lang, idPrefix = "snap" }) {
   return (
     <div style={{ display: "grid", gap: 4 }}>
       <Field label={t.snap_bucket} hint={t.snap_bucket_hint} htmlFor={`${idPrefix}-bucket`}>
-        <input id={`${idPrefix}-bucket`} className="input" value={cfg.bucket}
+        <input id={`${idPrefix}-bucket`} className="input mono" value={cfg.bucket}
           placeholder="velox-snapshots" onChange={(e) => set("bucket", e.target.value)}
           data-testid="snap-bucket" />
       </Field>
 
       <Field label={t.snap_endpoint} hint={t.snap_endpoint_hint} htmlFor={`${idPrefix}-endpoint`}>
-        <input id={`${idPrefix}-endpoint`} className="input" value={cfg.endpoint}
+        <input id={`${idPrefix}-endpoint`} className="input mono" value={cfg.endpoint}
           placeholder="http://minio.minio.svc:9000" onChange={(e) => set("endpoint", e.target.value)}
           data-testid="snap-endpoint" />
       </Field>
@@ -205,9 +205,7 @@ function SnapshotForm({ cfg, onChange, lang, idPrefix = "snap" }) {
           </Field>
 
           <div className="hr" style={{ margin: "6px 0 16px" }} />
-          <div style={{ fontSize: 13, fontFamily: "var(--font-mono)", color: "var(--text-2)", marginBottom: 12 }}>
-            {t.snap_bucket_opts}
-          </div>
+          <div className="section-title" style={{ marginBottom: 12 }}>{t.snap_bucket_opts}</div>
 
           <div style={ROW2}>
             <Field label={t.snap_base_path} htmlFor={`${idPrefix}-base`}>
@@ -261,15 +259,7 @@ function SnapshotStep({ cfg, onChange, lang }) {
         </span>
       </label>
 
-      {!on && (
-        <div style={{
-          display: "flex", gap: 12, padding: 16, marginTop: 14, borderRadius: "var(--radius)",
-          background: "var(--info-soft)", border: "1px solid var(--border)", color: "var(--text-2)", fontSize: 14,
-        }}>
-          <span style={{ color: "var(--info)", flexShrink: 0 }}><Icon name="bolt" size={18} /></span>
-          {t.snap_step_skip}
-        </div>
-      )}
+      {!on && <Banner tone="info" style={{ marginTop: 14 }}>{t.snap_step_skip}</Banner>}
 
       {on && (
         <div style={{ marginTop: 18 }}>
@@ -387,39 +377,22 @@ function SnapshotTab({ d, lang, onToast, locked }) {
 
   return (
     <div className="view-enter">
-      <div className="section-title">{t.snap_h}</div>
       <LockNotice reason={locked} />
-      <p className="lead" style={{ marginTop: -6 }}>{t.snap_tab_p}</p>
+      <p className="lead" style={{ marginBottom: 16 }}>{t.snap_tab_p}</p>
 
       {/* Live state, in the operator's own words. PENDING while the cluster
           provisions is not an error — the repository reconciler waits for the
           cluster to be running. */}
       {state.configured && (
-        <div style={{
-          display: "flex", gap: 12, padding: 14, marginBottom: 18, borderRadius: "var(--radius)",
-          background: state.policy_state === "ERROR" ? "var(--danger-soft)" : "var(--surface-2)",
-          border: `1px solid ${state.policy_state === "ERROR" ? "var(--danger-border)" : "var(--border)"}`,
-        }} data-testid="snap-state">
-          <span style={{ color: state.policy_state === "ERROR" ? "var(--danger)" : "var(--accent)", flexShrink: 0 }}>
-            <Icon name={state.policy_state === "ERROR" ? "shield" : "check"} size={18} />
-          </span>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>
-              {state.policy_state === "ERROR" ? t.snap_state_error
-                : state.policy_state === "PENDING" ? t.snap_state_pending
-                  : t.snap_state_ok}
-            </div>
-            <div style={{ fontSize: 13, color: "var(--text-3)", marginTop: 2, fontFamily: "var(--font-mono)" }}>
-              {state.repo}{state.schedule ? ` · ${state.schedule}` : ""}
-            </div>
-            {state.last_error && (
-              <pre style={{
-                margin: "8px 0 0", whiteSpace: "pre-wrap", wordBreak: "break-word",
-                color: "var(--danger)", fontSize: 12.5, fontFamily: "var(--font-mono)",
-              }}>{state.last_error}</pre>
-            )}
-          </div>
-        </div>
+        <Banner tone={state.policy_state === "ERROR" ? "danger" : state.policy_state === "PENDING" ? "info" : "ok"}
+          icon={state.policy_state === "ERROR" ? "shield" : state.policy_state === "PENDING" ? "clock" : "check"}
+          testid="snap-state"
+          title={state.policy_state === "ERROR" ? t.snap_state_error
+            : state.policy_state === "PENDING" ? t.snap_state_pending
+              : t.snap_state_ok}>
+          <span className="mono">{state.repo}{state.schedule ? ` · ${state.schedule}` : ""}</span>
+          {state.last_error && <pre>{state.last_error}</pre>}
+        </Banner>
       )}
 
       <label className="recipe" style={{

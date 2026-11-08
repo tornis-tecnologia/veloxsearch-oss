@@ -22,7 +22,7 @@
 import { useState, useEffect } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Icon, Btn, Field, Confirm } from "./ui.jsx";
+import { Icon, Btn, Field, Confirm, Banner } from "./ui.jsx";
 
 // Which fields belong to each kind, so the form and the payload stay in sync
 // with the backend's per-kind config structs.
@@ -127,6 +127,8 @@ function SecretInput({ id, value, sentinel, onChange, testid, t }) {
     </div>
   );
 }
+
+function fmt(s, ...args) { return args.reduce((acc, v, i) => acc.replaceAll(`{${i}}`, v), s || ""); }
 
 function KindCard({ kind, t, selected, disabled, reason, onSelect }) {
   return (
@@ -264,6 +266,11 @@ function AuthProviderTab({ d, lang, onToast, locked }) {
   };
   const available = cfg.kinds_available || [];
   const spec = { kind, ...cur, role_mappings: maps };
+  // What is APPLIED on the deployment, as opposed to what is selected on the
+  // form. A primary "Back to local accounts" button under an already-local
+  // deployment did nothing, and read as if the state were unknown (M7).
+  const applied = (cfg.spec && cfg.spec.kind) || "internal";
+  const noChange = kind === "internal" && applied === "internal";
 
   function applyPreset(p) {
     setPreset(p.id);
@@ -336,11 +343,14 @@ function AuthProviderTab({ d, lang, onToast, locked }) {
 
   return (
     <div className="view-enter" style={{ maxWidth: 720 }}>
-      <p className="lead">{t.auth_lead}</p>
+      <p className="lead" style={{ marginBottom: 12 }}>{t.auth_lead}</p>
+      <div style={{ marginBottom: 14 }}>
+        <span className="badge green" data-testid="auth-in-use">{fmt(t.auth_in_use, t[`auth_${applied}_t`] || applied)}</span>
+      </div>
 
       {/* 1. the kind */}
       <div className="section-title">{t.auth_kind_q}</div>
-      <div className="purpose-grid" style={{ marginTop: 10 }}>
+      <div className="purpose-grid four" style={{ marginTop: 10 }}>
         {["internal", "ldap", "oidc", "saml"].map((k) => (
           <KindCard key={k} kind={k} t={t}
             selected={kind === k}
@@ -364,17 +374,9 @@ function AuthProviderTab({ d, lang, onToast, locked }) {
       )}
 
       {/* the reassurance that makes the whole screen safe to touch */}
-      <div className="card pad" style={{ marginTop: 18 }} data-testid="auth-breakglass">
-        <div style={{ display: "flex", gap: 10 }}>
-          <span style={{ color: "var(--accent)", flexShrink: 0, marginTop: 1 }}><Icon name="shield" size={17} /></span>
-          <div>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, marginBottom: 4 }}>{t.auth_breakglass_h}</div>
-            <p className="hint" style={{ margin: 0 }}>
-              {t.auth_breakglass_p.replace("{user}", cfg.break_glass_user)}
-            </p>
-          </div>
-        </div>
-      </div>
+      <Banner tone="ok" icon="shield" title={t.auth_breakglass_h} testid="auth-breakglass" style={{ marginTop: 18 }}>
+        {t.auth_breakglass_p.replace("{user}", cfg.break_glass_user)}
+      </Banner>
 
       {kind !== "internal" && (
         <div className="card pad" style={{ marginTop: 18 }}>
@@ -526,10 +528,11 @@ function AuthProviderTab({ d, lang, onToast, locked }) {
             {busy ? t.auth_testing : t.auth_test}
           </Btn>
         )}
-        <Btn variant="primary" icon="check" disabled={busy || !!locked} data-testid="auth-save"
+        <Btn variant="primary" icon="check" disabled={busy || !!locked || noChange} data-testid="auth-save"
           onClick={() => setConfirm(true)}>
           {kind === "internal" ? t.auth_revert : t.auth_save}
         </Btn>
+        {noChange && <span className="hint" style={{ alignSelf: "center" }}>{t.auth_no_change}</span>}
       </div>
 
       <ProbePanel probe={probe} t={t} />

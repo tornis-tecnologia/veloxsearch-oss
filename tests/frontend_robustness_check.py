@@ -149,12 +149,13 @@ def open_page(browser, *, lang="en", answers=None, init=(), render_error=None):
     return ctx, page
 
 
-def open_deployment(page, tab_label=None):
-    page.wait_for_selector("nav.tabs", timeout=20000)
-    page.locator(".card-actions button").first.click()
+def open_deployment(page, tab=None):
+    """Open the first deployment; `tab` is a deployment tab key (data-testid dep-tab-<key>)."""
+    page.wait_for_selector('[data-testid="nav-deployments"]', timeout=20000)
+    page.locator(".dep-open").first.click()
     page.wait_for_selector(".copyfield", timeout=15000)
-    if tab_label:
-        page.locator("button[aria-selected]", has_text=tab_label).first.click()
+    if tab:
+        page.locator(f'[data-testid="dep-tab-{tab}"]').click()
 
 
 def check_copy(browser, name, init, expect_ok):
@@ -198,10 +199,10 @@ with sync_playwright() as p:
     for name, init, expect_open in (("fails", [DENIED_CLIPBOARD, NO_EXECCOMMAND], True),
                                     ("works", [DENIED_CLIPBOARD], False)):
         ctx, page = open_page(browser, init=init)
-        open_deployment(page, "Security")
+        open_deployment(page, "access")
         page.click('[data-testid="reset-pass"]')
-        modal = page.locator('div[style*="z-index: 300"]')  # ui.jsx Confirm
-        modal.locator("button.btn-danger").click()  # confirm the reset
+        modal = page.locator(".dialog-backdrop")  # ui.jsx Dialog
+        modal.locator("button.btn-danger-solid").click()  # confirm the reset
         dialog_copy = modal.locator("button.btn-primary", has_text="copy")
         dialog_copy.wait_for(timeout=10000)
         dialog_copy.click()
@@ -216,10 +217,10 @@ with sync_playwright() as p:
 
     # 2. auth-test answer without `checks`: the result renders, the app stays.
     ctx, page = open_page(browser)
-    open_deployment(page, "Auth")
+    open_deployment(page, "access")
     page.click('[data-testid="auth-test"]')
     page.wait_for_selector('[data-testid="auth-probe-result"]', timeout=10000)
-    if not page.locator("nav.tabs").count():
+    if not page.locator('[role="tablist"]').count():
         fail("auth-test without checks: the app is gone")
     shot(page, "auth-test-no-checks")
     print("  auth-test without `checks` -> result rendered, app intact")
@@ -228,25 +229,32 @@ with sync_playwright() as p:
     # 3. a render error inside a view: the view boundary catches it.
     ctx, page = open_page(browser, render_error=r"TypeError: \w+\.map is not a function", answers={
         "auth_provider": {**AUTH_PROVIDER, "spec": {"kind": "ldap", "role_mappings": "not-a-list"}}})
-    open_deployment(page, "Auth")
+    open_deployment(page, "access")
     page.wait_for_selector('[data-testid="error-boundary"]', timeout=10000)
-    if not page.locator("header.topbar").count() or not page.locator("nav.tabs").count():
+    if not page.locator("header.topbar").count() or not page.locator("aside.sidebar").count():
         fail("view render error: the header/navigation did not survive")
     shot(page, "boundary-view")
-    page.locator("nav.tabs > button").first.click()
+    page.locator('[data-testid="nav-deployments"]').click()
     page.wait_for_selector('[data-testid="error-boundary"]', state="detached", timeout=5000)
     print("  view render error -> view fallback, header+nav intact, leaving the view recovers")
     ctx.close()
 
-    # 4. a render error in the app shell: the top-level boundary catches it.
+    # 4. a render error from a malformed build_info: the shell no longer
+    #    renders the build (it moved to Settings › About), so the crash lands
+    #    in the Settings view and its boundary — translated, with a reload —
+    #    while the shell around it survives.
     ctx, page = open_page(browser, lang="pt", render_error=r"TypeError: [\w.]+\.slice is not a function", answers={
         "build_info": {"version": "0.12.0", "commit": 7, "image_digest": None}})
+    page.wait_for_selector('[data-testid="nav-settings"]', timeout=20000)
+    page.click('[data-testid="nav-settings"]')
     page.wait_for_selector('[data-testid="error-boundary"]', timeout=20000)
     body = page.locator('[data-testid="error-boundary"]').inner_text()
     if "Recarregar" not in body:
-        fail(f"top-level fallback is not translated / has no reload: {body!r}")
+        fail(f"view fallback is not translated / has no reload: {body!r}")
+    if not page.locator("aside.sidebar").count():
+        fail("the shell did not survive a Settings render error")
     shot(page, "boundary-top")
-    print("  shell render error -> top-level fallback (pt) with reload")
+    print("  build_info render error -> Settings fallback (pt) with reload, shell intact")
     ctx.close()
 
     # 5. tooltips, in each language, on the login screen and in the app.
@@ -261,8 +269,12 @@ with sync_playwright() as p:
         ctx.close()
 
         ctx, page = open_page(browser, lang=lang)
-        page.wait_for_selector('[data-testid="theme-toggle"]', timeout=20000)
+        # The theme toggle lives in the account menu now (sidebar, bottom).
+        page.wait_for_selector('[data-testid="account-menu"]', timeout=20000)
+        page.click('[data-testid="account-menu"]')
+        page.wait_for_selector('[data-testid="theme-toggle"]', timeout=5000)
         got = page.get_attribute('[data-testid="theme-toggle"]', "title")
+        page.keyboard.press("Escape")
         if got != theme_tip:
             fail(f"[{lang}] theme toggle tooltip {got!r}, expected {theme_tip!r}")
         open_deployment(page)
