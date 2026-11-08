@@ -131,8 +131,9 @@ e um wrapper em `frontend/api.jsx`.
 
 ## Frontend
 
-React 18 + Vite puro. **Sem router e sem biblioteca de estado.** Arquivos `.jsx`
-planos no nível de cima, não uma árvore `src/`.
+React 19 + Vite puro, um router mínimo sobre a History API (`router.jsx`, sem
+biblioteca) e **nenhuma biblioteca de estado**. Arquivos `.jsx` planos no nível
+de cima, não uma árvore `src/`.
 
 O `app.jsx` é a raiz. Ele inicializa a partir de `GET /api/auth_state` e troca de
 tela conforme o estado:
@@ -141,25 +142,38 @@ tela conforme o estado:
 first_run                 → setup
 !authenticated            → login
 authenticated && !ready   → bootstrap
-caso contrário            → a aplicação principal
+caso contrário            → o shell (barra lateral + barra superior + a tela da rota)
+```
+
+Toda tela tem uma URL (ADR-067). O servidor redireciona um pedido de página sem
+sessão para `/login?next=<caminho>` e a SPA volta para lá depois do login:
+
+```
+/deployments                  a lista
+/deployments/new              o assistente de criação
+/deployments/:id/:tab         overview | data | backup | access | config | activity
+/capacity
+/settings
 ```
 
 Os deployments chegam pelo stream SSE. O `localStorage` guarda **apenas**
-preferências de interface (tema, idioma) — nunca estado do servidor, nunca dados
-falsos.
+preferências de interface (tema, idioma, um checklist dispensado) — nunca estado
+do servidor, nunca dados falsos.
 
 | Arquivo | Conteúdo |
 | --- | --- |
+| `router.jsx` | Caminho ↔ rota, `useRouter()`, o `next` depois do login |
 | `api.jsx` | Todo wrapper REST mais os adaptadores de DTO (`adaptDeployment`, …) |
-| `i18n.jsx` | Todas as strings da interface, pt + en. Texto de interface vai aqui, nunca inline numa tela |
-| `ui.jsx` | Primitivas compartilhadas (Logo, Icon, Toast) |
+| `i18n.jsx` | Todas as strings da interface, pt + en + es. Texto de interface vai aqui, nunca inline numa tela |
+| `ui.jsx` | As primitivas do design system: Banner, Dialog/Confirm, Tabs, Menu, PageHeader, StatusPill, FormSection, Toast, formatadores por idioma |
 | `views_*.jsx` | Um arquivo por tela; `views_deployment.jsx` é o grande |
-| `styles.css` | O design system (custom properties CSS, IBM Plex, acento verde) |
-| `tweaks-panel.jsx` | O painel de ajuste de design ao vivo |
+| `styles.css` | O design system (custom properties CSS; IBM Plex Sans na interface, Mono nos dados; acento verde; tokens de estado legíveis nos dois temas) |
+| `tweaks-panel.jsx`, `tweaks-dev.jsx` | O painel de ajuste de design, carregado só em dev |
 
-Como os testes ponta a ponta dirigem widgets renderizados em vez de URLs,
-renomear um campo de formulário ou remodelar uma estrutura `nav.tabs` pode
-quebrar os `tests/*_check.py`. Confira-os quando remodelar uma tela.
+Os testes ponta a ponta dirigem hooks `data-testid` estáveis e conferem URLs.
+Mantenha os hooks (`nav-*`, `create-deployment`, `dep-open-<id>`,
+`dep-tab-<key>`, `delete-deployment`, `wizard-next`, `create-submit`) quando
+remodelar uma tela, e confira os `tests/*_check.py`.
 
 ## Pacotes de integração são dados
 

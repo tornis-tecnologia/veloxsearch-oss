@@ -16,8 +16,8 @@ Ao participar você concorda com o [Código de Conduta](CODE_OF_CONDUCT.md).
   [`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry);
   o formato está especificado em [docs/integrations/](docs/integrations/).
 - **Traduções.** Toda string da interface está em `frontend/i18n.jsx` (hoje pt +
-  en). Adicionar um idioma é adicionar um conjunto de chaves lá, sem tocar nas
-  telas.
+  en + es). Adicionar um idioma é adicionar um conjunto de chaves lá, sem tocar
+  nas telas.
 - **Documentação.** Qualquer coisa em `docs/`. O arquivo em inglês é o canônico;
   o espelho `.pt-BR` deve acompanhar no mesmo PR quando você mudar um dos dois.
 - **Reproduções.** Um relato preciso de bug contra uma distribuição e versão
@@ -123,9 +123,11 @@ aplicá-la.
   bater dos dois lados: um DTO em `src/api.rs`, um handler em `src/api.rs`, uma
   linha em `routes()` e um wrapper em `frontend/api.jsx`.
 
-- **Frontend**: React 18 puro, sem router e sem biblioteca de estado. Arquivos
-  `.jsx` planos, não uma árvore `src/`. Texto de interface vai no `i18n.jsx`,
-  nunca inline numa tela. O `localStorage` guarda só preferências de interface —
+- **Frontend**: React 19 puro, um router mínimo sobre a History API
+  (`router.jsx`) e nenhuma biblioteca de estado. Arquivos `.jsx` planos, não uma
+  árvore `src/`. Texto de interface vai no `i18n.jsx`, nunca inline numa tela —
+  um vocabulário só (deployment, backup, saúde como palavra), sem números de ADR
+  ou de issue nas strings. O `localStorage` guarda só preferências de interface —
   nunca estado do servidor, nunca dados falsos.
 
 - **Pacotes do registry são dados, não código.** A interpolação é um conjunto
@@ -144,9 +146,9 @@ aplicá-la.
 3. **Mantenha o PR em um assunto só.** Um refactor e uma mudança de
    comportamento no mesmo diff levam três vezes mais tempo para revisar.
 4. **Atualize a documentação no mesmo PR.** Se você renomeou um campo de
-   formulário ou remodelou uma estrutura `nav.tabs`, confira os
-   `tests/*_check.py` — os testes ponta a ponta dirigem widgets renderizados, não
-   URLs, então uma renomeação de interface pode quebrá-los.
+   formulário ou um hook `data-testid`, ou mudou uma tela de URL, confira os
+   `tests/*_check.py` — os testes ponta a ponta dirigem esses hooks e conferem as
+   URLs.
 5. **Assine seus commits** (veja abaixo).
 6. **Abra o PR** contra `develop` e preencha o template.
 

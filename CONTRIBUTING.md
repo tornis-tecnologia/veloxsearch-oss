@@ -15,8 +15,9 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
   code. They live in
   [`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry);
   the format is specified in [docs/integrations/](docs/integrations/).
-- **Translations.** Every UI string lives in `frontend/i18n.jsx` (pt + en today).
-  Adding a language means adding a key set there, not touching the views.
+- **Translations.** Every UI string lives in `frontend/i18n.jsx` (pt + en + es
+  today). Adding a language means adding a key set there, not touching the
+  views.
 - **Documentation.** Anything in `docs/`. The English file is canonical; the
   `.pt-BR` mirror should follow in the same PR when you change one.
 - **Reproductions.** A precise bug report against a named distro and version is
