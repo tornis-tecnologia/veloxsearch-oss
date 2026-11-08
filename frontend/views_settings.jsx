@@ -9,7 +9,7 @@
 import { useState, useEffect } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Field, Btn, Icon, Copyable, Confirm } from "./ui.jsx";
+import { Field, Btn, Icon, Copyable, Confirm, FormSection, PageHeader, Banner } from "./ui.jsx";
 
 // Local, tiny: this view had no formatter and needs exactly one.
 function fmtS(s, ...args) {
@@ -47,9 +47,7 @@ function AboutBlock({ info, t, onToast }) {
   ];
   const notes = [info.image_note, info.operator_note].filter(Boolean);
   return (
-    <div className="card pad" style={{ maxWidth: 560, marginTop: 18 }} data-testid="about-panel">
-      <h3 className="section-title" style={{ marginTop: 0 }}>{t.about_h}</h3>
-      <p style={{ fontSize: 12.5, color: "var(--text-3)" }}>{t.about_lead}</p>
+    <div data-testid="about-panel">
       {rows.map(([k, v]) => (
         <div className="kvrow" key={k}><span className="k">{k}</span><span className="v">{v}</span></div>
       ))}
@@ -114,16 +112,16 @@ function RetentionBlock({ t, onToast }) {
 
   const outcomeLabel = o => t["ret_outcome_" + o] || o;
   return (
-    <div className="card pad" style={{ maxWidth: 560, marginTop: 18 }} data-testid="retention-defaults">
-      <h3 className="section-title" style={{ marginTop: 0 }}>{t.ret_defaults_h}</h3>
-      <p style={{ fontSize: 12.5, color: "var(--text-3)" }}>{t.ret_defaults_lead}</p>
-      <Field label={t.ret_obs_days} hint={t.ret_days_hint} error={valid(obs) || !obs ? "" : t.ret_days_err}>
-        <input className="input" inputMode="numeric" value={obs} onChange={e => setObs(e.target.value)} />
-      </Field>
-      <Field label={t.ret_sec_days} error={valid(sec) || !sec ? "" : t.ret_days_err}>
-        <input className="input" inputMode="numeric" value={sec} onChange={e => setSec(e.target.value)} />
-      </Field>
-      <p className="hint">{t.ret_search_none}</p>
+    <div data-testid="retention-defaults">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 14 }}>
+        <Field label={t.ret_obs_days} hint={t.ret_days_hint} error={valid(obs) || !obs ? "" : t.ret_days_err} htmlFor="ret-obs">
+          <input id="ret-obs" className="input" inputMode="numeric" value={obs} onChange={e => setObs(e.target.value)} />
+        </Field>
+        <Field label={t.ret_sec_days} error={valid(sec) || !sec ? "" : t.ret_days_err} htmlFor="ret-sec">
+          <input id="ret-sec" className="input" inputMode="numeric" value={sec} onChange={e => setSec(e.target.value)} />
+        </Field>
+      </div>
+      <p className="hint" style={{ marginBottom: 12 }}>{t.ret_search_none}</p>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <Btn variant="primary" icon="check" disabled={busy || blocked} onClick={save}>{t.save}</Btn>
         <Btn variant="outline" disabled={busy} onClick={() => setConfirmApply(true)}
@@ -172,7 +170,16 @@ function OperatorBlock({ t, onToast }) {
 
   async function load() {
     try {
-      setR(await API.operatorUpgradeStatus());
+      const s = await API.operatorUpgradeStatus();
+      // A backend older than this route answers it with the SPA's index.html
+      // (the fallback, 200): a string, not the status. Treat anything without
+      // the shape as "unavailable" instead of taking the whole screen down.
+      if (!s || typeof s !== "object" || !s.job || !s.grant) {
+        setR(null);
+        setErr(t.about_unavailable);
+        return;
+      }
+      setR(s);
       setErr("");
     } catch (e) {
       setErr(e.message);
@@ -208,13 +215,8 @@ function OperatorBlock({ t, onToast }) {
     ? fmtS(t["opu_f_" + f.code], f.deployment, f.subject)
     : f.detail);
 
-  const card = children => (
-    <div className="card pad" style={{ maxWidth: 560, marginTop: 18 }} data-testid="operator-upgrade">
-      <h3 className="section-title" style={{ marginTop: 0 }}>{t.opu_h}</h3>
-      {children}
-    </div>
-  );
-  if (err) return card(<p className="hint" style={{ color: "var(--danger)" }}>{err}</p>);
+  const card = children => <div data-testid="operator-upgrade">{children}</div>;
+  if (err) return card(<p className="hint" style={{ color: "var(--danger-text)" }}>{err}</p>);
   if (!r) return card(<p className="hint">{t.opu_loading}</p>);
   if (r.state === "unmanaged") {
     return card(<p className="hint" data-testid="opu-unmanaged">{r.blockers.map(say).join(" ")}</p>);
@@ -237,10 +239,10 @@ function OperatorBlock({ t, onToast }) {
       <p className="hint" data-testid="opu-job-running">{fmtS(t["opu_step_" + job.step] || job.step, job.to)}</p>
     )}
     {job.state === "done" && (
-      <p className="hint" style={{ color: "var(--accent)" }} data-testid="opu-job-done">{fmtS(t.opu_done, job.from, job.to)}</p>
+      <p className="hint" style={{ color: "var(--ok-text)" }} data-testid="opu-job-done">{fmtS(t.opu_done, job.from, job.to)}</p>
     )}
     {job.state === "failed" && (
-      <p className="hint" style={{ color: "var(--danger)", overflowWrap: "anywhere" }} data-testid="opu-job-failed">
+      <p className="hint" style={{ color: "var(--danger-text)", overflowWrap: "anywhere" }} data-testid="opu-job-failed">
         {fmtS(t.opu_failed, job.error)}
       </p>
     )}
@@ -266,16 +268,14 @@ function OperatorBlock({ t, onToast }) {
       <p className="hint">{t.opu_restart_note}</p>
 
       {r.blockers.length > 0 && (
-        <div data-testid="opu-blockers">
-          <h4 className="section-title" style={{ fontSize: 13, color: "var(--danger)" }}>{t.opu_blockers_h}</h4>
-          {r.blockers.map((b, n) => <p key={n} className="hint" style={{ color: "var(--danger)" }}>{say(b)}</p>)}
-        </div>
+        <Banner tone="danger" title={t.opu_blockers_h} testid="opu-blockers">
+          {r.blockers.map((b, n) => <div key={n}>{say(b)}</div>)}
+        </Banner>
       )}
       {r.warnings.length > 0 && (
-        <div data-testid="opu-warnings">
-          <h4 className="section-title" style={{ fontSize: 13, color: "var(--warn)" }}>{t.opu_warnings_h}</h4>
-          {r.warnings.map((w, n) => <p key={n} className="hint" style={{ color: "var(--warn)" }}>{say(w)}</p>)}
-        </div>
+        <Banner tone="warn" title={t.opu_warnings_h} testid="opu-warnings">
+          {r.warnings.map((w, n) => <div key={n}>{say(w)}</div>)}
+        </Banner>
       )}
 
       <h4 className="section-title" style={{ fontSize: 13 }}>{t.opu_grant_h}</h4>
@@ -305,7 +305,7 @@ function OperatorBlock({ t, onToast }) {
         confirmLabel={t.opu_confirm_go} cancelLabel={t.cancel} icon="layers" variant="primary"
         confirmTestid="opu-confirm" onCancel={() => setConfirm(false)} onConfirm={start}>
         {downPools.length > 0 && (
-          <p className="hint" style={{ color: "var(--warn)" }}>
+          <p className="hint" style={{ color: "var(--warn-text)" }}>
             {fmtS(t.opu_confirm_downtime, downPools.map(p => `${p.deployment} ${p.subject}`).join(", "))}
           </p>
         )}
@@ -395,89 +395,91 @@ function SettingsView({ lang, onToast, buildInfo, isTenant }) {
 
   return (
     <div className="view-enter">
-      <h1 className="page-title">{t.settings_h}</h1>
-      <p className="lead">{t.settings_lead}</p>
+      <PageHeader title={t.settings_h} lead={t.settings_lead} />
 
-      <div className="card pad" style={{ maxWidth: 560 }}>
-        <Field label={t.dash_access}>
-          <div style={{ display: "grid", gap: 10 }}>
-            {[
-              { v: "portforward", title: t.portfwd, desc: t.portfwd_d, icon: "server" },
-              { v: "ingress", title: t.ingress, desc: t.ingress_d, icon: "layers" },
-            ].map(o => (
-              <button key={o.v} className="purpose" aria-pressed={access === o.v}
-                onClick={() => setAccess(o.v)}
-                style={{ display: "flex", alignItems: "center", gap: 13, padding: 14 }}>
-                <span className="check"><Icon name="check" size={12} /></span>
-                <span style={{ color: access === o.v ? "var(--accent)" : "var(--text-3)" }}><Icon name={o.icon} size={17} /></span>
-                <span style={{ textAlign: "left" }}>
-                  <div style={{ fontFamily: "var(--font-mono)", fontWeight: 600 }}>{o.title}</div>
-                  <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>{o.desc}</div>
-                </span>
-              </button>
-            ))}
-          </div>
-        </Field>
+      <FormSection title={t.set_h_access} desc={t.set_d_access} testid="set-access"
+        actions={<Btn variant="primary" icon="check" data-testid="access-save" disabled={busy || blocked} onClick={save}>{t.save}</Btn>}>
+        <div className="purpose-grid two" style={{ marginBottom: 14 }}>
+          {[
+            { v: "portforward", title: t.portfwd_t, desc: t.portfwd_d, icon: "server" },
+            { v: "ingress", title: t.ingress_t, desc: t.ingress_d, icon: "globe" },
+          ].map(o => (
+            <button key={o.v} type="button" className="purpose row" aria-pressed={access === o.v} onClick={() => setAccess(o.v)}
+              data-testid={`access-${o.v}`}>
+              <span className="check"><Icon name="check" size={12} /></span>
+              <span className="picon"><Icon name={o.icon} size={17} /></span>
+              <span style={{ textAlign: "left", minWidth: 0 }}>
+                <div className="ph">{o.title}</div>
+                <div className="pd">{o.desc}</div>
+              </span>
+            </button>
+          ))}
+        </div>
 
         {/* Changing the mode is not a preference toggle: leaving ingress takes
             every deployment's public URL down. Say it where the choice is. */}
         {modeChanged && (
-          <p className="hint" style={{ color: "var(--warn)" }}>
-            {access === "portforward" ? t.access_leave_ingress : t.access_enter_ingress}
-          </p>
+          <Banner tone="warn">{access === "portforward" ? t.access_leave_ingress : t.access_enter_ingress}</Banner>
         )}
 
         {access === "ingress" && (
           <div className="view-enter">
-            <Field label={t.base_domain} hint={t.base_domain_hint}
+            <Field label={t.base_domain} hint={t.base_domain_hint} htmlFor="set-domain"
               error={domainMissing ? t.base_domain_required : ""}>
-              <input className="input" value={domain} placeholder={defaultDomain}
+              <input id="set-domain" className="input mono" value={domain} placeholder={defaultDomain}
                 onChange={e => setDomain(e.target.value)} />
             </Field>
-            {/* What the empty field actually produces, spelled out with a real
-                example host — "a default will be used" tells nobody anything. */}
             {!domain.trim() && defaultDomain && (
-              <p className="hint" style={{ marginTop: -8 }}>
+              <p className="hint" style={{ marginTop: -8, marginBottom: 14 }}>
                 {fmtS(t.base_domain_default, defaultDomain)}
                 <br />
                 <code style={{ fontSize: 11.5 }}>{`meu-cluster-traces.${defaultDomain}`}</code>
               </p>
             )}
-            <Field label={t.ingress_class} error={classErr}>
-              <select className="select" data-testid="ingress-class" value={ingress} onChange={e => setIngress(e.target.value)}>
+            <Field label={t.ingress_class} error={classErr} htmlFor="set-ingress-class">
+              <select id="set-ingress-class" className="select mono" data-testid="ingress-class" value={ingress} onChange={e => setIngress(e.target.value)}>
                 {classOptions.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </Field>
 
-            {/* TLS is its own concern — it was mixed into the access fields
-                with no separation at all. */}
-            <div className="hr" />
-            <h3 className="section-title" style={{ marginTop: 0 }}>{t.tls_h}</h3>
-            <Field label={t.tls_secret} hint={t.tls_secret_hint}>
-              <input className="input" value={tlsSecret} placeholder="veloxsearch-dashboards-tls"
+            <div className="hr" style={{ margin: "18px 0" }} />
+            <h3 className="section-title">{t.set_h_tls}</h3>
+            <p className="hint" style={{ marginBottom: 12 }}>{t.set_d_tls}</p>
+            <Field label={t.tls_secret} hint={t.tls_secret_hint} htmlFor="set-tls-secret">
+              <input id="set-tls-secret" className="input mono" value={tlsSecret} placeholder="veloxsearch-dashboards-tls"
                 onChange={e => setTlsSecret(e.target.value)} />
             </Field>
-            <Field label={t.tls_cert} hint={t.tls_pem_hint} error={certErr}>
-              <textarea className={`input${certErr ? " invalid" : ""}`} rows={4} value={tlsCert} spellCheck={false}
+            <Field label={t.tls_cert} hint={t.tls_pem_hint} error={certErr} htmlFor="set-tls-cert">
+              <textarea id="set-tls-cert" className={`textarea mono${certErr ? " invalid" : ""}`} rows={4} value={tlsCert} spellCheck={false}
                 placeholder="-----BEGIN CERTIFICATE-----"
                 onChange={e => setTlsCert(e.target.value)} />
             </Field>
-            <Field label={t.tls_key} error={keyErr || pairErr}>
-              <textarea className={`input${keyErr ? " invalid" : ""}`} rows={4} value={tlsKey} spellCheck={false}
+            <Field label={t.tls_key} error={keyErr || pairErr} htmlFor="set-tls-key">
+              <textarea id="set-tls-key" className={`textarea mono${keyErr ? " invalid" : ""}`} rows={4} value={tlsKey} spellCheck={false}
                 placeholder="-----BEGIN PRIVATE KEY-----"
                 onChange={e => setTlsKey(e.target.value)} />
             </Field>
           </div>
         )}
+      </FormSection>
 
-        <Btn variant="primary" icon="check" data-testid="access-save" disabled={busy || blocked} onClick={save} style={{ marginTop: 6 }}>{t.save}</Btn>
-      </div>
+      {!isTenant && (
+        <FormSection title={t.set_h_ret} desc={t.ret_defaults_lead} testid="set-retention">
+          <RetentionBlock t={t} onToast={onToast} />
+        </FormSection>
+      )}
 
-      {!isTenant && <RetentionBlock t={t} onToast={onToast} />}
+      {!isTenant && (
+        <FormSection title={t.set_h_op} desc={t.set_d_op} testid="set-operator">
+          <OperatorBlock t={t} onToast={onToast} />
+        </FormSection>
+      )}
 
-      {!isTenant && <OperatorBlock t={t} onToast={onToast} />}
-
-      {buildInfo && <AboutBlock info={buildInfo} t={t} onToast={onToast} />}
+      {buildInfo && (
+        <FormSection title={t.set_h_about} desc={t.about_lead} testid="set-about">
+          <AboutBlock info={buildInfo} t={t} onToast={onToast} />
+        </FormSection>
+      )}
     </div>
   );
 }

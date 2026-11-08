@@ -15,8 +15,9 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
   code. They live in
   [`veloxsearch-registry`](https://github.com/tornis-tecnologia/veloxsearch-registry);
   the format is specified in [docs/integrations/](docs/integrations/).
-- **Translations.** Every UI string lives in `frontend/i18n.jsx` (pt + en today).
-  Adding a language means adding a key set there, not touching the views.
+- **Translations.** Every UI string lives in `frontend/i18n.jsx` (pt + en + es
+  today). Adding a language means adding a key set there, not touching the
+  views.
 - **Documentation.** Anything in `docs/`. The English file is canonical; the
   `.pt-BR` mirror should follow in the same PR when you change one.
 - **Reproductions.** A precise bug report against a named distro and version is
@@ -116,10 +117,11 @@ unit-testable without a cluster. Keep new logic on the pure side and let
   on both sides: a DTO in `src/api.rs`, a handler in `src/api.rs`, a line in
   `routes()`, and a wrapper in `frontend/api.jsx`.
 
-- **Frontend**: plain React 18, no router and no state library. Flat `.jsx`
-  files, not a `src/` tree. UI text goes in `i18n.jsx`, never inline in a view.
-  `localStorage` holds UI preferences only — never server state, never mock
-  data.
+- **Frontend**: plain React 19, a minimal History-API router (`router.jsx`)
+  and no state library. Flat `.jsx` files, not a `src/` tree. UI text goes in
+  `i18n.jsx`, never inline in a view — one vocabulary (deployment, backup,
+  health as a word), no ADR or issue numbers in strings. `localStorage` holds
+  UI preferences only — never server state, never mock data.
 
 - **Registry packages are data, not code.** Interpolation is a closed set of
   exactly eight tokens (`integrations::CLOSED_TOKENS`) and signature
@@ -135,9 +137,10 @@ unit-testable without a cluster. Keep new logic on the pure side and let
    `feat/kafka-recipe`.
 3. **Keep the PR to one concern.** A refactor and a behaviour change in the same
    diff take three times as long to review.
-4. **Update the docs in the same PR.** If you renamed a form field or reshaped a
-   `nav.tabs` structure, check `tests/*_check.py` — the end-to-end tests drive
-   rendered widgets, not URLs, so a UI rename can break them.
+4. **Update the docs in the same PR.** If you renamed a form field or a
+   `data-testid` hook, or moved a screen to another URL, check
+   `tests/*_check.py` — the end-to-end tests drive those hooks and assert the
+   URLs.
 5. **Sign off your commits** (see below).
 6. **Open the PR** against `develop` and fill in the template.
 

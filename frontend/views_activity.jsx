@@ -17,7 +17,7 @@
    ============================================================ */
 import React, { useState, useEffect, useRef } from "react";
 import { STR } from "./i18n.jsx";
-import { Icon, Btn } from "./ui.jsx";
+import { Icon, Banner, StatusPill } from "./ui.jsx";
 import { API } from "./api.jsx";
 
 // The ladder, in the server's order. Kept as ids: the server sends the id and
@@ -169,9 +169,9 @@ function StageRow({ id, current, reached, label, detail }) {
    operator's componentsStatus. Fetches on open and polls ONLY while open, so a
    closed accordion costs nothing. Not container logs — a pod stuck before
    start has none, and reading them would need cluster-wide `pods/log`. --- */
-function ActivityDetails({ id, lang }) {
+function ActivityDetails({ id, lang, defaultOpen = false }) {
   const t = STR[lang];
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(!!defaultOpen);
   const [lines, setLines] = useState(null);
   const [err, setErr] = useState("");
 
@@ -191,9 +191,10 @@ function ActivityDetails({ id, lang }) {
   const tone = (s) => (s === "error" ? "var(--danger)" : s === "warn" ? "var(--warn)" : "var(--text-3)");
 
   return (
-    <details open={open} style={{ marginTop: 16 }} data-testid="activity-details">
+    <details open={open} style={{ marginTop: defaultOpen ? 8 : 16 }} data-testid="activity-details">
+      {/* Opened by default (the Activity tab) the toggle is noise: the log IS the tab. */}
       <summary
-        style={{ cursor: "pointer", fontSize: 13, color: "var(--text-2)" }}
+        style={{ cursor: "pointer", fontSize: 13, color: "var(--text-2)", display: defaultOpen ? "none" : undefined }}
         onClick={(e) => { e.preventDefault(); setOpen((o) => !o); }}
       >
         <Icon name={open ? "chevD" : "chevR"} size={12} /> {t.act_details}
@@ -290,9 +291,7 @@ function ActivityPanel({ d, lang }) {
       {/* The node pair comes off the activity verdict, which is the same pair
           the Overview tile renders — one source, so they cannot disagree. */}
       <div className="meta" style={{ marginTop: 12 }}>
-        <span className={`badge ${d.health === "green" ? "green" : d.health === "red" ? "" : "yellow"}`}>
-          <span className="dot" />{d.health}
-        </span>
+        <StatusPill health={d.health} t={t} size="sm" />
         <span data-testid="activity-nodes">
           {a.nodes_ready ?? d.nodes_ready}/{(a.nodes_total || d.node_count) || "?"} {t.nodes} {t.act_meta_ready}
         </span>
@@ -329,15 +328,7 @@ function lockReason(d, t) {
    itself where it is, never as a dead button (ADR-045 UI rule 1). --- */
 function LockNotice({ reason }) {
   if (!reason) return null;
-  return (
-    <div data-testid="lock-notice" style={{
-      display: "flex", gap: 12, padding: 14, marginBottom: 16, borderRadius: "var(--radius)",
-      background: "var(--info-soft)", border: "1px solid var(--border)", color: "var(--text-2)", fontSize: 14,
-    }}>
-      <span style={{ color: "var(--info)", flexShrink: 0 }}><Icon name="clock" size={18} /></span>
-      <span>{reason}</span>
-    </div>
-  );
+  return <Banner tone="info" icon="clock" testid="lock-notice">{reason}</Banner>;
 }
 
 export { ActivityPanel, ActivityDetails, lockReason, LockNotice, STAGES, fmtDur, stageLabel };

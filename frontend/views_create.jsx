@@ -1,43 +1,55 @@
 // Copyright (C) 2026 Tornis Desenvolvimento
 // SPDX-License-Identifier: AGPL-3.0-only
 /* ============================================================
-   Create view — guided 5-step wizard (the Backup step is optional)
+   Create view — guided 4-step wizard with a summary that is always visible.
+
+     1 Básico    name, OpenSearch version, purpose, retention
+     2 Tamanho   three comparable columns, "N fit in your cluster", the
+                 capacity after creating, and the risks of THIS choice
+     3 Backup    optional (ADR-049)
+     4 Revisão   confirmation only — nothing new is decided here
+
+   The summary aside repeats every choice with an "edit" link and shows what
+   the cluster looks like after the create (memory and storage, from the same
+   numbers the Capacity screen uses). The old wizard kept the size decision
+   context-free and surfaced the single-copy risk only on Review, where the
+   person had already decided.
    ============================================================ */
 import React, { useState, useEffect, useRef } from "react";
 import { STR, SIZES, sizeMeta } from "./i18n.jsx";
-import { Icon, Field, Btn, Copyable } from "./ui.jsx";
+import { Icon, Field, Btn, Copyable, Banner, Confirm, PageHeader, fmtQty, fmtInt, fmtGib } from "./ui.jsx";
 import { SnapshotStep } from "./views_snapshot.jsx";
 import { API } from "./api.jsx";
 
 const PURPOSES = ["observability", "security", "search"];
-
-// Sentinel for "type a version myself" in the version select. Not a version, so
-// it can never be sent as one (ADR-048 rev. 2).
 const OTHER_VERSION = "__other__";
 
-// The name becomes a Kubernetes object name and a DNS label (the deployment's
-// subdomain, ADR-020), so the backend enforces RFC 1123. Checking it here means
-// the user learns the rule while typing instead of at submit time. The backend
-// remains the authority — this only mirrors its rule.
+// The name becomes a Kubernetes object name and a DNS label (ADR-020).
 const NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 const NAME_MAX = 40;
 
 function nameError(raw, t) {
   const n = raw.trim();
-  if (!n) return "";                       // untouched: hint, not an error
+  if (!n) return "";
   if (n.length > NAME_MAX) return t.name_err_long;
   if (!NAME_RE.test(n)) return t.name_err_chars;
   return "";
 }
 
-// ADR-062: the installation's defaults, until the server's arrive. These are
-// the built-in values, so an offline wizard still tells the truth by default.
+// ADR-062: the installation's defaults, until the server's arrive.
 const BUILTIN_RETENTION = { observability_days: 30, security_days: 90 };
-
-// Days a purpose keeps its data by default; null for search (kept forever).
 function defaultDays(purpose, defaults) {
   if (purpose === "search") return null;
   return purpose === "security" ? defaults.security_days : defaults.observability_days;
+}
+
+const GiB = 1024 ** 3;
+// "2Gi" / "1536m" → bytes, for the capacity-after-create math.
+function qtyBytes(q) {
+  const m = String(q || "").trim().match(/^([\d.]+)\s*(Gi|Mi|Ki|Ti|G|M|K|T|g|m|k)?$/);
+  if (!m) return 0;
+  const mult = { Gi: GiB, g: GiB, G: GiB, Mi: 1024 ** 2, m: 1024 ** 2, M: 1024 ** 2, Ki: 1024, k: 1024, K: 1024, Ti: 1024 ** 4, T: 1024 ** 4, "": 1 }[m[2] || ""];
+  return parseFloat(m[1]) * mult;
 }
 
 function PurposeCard({ p, selected, lang, onSelect, retention }) {
@@ -52,7 +64,7 @@ function PurposeCard({ p, selected, lang, onSelect, retention }) {
     [t.keeps_data, meta.keep], [t.collects, meta.col], [t.sets_up, meta.set], [t.best_for, meta.best],
   ];
   return (
-    <button className="purpose" aria-pressed={selected} onClick={() => onSelect(p)}>
+    <button type="button" className="purpose" aria-pressed={selected} onClick={() => onSelect(p)} data-testid={`purpose-${p}`}>
       <span className="check"><Icon name="check" size={12} /></span>
       <div className="ph"><span className="picon"><Icon name={meta.icon} size={17} /></span>{meta.title}</div>
       <div className="pd">{meta.desc}</div>
@@ -66,78 +78,70 @@ function PurposeCard({ p, selected, lang, onSelect, retention }) {
   );
 }
 
-function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
+// One size as a column of the same rows, so the three compare at a glance.
+function SizeCard({ k, v, selected, fit, lang, t, onSelect }) {
+  const memB = qtyBytes(v.mem), diskB = qtyBytes(v.disk);
+  // "Cabem <b>5</b> no seu cluster": the count is the thing to read.
+  let fitNode = null;
+  if (fit) {
+    if (fit.count <= 0) fitNode = t.wiz_fit_none;
+    else if (fit.count === 1) fitNode = t.wiz_fit_one;
+    else { const [a, b] = t.wiz_fit.split("{0}"); fitNode = <>{a}<b>{fit.count}</b>{b}</>; }
+  }
+  return (
+    <button type="button" className="purpose size-card" aria-pressed={selected} onClick={() => onSelect(k)} data-testid={`size-${k}`}>
+      <span className="check"><Icon name="check" size={12} /></span>
+      <div className="ph"><span className="picon"><Icon name="server" size={16} /></span>{t[`size_${k}`] || v.label}</div>
+      {fitNode && <div className={`fit${fit.count <= 0 ? " none" : ""}`}>{fitNode}</div>}
+      <dl>
+        <dt>{t.wiz_mem_node}</dt><dd>{fmtQty(v.mem, lang)}</dd>
+        <dt>{t.wiz_heap}</dt><dd>{fmtQty(v.heap, lang)}</dd>
+        <dt>{t.wiz_disk_node}</dt><dd>{fmtQty(v.disk, lang)}</dd>
+        <dt>{t.wiz_total_mem}</dt><dd>{fmtGib(memB * v.nodes / GiB, lang)}</dd>
+        <dt>{t.wiz_total_disk}</dt><dd>{fmtGib(diskB * v.nodes / GiB, lang)}</dd>
+      </dl>
+      <div className="for">{t[`wiz_for_${k}`] || ""}</div>
+    </button>
+  );
+}
+
+function CreateView({ lang, hostNodes = [], capacity = null, onCreate, onCancel }) {
   const t = STR[lang];
   const fmt = (s, ...args) => s.replace(/\{(\d+)\}/g, (_, i) => String(args[+i] ?? "?"));
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [purpose, setPurpose] = useState("observability");
-  // OpenSearch version to deploy (ADR-048 rev. 2). The list is the backend's —
-  // the newest few it confirmed upstream, or the pinned catalog when the check
-  // never answered. `OTHER` reveals a free-text box; the backend still refuses
-  // a malformed tag or one whose images are not published.
   const [versions, setVersions] = useState([]);
   const [version, setVersion] = useState("");
+  const [customVersion, setCustomVersion] = useState("");
+  const [size, setSize] = useState("small");
+  const [sources, setSources] = useState({ kubernetes: true, "k8s-events": false });
+  const [advanced, setAdvanced] = useState(false);
+  const [extra, setExtra] = useState("");
+  const [sizes, setSizes] = useState(SIZES);
+  const [customMem, setCustomMem] = useState("");
+  const [customDisk, setCustomDisk] = useState("");
+  const [customHeap, setCustomHeap] = useState("");
+  const [storage, setStorage] = useState(null);
+  const [installingStorage, setInstallingStorage] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const submitted = useRef(false);
+  const [snapshot, setSnapshot] = useState(null);
+  const [retention, setRetention] = useState(BUILTIN_RETENTION);
+  const [retOverride, setRetOverride] = useState("");
+  const [cancelAsk, setCancelAsk] = useState(false);
 
-  // ── host-cluster honesty (#26/#32) — AFTER the state it reads: a const
-  // referencing `version` above its declaration is a TDZ crash at render, not
-  // a build error (caught live by the fleet probe). Both warnings are SILENT
-  // when hostNodes is empty (capacity unknown) — a guess rendered as a warning
-  // is worse than saying nothing. ────────────────────────────────────────────
+  // Host-cluster honesty (#26/#32): both warnings are SILENT when hostNodes
+  // is empty (capacity unknown).
   const singleCopy = hostNodes.length > 0 && hostNodes.length < 3;
   const kernelIncompat =
     hostNodes.some(n => (n.kernel_version || "").startsWith("6.1.0-52")) &&
     version.startsWith("3.8");
-  const [customVersion, setCustomVersion] = useState("");
-  const [size, setSize] = useState("small");
-  // K3S monitoring is a choice, not a baseline (#52): the Review step shows
-  // one default-checked toggle. The payload keeps the `sources` shape, so an
-  // unchecked toggle means the deployment is created with no monitors — the
-  // Integrations tab is the enable path after create, and the overview says
-  // "no monitors installed" honestly (#47).
-  const [sources, setSources] = useState({ kubernetes: true, "k8s-events": false });
-  // Workloads discover() found in the cluster, filtered to ones with a recipe
-  // we can ship (Detected.recipe). Drives the data-step pre-fill (#2 / ADR-018).
-  const [advanced, setAdvanced] = useState(false);
-  const [extra, setExtra] = useState("");
-  // Sizing tiers come from the backend (ADR-016, single source = k8s::sizing).
-  // Seed with the bundled SIZES so the wizard renders before the fetch resolves
-  // and still works offline; replace with the server's presets on mount.
-  const [sizes, setSizes] = useState(SIZES);
-  // Advanced "custom size" inputs; heap is resolved server-side (half memory).
-  const [customMem, setCustomMem] = useState("");
-  const [customDisk, setCustomDisk] = useState("");
-  const [customHeap, setCustomHeap] = useState("");
-  // Storage classification (ADR-031, flexible per ADR-061): only a cluster
-  // with NO default StorageClass at all means creating auto-installs Longhorn
-  // (needs_longhorn). We don't ASK — we inform: a heads-up on the review step
-  // before, and a live progress notice while it installs.
-  const [storage, setStorage] = useState(null);
-  // True while the create that auto-installs Longhorn is in flight — drives
-  // the live install notice. Distinct from `submitting`, which is every create.
-  const [installingStorage, setInstallingStorage] = useState(false);
-  // #56: the create request is out. Disables the button and says so from the
-  // first click; the ref is the synchronous half, because a second click can
-  // land before React re-renders the button disabled.
-  const [submitting, setSubmitting] = useState(false);
-  const submitted = useRef(false);
-  // Snapshot repository (ADR-049). `null` = the step was skipped, which is the
-  // default and costs nothing: the Backup tab configures it later just as well.
-  const [snapshot, setSnapshot] = useState(null);
-  // Default retention per purpose (ADR-062) and this deployment's override.
-  // An empty override means "the installation default" — the backend stamps
-  // whichever applies onto the new deployment.
-  const [retention, setRetention] = useState(BUILTIN_RETENTION);
-  const [retOverride, setRetOverride] = useState("");
 
-  // The data-sources step stays gone (day-2 integrations live in their tab);
-  // `sources` is decided on Review via the K3S toggle above (#52).
   const steps = [t.step_purpose, t.step_size, t.step_backup, t.step_review];
   const lastStep = steps.length - 1;
   const sz = sizes[size] || sizeMeta(size);
 
-  // Fetch the preset tiers once. On failure keep the bundled defaults — never
-  // surface a console error (the #32 gate fails the build on those).
   useEffect(() => {
     let live = true;
     API.sizingPresets()
@@ -147,21 +151,18 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
         list.forEach((p) => { m[p.name] = p; });
         setSizes(m);
       })
-      .catch(() => { /* offline / pre-auth: bundled SIZES stand in */ });
+      .catch(() => {});
     return () => { live = false; };
   }, []);
 
-  // The installation's retention defaults, once. Offline keeps the built-ins.
   useEffect(() => {
     let live = true;
     API.retentionDefaults()
       .then((d) => { if (live && d && d.observability_days) setRetention(d); })
-      .catch(() => { /* offline / pre-auth: built-in defaults stand in */ });
+      .catch(() => {});
     return () => { live = false; };
   }, []);
 
-  // Version choices, once. Offline/pre-auth leaves the select empty and the
-  // backend's own default applies — never a console error (the #32 gate).
   useEffect(() => {
     let live = true;
     API.availableVersions()
@@ -170,37 +171,27 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
         setVersions(v.versions);
         setVersion((prev) => prev || v.default || v.versions[0]);
       })
-      .catch(() => { /* offline: backend default applies */ });
+      .catch(() => {});
     return () => { live = false; };
   }, []);
 
-  // Advanced path posts the custom inputs to resolve the derived size — the
-  // backend applies the heap = half-memory rule so the UI never computes it.
   useEffect(() => {
     if (!advanced) return undefined;
     let live = true;
     API.customSizing(customMem, customDisk)
       .then((p) => { if (live && p && p.heap) setCustomHeap(p.heap); })
-      .catch(() => { /* keep the last resolved heap; no console noise */ });
+      .catch(() => {});
     return () => { live = false; };
   }, [advanced, customMem, customDisk]);
 
-  // Classify the cluster's default storage once on mount (read-only — never
-  // triggers an install). Drives the "will auto-install Longhorn" heads-up.
-  // On failure (offline / pre-auth) leave it null: the create flow proceeds and
-  // the backend gate still installs + the toast still reports it.
   useEffect(() => {
     let live = true;
     API.storageStatus()
       .then((s) => { if (live && s) setStorage(s); })
-      .catch(() => { /* no cluster / pre-auth: no heads-up, no console noise */ });
+      .catch(() => {});
     return () => { live = false; };
   }, []);
 
-  // While the create-triggered Longhorn install runs, poll the same read-only
-  // status so the progress notice updates (step → "installed") through the
-  // existing install-job snapshot, not a new channel. Stops on unmount (the
-  // parent navigates to the new deployment once create resolves).
   useEffect(() => {
     if (!installingStorage) return undefined;
     let live = true;
@@ -211,8 +202,6 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
     return () => { live = false; clearInterval(h); };
   }, [installingStorage]);
 
-  // "" means "let the backend decide" — an empty manual box must not be sent
-  // as a version, it must fall back to the default.
   const chosenVersion = version === OTHER_VERSION ? customVersion.trim() : version;
   const nameErr = nameError(name, t);
   const effDefault = defaultDays(purpose, retention);
@@ -222,15 +211,26 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
   const valid = name.trim().length > 0 && !nameErr && !retErr
     && (version !== OTHER_VERSION || !!chosenVersion);
 
-  // Only when the cluster has NO default StorageClass at all does creating
-  // auto-install Longhorn (ADR-061; needs_longhorn is false for a usable
-  // default, durable or warned-node-local). We inform, never ask: show a live
-  // install notice while the (blocking) create runs.
   const willInstallStorage = !!(storage && storage.needs_longhorn && !storage.durable);
-  // Nodes missing Longhorn prerequisites (`#15`, ADR-043): the backend maps
-  // each `MissingDependency` to a package + per-distro install commands.
-  // Creation is blocked until the list is empty.
   const missingPkgs = (storage && storage.missing_packages) || [];
+
+  // What this choice reserves, and how the cluster looks afterwards — the
+  // same totals the Capacity screen reads (requested when metrics are off).
+  const memNode = advanced ? customMem.trim() || sz.mem : sz.mem;
+  const diskNode = advanced ? customDisk.trim() || sz.disk : sz.disk;
+  const nodes = sz.nodes || 3;
+  const addMem = qtyBytes(memNode) * nodes;
+  const addDisk = qtyBytes(diskNode) * nodes;
+  const capRow = (res, add, total) => {
+    if (!res || !total) return null;
+    const used = res.used != null && capacity && capacity.metrics_available ? res.used : (res.requested ?? res.used ?? 0);
+    const before = (used / total) * 100;
+    const after = ((used + add) / total) * 100;
+    return { before, after, over: used + add > total };
+  };
+  const capMem = capacity ? capRow(capacity.mem, addMem, capacity.mem && capacity.mem.total) : null;
+  const capDisk = capacity && capacity.storage ? capRow(capacity.storage, addDisk, capacity.storage.total) : null;
+  const fitFor = (k) => (capacity && Array.isArray(capacity.fit)) ? capacity.fit.find(f => f.size === k) : null;
 
   async function finish() {
     if (submitted.current) return;
@@ -238,341 +238,276 @@ function CreateView({ lang, hostNodes = [], onCreate, onCancel }) {
     setSubmitting(true);
     if (willInstallStorage) setInstallingStorage(true);
     try {
-      // Resolves once the backend accepted the create; the parent navigates to
-      // the new deployment then, unmounting this view.
       await onCreate({
         name: name.trim() || "logs", purpose, size, sources, version: chosenVersion,
         extra: advanced ? extra : "",
-        // Custom-size overrides (ADR-016) only when Advanced is open; node count
-        // is never sent — it stays the fixed 3 the backend enforces.
         memory: advanced ? customMem.trim() : "",
         disk: advanced ? customDisk.trim() : "",
-        // Optional (ADR-049). The backend registers the repository only after the
-        // cluster goes green — the operator's reconciler needs it running.
         snapshot,
-        // Only an explicit override travels; otherwise the backend stamps the
-        // installation default (ADR-062).
         retentionDays: purpose !== "search" && retTrim && !retErr ? +retTrim : null,
       });
     } catch (e) {
-      // The parent already toasted the reason. Re-arm so the user can fix it
-      // and submit again.
       submitted.current = false;
       setSubmitting(false);
       setInstallingStorage(false);
     }
   }
 
+  const dirty = name.trim() || step > 0;
+  const purposeLabel = STR[lang]["p_" + (purpose === "observability" ? "obs" : purpose === "security" ? "sec" : "search") + "_t"];
+  const sizeLabel = advanced ? t.size_custom : (t[`size_${size}`] || sz.label);
+
+  const summary = (
+    <div className="card pad summary" data-testid="wizard-summary">
+      <h3 className="section-title">{t.wiz_summary}</h3>
+      <dl>
+        <dt>{t.name}</dt><dd>{name.trim() ? <span style={{ whiteSpace: "nowrap" }}>{name.trim()}<span style={{ color: "var(--text-3)" }}>-····</span></span> : "—"}{step !== 0 && <button type="button" className="edit" onClick={() => setStep(0)}>{t.wiz_edit}</button>}</dd>
+        <dt>{t.review_purpose}</dt><dd className="sans">{purposeLabel}</dd>
+        <dt>{t.version_label}</dt><dd>{chosenVersion || "—"}</dd>
+        {purpose !== "search" && <><dt>{t.ret_label}</dt><dd>{retDays ? fmt(t.ret_days_value, retDays) : "—"}</dd></>}
+        <dt>{t.review_size}</dt><dd className="sans">{sizeLabel} · <span className="mono">{fmtQty(memNode, lang)} · {fmtQty(diskNode, lang)}</span>{step !== 1 && <button type="button" className="edit" onClick={() => setStep(1)}>{t.wiz_edit}</button>}</dd>
+        <dt>{t.review_backup}</dt><dd className="sans">{snapshot ? (snapshot.bucket || t.wiz_backup_on) : t.wiz_backup_off}{step !== 2 && <button type="button" className="edit" onClick={() => setStep(2)}>{t.wiz_edit}</button>}</dd>
+      </dl>
+      {(capMem || capDisk) && (
+        <div className="cap">
+          <div className="ct">{t.wiz_cap_h}</div>
+          {[[t.wiz_cap_mem, capMem], [t.wiz_cap_disk, capDisk]].filter(([, c]) => c).map(([label, c]) => (
+            <div className="row" key={label}>
+              <div className="h"><span>{label}</span><b>{fmtInt(c.before, lang)}% → {fmtInt(Math.min(999, c.after), lang)}%</b></div>
+              <div className="bar2">
+                <i className={c.over ? "over" : "add"} style={{ width: `${Math.min(100, c.after)}%` }} />
+                <i style={{ width: `${Math.min(100, c.before)}%` }} />
+              </div>
+              {c.over && <span className="hint" style={{ color: "var(--danger-text)", fontSize: 12 }}>{fmt(t.wiz_cap_over, label.toLowerCase())}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="view-enter">
-      <h1 className="page-title">{t.nav_create}</h1>
-      <p className="lead">{t.create_lead}</p>
+      <PageHeader title={t.nav_create} lead={t.create_lead} />
 
-      {/* stepper */}
       <div className="stepper">
         {steps.map((s, i) => (
           <React.Fragment key={i}>
-            <div className={`step ${i === step ? "active" : ""} ${i < step ? "done" : ""}`}>
+            <button type="button" className={`step ${i === step ? "active" : ""} ${i < step ? "done" : ""}`}
+              style={{ background: "none", border: "none", padding: 0 }} disabled={i > step} onClick={() => i < step && setStep(i)}>
               <span className="node">{i < step ? <Icon name="check" size={13} /> : i + 1}</span>
               <span className="txt">{s}</span>
-            </div>
+            </button>
             {i < steps.length - 1 && <span className={`line ${i < step ? "done" : ""}`} />}
           </React.Fragment>
         ))}
       </div>
 
-      <div className="card pad">
-        {/* STEP 1 — name + purpose */}
-        {step === 0 && (
-          <div className="view-enter">
-            <Field label={t.name} hint={t.name_hint} htmlFor="create-name" error={nameErr}>
-              <input id="create-name" className={`input${nameErr ? " invalid" : ""}`} name="name"
-                placeholder={t.name_ph} value={name}
-                onChange={e => setName(e.target.value)} autoFocus />
-            </Field>
-            {/* OpenSearch version (ADR-048 rev. 2) — right after the name, so
-                the deployment's identity and its version are decided together.
-                A version is only chosen ONCE here: afterwards it moves solely
-                through the upgrade operation, which cannot be undone. */}
-            <Field label={t.version_label} hint={t.version_hint} htmlFor="create-version">
-              <select id="create-version" className="input" value={version}
-                onChange={e => setVersion(e.target.value)}>
-                {versions.map((v, i) => (
-                  <option key={v} value={v}>{v}{i === 0 ? ` · ${t.upg_note_current}` : ""}</option>
-                ))}
-                <option value={OTHER_VERSION}>{t.version_other}</option>
-              </select>
-              {/* #32: OpenSearch 3.8.0's bundled JDK dies on Debian kernel
-                  6.1.0-52 (fleet-proven, bare `ctr run` repro). A warn, not a
-                  refuse: the affected matrix is one observed combo, not a
-                  mapped boundary, and a kernel upgrade is the user's fix. */}
-              {kernelIncompat && (
-                <p className="hint" style={{ color: "var(--warn)", marginBottom: 0 }}>⚠ {t.kernel_bad_h}</p>
+      <div className="wizard">
+        <div className="card pad">
+          {/* STEP 1 — basics */}
+          {step === 0 && (
+            <div className="view-enter">
+              <h2 className="sub-title">{t.wiz_basic_h}</h2>
+              <p className="hint" style={{ marginBottom: 16 }}>{t.name_hint}</p>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
+                <Field label={t.name} htmlFor="create-name" error={nameErr}>
+                  <input id="create-name" className={`input mono${nameErr ? " invalid" : ""}`} name="name"
+                    placeholder={t.name_ph} value={name}
+                    onChange={e => setName(e.target.value)} autoFocus />
+                </Field>
+                <Field label={t.version_label} hint={t.version_hint} htmlFor="create-version">
+                  <select id="create-version" className="select mono" value={version}
+                    onChange={e => setVersion(e.target.value)}>
+                    {versions.map((v, i) => (
+                      <option key={v} value={v}>{v}{i === 0 ? ` · ${t.version_latest}` : ""}</option>
+                    ))}
+                    <option value={OTHER_VERSION}>{t.version_other}</option>
+                  </select>
+                </Field>
+              </div>
+              {version === OTHER_VERSION && (
+                <Field label={t.version_manual} hint={t.version_manual_hint} htmlFor="create-version-custom">
+                  <input id="create-version-custom" className="input mono" placeholder="3.8.0"
+                    value={customVersion} onChange={e => setCustomVersion(e.target.value)} />
+                </Field>
               )}
-            </Field>
-            {version === OTHER_VERSION && (
-              <Field label={t.version_manual} hint={t.version_manual_hint} htmlFor="create-version-custom">
-                <input id="create-version-custom" className="input" placeholder="3.8.0"
-                  value={customVersion} onChange={e => setCustomVersion(e.target.value)} />
-              </Field>
-            )}
+              {kernelIncompat && <Banner tone="warn" title={t.kernel_bad_h}>{t.kernel_bad_p}</Banner>}
 
-            <div className="section-title" style={{ marginTop: 22 }}>{t.purpose_q}</div>
-            <div className="purpose-grid">
-              {PURPOSES.map(p => (
-                <PurposeCard key={p} p={p} selected={purpose === p} lang={lang} retention={retention}
-                  onSelect={(np) => { setPurpose(np); setRetOverride(""); }} />
-              ))}
-            </div>
-            {/* ADR-062: the default is visible and overridable per deployment.
-                Afterwards the policy is the user's, inside OpenSearch. */}
-            {purpose !== "search" && (
-              <div style={{ marginTop: 16, maxWidth: 360 }}>
-                <Field label={t.ret_label} htmlFor="create-retention" error={retErr}
-                  hint={fmt(t.ret_wizard_hint, effDefault)}>
-                  <input id="create-retention" className={`input${retErr ? " invalid" : ""}`} inputMode="numeric"
-                    data-testid="create-retention" placeholder={String(effDefault)} value={retOverride}
-                    onChange={e => setRetOverride(e.target.value)} />
-                </Field>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* STEP 2 — size */}
-        {step === 1 && (
-          <div className="view-enter">
-            <Field label={t.size} hint={t.size_hint}>
-              <div style={{ display: "grid", gap: 10 }}>
-                {Object.entries(sizes).map(([k, v]) => (
-                  <button key={k} className="purpose" aria-pressed={size === k}
-                    onClick={() => setSize(k)} style={{ display: "flex", alignItems: "center", gap: 14, padding: 15 }}>
-                    <span className="check"><Icon name="check" size={12} /></span>
-                    <span style={{ color: size === k ? "var(--accent)" : "var(--text-3)" }}><Icon name="server" size={18} /></span>
-                    <span style={{ flex: 1, textAlign: "left" }}>
-                      <div style={{ fontFamily: "var(--font-mono)", fontWeight: 600, marginBottom: 2 }}>{v.label}</div>
-                      <div style={{ fontSize: 12.5, color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
-                        {v.nodes} {t.nodes} · {v.heap} heap · {v.disk} disk
-                      </div>
-                    </span>
-                  </button>
+              <div className="section-title" style={{ marginTop: 10 }}>{t.purpose_q}</div>
+              <div className="purpose-grid">
+                {PURPOSES.map(p => (
+                  <PurposeCard key={p} p={p} selected={purpose === p} lang={lang} retention={retention}
+                    onSelect={(np) => { setPurpose(np); setRetOverride(""); }} />
                 ))}
               </div>
-            </Field>
-
-            <button className="btn-link" style={{ marginTop: 6 }} onClick={() => setAdvanced(a => {
-              const next = !a;
-              // Seed the custom inputs from the selected preset the first time
-              // Advanced opens, so the resolved heap reflects a real starting point.
-              if (next && !customMem) { setCustomMem(sz.mem); setCustomDisk(sz.disk); }
-              return next;
-            })}>
-              <Icon name="chevR" size={12} style={{ transform: advanced ? "rotate(90deg)" : "none", transition: "transform .15s", verticalAlign: "middle", marginRight: 4 }} />
-              {t.advanced}
-            </button>
-            {advanced && (
-              <div className="view-enter" style={{ marginTop: 14, display: "grid", gap: 14, gridTemplateColumns: "1fr 1fr" }}>
-                <Field label={t.node_mem} tip={t.node_mem_hint}>
-                  <input className="input" value={customMem} onChange={e => setCustomMem(e.target.value)} />
-                </Field>
-                <Field label={t.disk}>
-                  <input className="input" value={customDisk} onChange={e => setCustomDisk(e.target.value)} />
-                </Field>
-                <Field label={t.jvm} tip={t.jvm_hint}>
-                  {/* Heap is server-resolved (half the memory) — always read-only. */}
-                  <input className="input" value={(() => { const h = customHeap || sz.heap; return `-Xms${h} -Xmx${h}`; })()} disabled />
-                </Field>
-                <Field label={t.node_count}>
-                  {/* Always 3 nodes (ADR-016) — fixed, never an override. */}
-                  <input className="input" value={sz.nodes} disabled />
-                </Field>
-                <div style={{ gridColumn: "1 / -1" }}>
-                  <Field label={t.extra} hint={t.extra_hint}>
-                    <textarea className="textarea" value={extra} onChange={e => setExtra(e.target.value)}
-                      placeholder={"indices.query.bool.max_clause_count: 2048"} />
+              {purpose !== "search" && (
+                <div style={{ marginTop: 16, maxWidth: 360 }}>
+                  <Field label={t.ret_label} htmlFor="create-retention" error={retErr}
+                    hint={fmt(t.ret_wizard_hint, effDefault)}>
+                    <input id="create-retention" className={`input${retErr ? " invalid" : ""}`} inputMode="numeric"
+                      data-testid="create-retention" placeholder={String(effDefault)} value={retOverride}
+                      onChange={e => setRetOverride(e.target.value)} />
                   </Field>
                 </div>
-              </div>
-            )}
-          </div>
-        )}
+              )}
+            </div>
+          )}
 
-        {/* STEP 3 — snapshot (optional, ADR-047) */}
-        {step === 2 && (
-          <SnapshotStep cfg={snapshot} onChange={setSnapshot} lang={lang} />
-        )}
-
-        {/* STEP 5 — review */}
-        {step === 3 && (
-          <div className="view-enter">
-            <div className="section-title">{t.review_h}</div>
-            <p className="hint" style={{ marginTop: -6, marginBottom: 18 }}>{t.review_p}</p>
-            {/* #26: one Longhorn copy per volume on a sub-3-node cluster —
-                the durability of the node-local storage the cluster arrived
-                with, and the reason snapshots exist. Stated, not hidden. */}
-            {singleCopy && (
-              <div style={{ display: "flex", gap: 10, alignItems: "flex-start", border: "1px solid var(--warn)", borderRadius: "var(--radius)", padding: "10px 14px", marginBottom: 14 }}>
-                <span aria-hidden="true" style={{ color: "var(--warn)" }}>⚠</span>
-                <span style={{ fontSize: 13.5 }}>
-                  <b>{t.single_copy_h}</b>
-                  <span style={{ color: "var(--text-2)" }}> — {fmt(t.single_copy_p, hostNodes.length)}</span>
-                </span>
-              </div>
-            )}
-            {/* #32: known host-kernel incompatibility — a warn, not a refuse. */}
-            {kernelIncompat && (
-              <div style={{ display: "flex", gap: 10, alignItems: "flex-start", border: "1px solid var(--warn)", borderRadius: "var(--radius)", padding: "10px 14px", marginBottom: 14 }}>
-                <span aria-hidden="true" style={{ color: "var(--warn)" }}>⚠</span>
-                <span style={{ fontSize: 13.5 }}>
-                  <b>{t.kernel_bad_h}</b>
-                  <span style={{ color: "var(--text-2)" }}> — {t.kernel_bad_p}</span>
-                </span>
-              </div>
-            )}
-            <div style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "4px 16px" }}>
-              {/* The suffix is generated server-side at submit (ADR-020); the
-                  old "-xxxx" read like a real value. */}
-              <div className="kvrow"><span className="k">{t.review_name}</span>
-                <span className="v">{name.trim() || "—"}<span style={{ color: "var(--text-3)" }}> · {t.review_suffix}</span></span>
-              </div>
-              <div className="kvrow"><span className="k">{t.review_purpose}</span><span className="v">{STR[lang]["p_" + (purpose === "observability" ? "obs" : purpose === "security" ? "sec" : "search") + "_t"]}</span></div>
-              <div className="kvrow"><span className="k">{t.ret_label}</span>
-                <span className="v" data-testid="review-retention">{retDays ? fmt(t.ret_days_value, retDays) : t.ret_forever}</span>
-              </div>
-              <div className="kvrow"><span className="k">{t.version_label}</span><span className="v">{chosenVersion || "—"}</span></div>
-              <div className="kvrow"><span className="k">{t.review_size}</span><span className="v">{advanced ? (lang === "pt" ? "Personalizado" : lang === "es" ? "Personalizado" : "Custom") : sz.label} · {sz.nodes} {t.nodes} · {(advanced && customHeap) || sz.heap} · {(advanced && customDisk) || sz.disk}</span></div>
-              <div className="kvrow">
-                <span className="k">{t.review_sources}</span>
-                <span className="v">
-                  {purpose === "search" ? "API" : (
-                    <label data-testid="rev-k3s-toggle" style={{ display: "inline-flex", gap: 8, alignItems: "center", cursor: "pointer" }}>
-                      <input type="checkbox" checked={!!sources.kubernetes}
-                        onChange={e => setSources(s => ({ ...s, kubernetes: e.target.checked }))} />
-                      {sources.kubernetes ? t.rev_k3s_label : t.review_none}
-                    </label>
-                  )}
-                </span>
-              </div>
-              <div className="kvrow">
-                <span className="k">{t.review_backup}</span>
-                <span className="v" data-testid="review-backup">
-                  {snapshot
-                    ? `${snapshot.bucket || "—"}${snapshot.policy && snapshot.policy.enabled ? ` · ${snapshot.policy.cron}` : ""}`
-                    : t.review_none}
-                </span>
+          {/* STEP 2 — size */}
+          {step === 1 && (
+            <div className="view-enter">
+              <h2 className="sub-title">{t.wiz_size_q}</h2>
+              <p className="hint" style={{ marginBottom: 16 }}>{t.wiz_size_p}</p>
+              {!advanced && (
+                <div className="purpose-grid">
+                  {Object.entries(sizes).map(([k, v]) => (
+                    <SizeCard key={k} k={k} v={v} selected={size === k} fit={fitFor(k)} lang={lang} t={t} onSelect={setSize} />
+                  ))}
+                </div>
+              )}
+              <button type="button" className="btn-link" style={{ marginTop: 12 }} data-testid="size-advanced" onClick={() => setAdvanced(a => {
+                const next = !a;
+                if (next && !customMem) { setCustomMem(sz.mem); setCustomDisk(sz.disk); }
+                return next;
+              })}>
+                <Icon name={advanced ? "chevD" : "chevR"} size={13} />
+                {advanced ? t.wiz_custom_close : t.wiz_custom}
+              </button>
+              {advanced && (
+                <div className="view-enter" style={{ marginTop: 14, display: "grid", gap: 14, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))" }}>
+                  <Field label={t.node_mem} tip={t.node_mem_hint} htmlFor="create-mem">
+                    <input id="create-mem" className="input mono" value={customMem} onChange={e => setCustomMem(e.target.value)} />
+                  </Field>
+                  <Field label={t.disk} htmlFor="create-disk">
+                    <input id="create-disk" className="input mono" value={customDisk} onChange={e => setCustomDisk(e.target.value)} />
+                  </Field>
+                  <div style={{ gridColumn: "1 / -1", display: "flex", gap: 24, flexWrap: "wrap" }}>
+                    <div className="fact">{t.jvm}: <b>{fmtQty(customHeap || sz.heap, lang)}</b></div>
+                    <div className="fact">{t.node_count}: <b>{sz.nodes}</b></div>
+                  </div>
+                  <div style={{ gridColumn: "1 / -1" }}>
+                    <Field label={t.extra} hint={t.extra_hint} htmlFor="create-extra">
+                      <textarea id="create-extra" className="textarea mono" value={extra} onChange={e => setExtra(e.target.value)}
+                        placeholder={"indices.query.bool.max_clause_count: 2048"} />
+                    </Field>
+                  </div>
+                </div>
+              )}
+              {/* The risks of THIS choice, where the choice is made. */}
+              <div style={{ marginTop: 18 }}>
+                {singleCopy && (
+                  <Banner tone="warn" title={t.single_copy_h}>{fmt(t.single_copy_p, hostNodes.length)}</Banner>
+                )}
+                {willInstallStorage && !installingStorage && (
+                  <Banner tone="info" icon="server" title={t.storage_will_install_h}>{t.storage_will_install_p}</Banner>
+                )}
               </div>
             </div>
-            {/* ADR-053: a pointer, not a decision. The stack is a day-2 install
-                — it needs a green cluster and PVCs, and its resource cost can
-                only be stated honestly once this deployment is allocated. */}
-            {purpose === "observability" && (
-              <p className="hint" style={{ marginTop: 12 }}>{t.review_otel_hint}</p>
-            )}
-            {/* Storage heads-up (ADR-031): no durable default SC → creating
-                auto-installs Longhorn. Inform before, not ask. */}
-            {willInstallStorage && !installingStorage && (
-              <div style={{
-                display: "flex", gap: 12, padding: 16, marginTop: 14, borderRadius: "var(--radius)",
-                background: "var(--info-soft)", border: "1px solid var(--border)", color: "var(--text-2)",
-              }}>
-                <span style={{ color: "var(--info)", flexShrink: 0 }}><Icon name="server" size={18} /></span>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>{t.storage_will_install_h}</div>
-                  <div style={{ fontSize: 13 }}>{t.storage_will_install_p}</div>
+          )}
+
+          {/* STEP 3 — backup (optional, ADR-047) */}
+          {step === 2 && (
+            <SnapshotStep cfg={snapshot} onChange={setSnapshot} lang={lang} />
+          )}
+
+          {/* STEP 4 — review: confirmation only */}
+          {step === 3 && (
+            <div className="view-enter">
+              <h2 className="sub-title">{t.review_h}</h2>
+              <p className="hint" style={{ marginBottom: 16 }}>{t.review_p}</p>
+              <div style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "4px 16px" }}>
+                <div className="kvrow"><span className="k">{t.review_name}</span>
+                  <span className="v">{name.trim() || "—"}<span style={{ color: "var(--text-3)" }}> · {t.review_suffix}</span></span>
+                </div>
+                <div className="kvrow"><span className="k">{t.review_purpose}</span><span className="v sans">{purposeLabel}</span></div>
+                <div className="kvrow"><span className="k">{t.ret_label}</span>
+                  <span className="v" data-testid="review-retention">{retDays ? fmt(t.ret_days_value, retDays) : t.ret_forever}</span>
+                </div>
+                <div className="kvrow"><span className="k">{t.version_label}</span><span className="v">{chosenVersion || "—"}</span></div>
+                <div className="kvrow"><span className="k">{t.review_size}</span><span className="v sans">{sizeLabel} · <span className="mono">{nodes} {t.nodes} · {fmtQty(memNode, lang)} · {fmtQty(diskNode, lang)}</span></span></div>
+                <div className="kvrow">
+                  <span className="k">{t.review_sources}</span>
+                  <span className="v sans">
+                    {purpose === "search" ? "API" : (
+                      <label className="check-row" data-testid="rev-k3s-toggle" style={{ justifyContent: "flex-end" }}>
+                        <input type="checkbox" checked={!!sources.kubernetes}
+                          onChange={e => setSources(s => ({ ...s, kubernetes: e.target.checked }))} />
+                        {sources.kubernetes ? t.rev_k3s_label : t.review_none}
+                      </label>
+                    )}
+                  </span>
+                </div>
+                <div className="kvrow">
+                  <span className="k">{t.review_backup}</span>
+                  <span className="v" data-testid="review-backup">
+                    {snapshot
+                      ? `${snapshot.bucket || "—"}${snapshot.policy && snapshot.policy.enabled ? ` · ${snapshot.policy.cron}` : ""}`
+                      : t.review_none}
+                  </span>
                 </div>
               </div>
-            )}
-            {/* Live install notice while the create-triggered Longhorn install
-                runs (progress from the shared install-job snapshot). */}
-            {installingStorage && (
-              <div style={{
-                display: "flex", gap: 12, padding: 16, marginTop: 14, borderRadius: "var(--radius)",
-                background: "var(--info-soft)", border: "1px solid var(--border)", color: "var(--text-2)",
-              }}>
-                <span style={{ color: "var(--info)", flexShrink: 0 }}><Icon name="server" size={18} /></span>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>
-                    {storage?.durable ? t.created_h : t.storage_installing_h}
-                  </div>
-                  <div style={{ fontSize: 13 }}>
-                    {storage?.durable ? t.storage_installed_p : t.storage_installing_p}
-                  </div>
-                  {storage?.installing && !storage?.durable && (
-                    <div className="hint" style={{ marginTop: 6, fontFamily: "var(--font-mono)", fontSize: 12.5 }}>
-                      {t.storage_step}: {storage.installing}
-                    </div>
-                  )}
-                  {storage?.error && (
-                    <div style={{ color: "var(--danger)", fontSize: 13, marginTop: 6, fontFamily: "var(--font-mono)" }}>
-                      {storage.error}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-            {/* Missing node packages (#15, ADR-043): Longhorn reported nodes
-                that can't run it. Per node: package + per-distro one-liners
-                (copyable) + the raw reason. Creation stays blocked meanwhile. */}
-            {missingPkgs.length > 0 && (
-              <div style={{
-                display: "flex", gap: 12, padding: 16, marginTop: 14, borderRadius: "var(--radius)",
-                background: "var(--danger-soft)", border: "1px solid var(--danger-border)", color: "var(--text-2)",
-              }}>
-                <span style={{ color: "var(--danger)", flexShrink: 0 }}><Icon name="shield" size={18} /></span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4, color: "var(--text)" }}>{t.storage_missing_h}</div>
-                  <div style={{ fontSize: 13, marginBottom: 10 }}>{t.storage_missing_p}</div>
+              {purpose === "observability" && <p className="hint" style={{ marginTop: 12 }}>{t.review_otel_hint}</p>}
+
+              {installingStorage && (
+                <Banner tone="info" icon="server" style={{ marginTop: 14 }}
+                  title={storage?.durable ? t.created_h : t.storage_installing_h}>
+                  {storage?.durable ? t.storage_installed_p : t.storage_installing_p}
+                  {storage?.installing && !storage?.durable && <div className="mono" style={{ marginTop: 6, fontSize: 12.5 }}>{t.storage_step}: {storage.installing}</div>}
+                  {storage?.error && <pre style={{ color: "var(--danger-text)" }}>{storage.error}</pre>}
+                </Banner>
+              )}
+              {missingPkgs.length > 0 && (
+                <Banner tone="danger" icon="shield" title={t.storage_missing_h} style={{ marginTop: 14 }}>
+                  <div style={{ marginBottom: 10 }}>{t.storage_missing_p}</div>
                   {missingPkgs.map((m, i) => (
-                    <div key={i} style={{
-                      padding: "10px 12px", marginTop: i ? 10 : 0, borderRadius: "var(--radius)",
-                      background: "var(--surface-2)", border: "1px solid var(--border)",
-                    }}>
-                      <div style={{ fontFamily: "var(--font-mono)", fontSize: 13, marginBottom: 6 }}>
+                    <div key={i} style={{ padding: "10px 12px", marginTop: i ? 10 : 0, borderRadius: "var(--radius)", background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+                      <div className="mono" style={{ fontSize: 13, marginBottom: 6 }}>
                         <strong>{m.node}</strong>
                         {m.package
-                          ? <> · {t.storage_missing_pkg}: <span style={{ color: "var(--danger)" }}>{m.package}</span></>
+                          ? <> · {t.storage_missing_pkg}: <span style={{ color: "var(--danger-text)" }}>{m.package}</span></>
                           : <span style={{ color: "var(--text-3)" }}> · {t.storage_missing_unknown}</span>}
                       </div>
                       {m.install && (
                         <div style={{ display: "grid", gap: 6 }}>
                           {[["Debian", m.install.debian], ["Ubuntu", m.install.ubuntu], ["Arch", m.install.arch]].map(([distro, cmd]) => (
                             <div key={distro} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                              <span style={{ fontSize: 11.5, color: "var(--text-3)", fontFamily: "var(--font-mono)", width: 52, flexShrink: 0 }}>{distro}</span>
+                              <span className="mono" style={{ fontSize: 11.5, color: "var(--text-3)", width: 52, flexShrink: 0 }}>{distro}</span>
                               <Copyable text={cmd} t={t} />
                             </div>
                           ))}
                         </div>
                       )}
-                      <div style={{ fontSize: 12, color: "var(--text-3)", fontFamily: "var(--font-mono)", marginTop: 6 }}>
-                        {t.storage_missing_reason}: {m.reason}
-                      </div>
+                      <div className="mono" style={{ fontSize: 12, color: "var(--text-3)", marginTop: 6 }}>{t.storage_missing_reason}: {m.reason}</div>
                     </div>
                   ))}
-                </div>
-              </div>
-            )}
-            {/* Provisioning is minutes, not seconds — say so before the click,
-                not with a spinner after it. */}
-            <p className="hint" style={{ marginTop: 14 }}>{t.create_eta}</p>
-          </div>
-        )}
+                </Banner>
+              )}
+              <p className="hint" style={{ marginTop: 14 }}>{t.create_eta}</p>
+            </div>
+          )}
 
-        {/* nav */}
-        <div className="hr" />
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-          <Btn variant="outline" icon="chevL" data-testid="wizard-back"
-            onClick={() => step === 0 ? onCancel() : setStep(s => s - 1)}>
-            {step === 0 ? t.cancel : t.back}
-          </Btn>
-          {step < lastStep
-            ? <Btn variant="primary" iconR="chevR" data-testid="wizard-next" disabled={step === 0 && !valid} onClick={() => setStep(s => s + 1)}>{t.next}</Btn>
-            : <Btn variant="primary" icon={submitting ? undefined : "spark"} data-testid="create-submit"
-                aria-busy={submitting} disabled={!valid || submitting || missingPkgs.length > 0} onClick={finish}>
-                {submitting && <span className="btn-spinner" aria-hidden="true" />}
-                {submitting ? t.create_submitting : t.create_btn}
-              </Btn>}
+          <div className="wiz-foot">
+            <Btn variant="outline" icon="chevL" data-testid="wizard-back"
+              onClick={() => step === 0 ? (dirty ? setCancelAsk(true) : onCancel()) : setStep(s => s - 1)}>
+              {step === 0 ? t.cancel : t.back}
+            </Btn>
+            {step < lastStep
+              ? <Btn variant="primary" iconR="chevR" data-testid="wizard-next" disabled={step === 0 && !valid} onClick={() => setStep(s => s + 1)}>{t.next}</Btn>
+              : <Btn variant="primary" icon={submitting ? undefined : "spark"} data-testid="create-submit"
+                  aria-busy={submitting} disabled={!valid || submitting || missingPkgs.length > 0} onClick={finish}>
+                  {submitting && <span className="btn-spinner" aria-hidden="true" />}
+                  {submitting ? t.create_submitting : t.create_btn}
+                </Btn>}
+          </div>
         </div>
+
+        <div className="aside">{summary}</div>
       </div>
+
+      <Confirm open={cancelAsk} title={t.wiz_cancel_h} body={t.wiz_cancel_p} icon="x"
+        confirmLabel={t.wiz_cancel_yes} cancelLabel={t.wiz_keep}
+        onCancel={() => setCancelAsk(false)} onConfirm={() => { setCancelAsk(false); onCancel(); }} />
     </div>
   );
 }

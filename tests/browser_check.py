@@ -67,7 +67,7 @@ with sync_playwright() as p:
     # 1. boot: the SPA probes /api/auth_state and mounts setup (first_run) or
     #    login. networkidle never fires (SSE) — settle on the rendered widget.
     page.goto(base, wait_until="domcontentloaded")
-    page.wait_for_selector('input[name="username"], nav.tabs', timeout=30000)
+    page.wait_for_selector('input[name="username"], [data-testid="nav-deployments"]', timeout=30000)
     is_setup = page.locator('input[name="confirm"]').count() > 0
     print(f"  boot screen: {'setup (first-run)' if is_setup else 'login'}")
 
@@ -95,14 +95,16 @@ with sync_playwright() as p:
             print("  passed through the bootstrap/conformity gate")
         except Exception:
             pass  # already ready — no gate
-    page.wait_for_selector("nav.tabs", timeout=600000)
+    page.wait_for_selector('[data-testid="nav-deployments"]', timeout=600000)
 
-    # 4. home mount: top tabs render (Status / Create / Settings).
+    # 4. home mount: the sidebar renders its three places (Deployments /
+    #    Capacity / Settings) and the list page is on.
     page.wait_for_timeout(1500)
-    if page.locator("nav.tabs button").count() < 3:
-        raise AssertionError("home tabs missing")
+    if page.locator("aside.sidebar .snav a").count() < 3:
+        raise AssertionError("sidebar navigation missing")
     body = page.inner_text("body")
-    assert "Status" in body, f"Status tab missing: {body[:200]}"
+    assert "Deployments" in body, f"Deployments missing: {body[:200]}"
+    assert page.url.rstrip("/").endswith("/deployments"), f"list is not at /deployments: {page.url}"
 
     # 5. create flow: drive the wizard up to review (do NOT submit).
     #    The Backup step (ADR-049) is skipped by just clicking next — that IS
@@ -116,8 +118,9 @@ with sync_playwright() as p:
     #
     #    Asserted rather than counted, so the next change to the wizard's shape
     #    fails here with a sentence instead of a Playwright timeout.
-    page.click("nav.tabs button:nth-child(2)")  # Create
+    page.click('[data-testid="create-deployment"], [data-testid="create-first"]')  # New deployment
     page.wait_for_selector(".stepper", timeout=10000)
+    assert page.url.endswith("/deployments/new"), f"wizard is not at /deployments/new: {page.url}"
     # `.stepper` interleaves `.step` with `.line` separators (4 steps + 3 lines),
     # so count the steps themselves, not the container's children.
     steps = page.locator(".stepper .step").count()
@@ -138,19 +141,23 @@ with sync_playwright() as p:
     #    the two rules must hold together: a busy deployment disables its save
     #    controls and says why, and delete is NEVER disabled — a provision that
     #    never finishes is exactly when the user needs it (invariant 4).
-    page.click("nav.tabs button:nth-child(1)")  # Status
+    page.click('[data-testid="nav-deployments"]')  # Deployments
     page.wait_for_timeout(800)
-    if page.locator(".cluster-card").count() > 0:
-        page.locator(".cluster-card [data-testid], .cluster-card button").first.click()
-        page.wait_for_selector("nav.tabs", timeout=15000)
+    if page.locator('[data-testid^="dep-row-"]').count() > 0:
+        page.locator(".dep-open").first.click()
+        page.wait_for_selector('[role="tablist"]', timeout=15000)
         page.wait_for_timeout(1200)
         busy = page.locator('[data-testid="activity-panel"]').count() > 0
+        assert "/deployments/" in page.url, f"deployment is not at /deployments/<id>: {page.url}"
 
-        assert page.locator('[data-testid="delete-deployment"]').count() == 0 or \
-            not page.locator('[data-testid="delete-deployment"]').is_disabled(), \
-            "delete must never be disabled, busy or not (ADR-050 invariant 4)"
+        # 6c. F5 keeps the place (the whole point of having a URL).
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_selector('[role="tablist"]', timeout=30000)
+        page.wait_for_timeout(1500)
+        assert page.url.endswith("/overview"), f"F5 lost the tab: {page.url}"
 
         if busy:
+            # The activity panel renders on the Overview; read it before leaving.
             panel = page.locator('[data-testid="activity-panel"]')
             kind = panel.get_attribute("data-activity-kind")
 
@@ -179,8 +186,15 @@ with sync_playwright() as p:
                     "the stall notice rendered no reason at all"
                 print(f"  stall reason rendered: {stall.inner_text()[:120]!r}")
 
-            assert page.locator('[data-testid="lock-notice"]').count() >= 0
-            page.locator('nav.tabs button:nth-child(2)').click()  # Edit tab
+        # Delete lives under Configuration (and the header menu), never on
+        # every tab — and is never disabled (ADR-050 invariant 4).
+        page.locator('[data-testid="dep-tab-config"]').click()
+        page.wait_for_selector('[data-testid="delete-deployment"]', timeout=10000)
+        assert not page.locator('[data-testid="delete-deployment"]').is_disabled(), \
+            "delete must never be disabled, busy or not (ADR-050 invariant 4)"
+        assert page.url.endswith("/config"), f"config tab has no URL: {page.url}"
+
+        if busy:
             page.wait_for_timeout(600)
             assert page.locator('[data-testid="edit-save"]').is_disabled(), \
                 f"save must be disabled while the deployment is {kind}"

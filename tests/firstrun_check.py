@@ -66,10 +66,10 @@ with sync_playwright() as p:
         # Supported cluster: no hard failures; bootstrap runs to the main tabs.
         assert "✗" not in report, f"unexpected failing requirement:\n{report}"
         # cert-manager + operator install can take minutes on a fresh cluster.
-        page.wait_for_selector("nav.tabs", timeout=600000)
+        page.wait_for_selector('[data-testid="nav-deployments"]', timeout=600000)
         page.wait_for_timeout(1500)
         body = page.inner_text("body")
-        assert "Status" in body, f"tabs missing after bootstrap: {body[:200]}"
+        assert "Deployments" in body, f"navigation missing after bootstrap: {body[:200]}"
         if shot:
             page.screenshot(path=shot, full_page=True)
         print("verdict: bootstrapped to main tabs")

@@ -7,15 +7,13 @@ deployment panel:
   login -> Create (4-step wizard: name+purpose / size / data / review)
         -> DOUBLE-click create -> exactly one deployment appears (#56)
         -> open detail
-        -> Overview / Edit / Integrations / Security tabs
-        -> Edit shows the automatic JVM field + no purpose cards
-        -> Security shows the password-reset form (2 password fields)
+        -> Overview / Data / Backup / Access / Configuration / Activity tabs
+        -> Configuration shows the automatic JVM heap + no purpose cards
+        -> Access shows the password reset (generated, never typed)
         -> clean up (delete via the confirm modal)
 
-The UI is a single-URL React SPA: screens are swapped by state, not routes,
-so we drive the rendered widgets. Top tabs (Status/Create/Settings) and the
-4 deployment-detail tabs are both `nav.tabs`; once a deployment is open the
-top tabs are hidden and the detail tabs are the only `nav.tabs`.
+Every screen has a URL (frontend/router.jsx), and the widgets carry stable
+data-testids: nav-*, create-deployment, dep-open-<id>, dep-tab-<key>.
 
 Usage: journey_check.py <base_url> <user> <pw>
 Requires the app connected to a real cluster (creates/deletes a CR).
@@ -27,9 +25,9 @@ base, user, pw = sys.argv[1], sys.argv[2], sys.argv[3]
 errors, console = [], []
 
 
-def detail_tab(n_from_end):
-    """The Nth-from-last button of the deployment-detail nav (the last nav.tabs)."""
-    return page.locator("nav.tabs").last.locator(f"button:nth-last-child({n_from_end})")
+def detail_tab(key):
+    """A deployment tab by its stable key: overview | data | backup | access | config | activity."""
+    return page.locator(f'[data-testid="dep-tab-{key}"]')
 
 
 def fail(msg):
@@ -51,14 +49,14 @@ with sync_playwright() as p:
     page.fill('input[name="username"]', user)
     page.fill('input[name="password"]', pw)
     page.click('button[type="submit"]')
-    page.wait_for_selector("nav.tabs", timeout=600000)  # bootstrap gate may run
+    page.wait_for_selector('[data-testid="nav-deployments"]', timeout=600000)  # bootstrap gate may run
 
-    # 2. Create tab (top tabs = Status / Create / Settings) -> 5-step wizard.
+    # 2. "New deployment" -> the 4-step wizard (/deployments/new).
     #    Driven by the stable test hooks (#33): the name input[name="name"],
     #    the wizard-next nav button, and the create-submit button.
     #    The Backup step (ADR-049) is skipped, so this journey also asserts a
     #    deployment created WITHOUT snapshots is created exactly as before.
-    page.click("nav.tabs button:nth-child(2)")
+    page.click('[data-testid="create-deployment"], [data-testid="create-first"]')
     page.wait_for_selector(".stepper", timeout=10000)
     page.fill('input[name="name"]', "journeytest")  # step 1: name (+ default purpose)
     page.locator('[data-testid="wizard-next"]').click()  # -> size
@@ -116,42 +114,38 @@ with sync_playwright() as p:
     # assertions below are about a MANAGED deployment, so wait for the lock to
     # lift. The sentinel (reset-pass) only RENDERS on the Security tab — go
     # there first, then wait for it enabled (it stays disabled while busy).
-    page.wait_for_selector("nav.tabs", timeout=20000)
-    detail_tab(2).click()
+    page.wait_for_selector('[role="tablist"]', timeout=20000)
+    detail_tab("access").click()
     page.wait_for_selector('[data-testid="reset-pass"]:not([disabled])', timeout=1800000)
     print(f"  {dep_name} settled (edits unlocked)")
 
-    # 4. detail tabs: the global nav STAYS inside a deployment (app.jsx:
-    #    "Global navigation stays put inside a deployment too") — the single
-    #    page holds TWO nav.tabs: the 4 top tabs, then the 6 detail tabs
-    #    (Overview / Edit / Integrations / Snapshot / Security / Auth).
-    #    Detail tabs are addressed inside the LAST nav, positionally from the
-    #    end — a bare `nav.tabs button:nth-last-child(N)` resolves in the FIRST
-    #    nav (top tabs) and navigates away from the deployment.
-    page.wait_for_selector("nav.tabs", timeout=20000)
+    # 4. detail tabs: six, grouped by task (overview / data / backup / access /
+    #    config / activity), each with its own URL.
+    page.wait_for_selector('[role="tablist"]', timeout=20000)
     page.wait_for_timeout(1000)
-    n_tabs = page.locator("nav.tabs button").count()
-    if n_tabs - 4 != 6:
-        fail(f"expected 6 detail tabs after the 4 global ones, got {n_tabs - 4}")
+    n_tabs = page.locator('[role="tab"]').count()
+    if n_tabs != 6:
+        fail(f"expected 6 deployment tabs, got {n_tabs}")
+    if not page.url.endswith(f"/deployments/{dep_name}/access"):
+        fail(f"the access tab has no URL of its own: {page.url}")
 
-    # 5. Edit tab: size <select>, automatic (disabled) JVM field, NO purpose cards.
-    detail_tab(5).click()
+    # 5. Configuration tab: size <select>, the automatic JVM heap as a FACT
+    #    (not a disabled input), NO purpose cards.
+    detail_tab("config").click()
     page.wait_for_selector("select.select", timeout=10000)
-    jvm = [page.locator("input[disabled]").nth(i).input_value()
-           for i in range(page.locator("input[disabled]").count())]
-    # The automatic JVM/heap field reads in the operator's short form since
-    # ADR-035 ("1536m"/"2g"), not the -Xms form the June wizard showed.
-    if not any(v.startswith("-Xms") or __import__("re").fullmatch(r"\d+[mMgG]", v.strip()) for v in jvm):
-        fail(f"Edit tab missing the automatic-JVM field (disabled inputs: {jvm})")
+    heap = page.locator('[data-testid="edit-heap"]').inner_text().strip()
+    # The heap is operator-derived (ADR-035), shown in GiB/MiB.
+    if not __import__("re").search(r"\d+(?:[.,]\d+)?\s*[GM]iB", heap):
+        fail(f"Configuration tab missing the automatic-JVM fact (got {heap!r})")
     if page.locator(".purpose-grid").count() or page.locator(".profile-cards").count():
-        fail("Edit tab must NOT show the purpose cards (purpose is fixed)")
+        fail("Configuration tab must NOT show the purpose cards (purpose is fixed)")
 
-    # 6. Security tab: credentials are REVEALED on demand and the admin
+    # 6. Access tab: credentials are REVEALED on demand and the admin
     #    password is GENERATED on reset — never chosen — so there are no
     #    password inputs. Assert the reset action + its confirm modal exist
     #    (and cancel out: this journey must not rotate credentials).
     import re as _re
-    detail_tab(2).click()
+    detail_tab("access").click()
     page.wait_for_timeout(800)
     n_pw = page.locator('input[type="password"]').count()
     if n_pw != 0:
@@ -162,10 +156,11 @@ with sync_playwright() as p:
     page.get_by_role("button", name=_re.compile("Cancelar|Cancel", _re.I)).last.click()
     page.wait_for_timeout(400)
 
-    # 7. cleanup — delete via the stable hooks (#33): the danger-zone
-    #    delete-deployment button arms the modal, delete-confirm commits it.
-    detail_tab(6).click()  # overview
-    page.wait_for_timeout(500)
+    # 7. cleanup — delete via the stable hooks (#33): the delete-deployment
+    #    button at the bottom of Configuration arms the modal, delete-confirm
+    #    commits it. (It is NOT on every tab any more.)
+    detail_tab("config").click()
+    page.wait_for_selector('[data-testid="delete-deployment"]', timeout=10000)
     page.click('[data-testid="delete-deployment"]')        # arm: opens the Confirm modal
     page.wait_for_selector('[data-testid="delete-confirm"]', timeout=5000)
     # type-to-confirm: the delete stays disabled until the deployment's name is
@@ -173,9 +168,11 @@ with sync_playwright() as p:
     page.fill('[data-testid="confirm-text"]', dep_name)
     page.click('[data-testid="delete-confirm"]')           # confirm delete -> go(status)
 
-    # Success = we left the detail: onDelete navigates home, so the crumb
-    # detaches and the top tabs return.
+    # Success = we left the detail: onDelete navigates to the list, so the
+    # crumb detaches and the URL is the list again.
     page.wait_for_selector(".crumb .cur", state="detached", timeout=30000)
+    if not page.url.rstrip("/").endswith("/deployments"):
+        fail(f"after delete the app is not on the list: {page.url}")
     print(f"  deleted {dep_name}")
 
     b.close()
@@ -187,5 +184,5 @@ if hyd or errors:
     for x in hyd + errors:
         print(" ", x)
     sys.exit(1)
-print("PASS — create→manage→delete journey OK; Overview/Edit/Integrations/Security present")
+print("PASS — create→manage→delete journey OK; six task tabs present, each with a URL")
 print(f"  ({len(console)} console msgs, 0 page errors)")
