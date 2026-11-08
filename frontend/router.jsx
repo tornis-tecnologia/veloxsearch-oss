@@ -95,10 +95,14 @@ function useRouter() {
 }
 
 // Where to send the user after a successful login: the `next` the server put
-// on its redirect (auth.rs), if it is a plain in-app path.
+// on its redirect (auth.rs), if it is a plain in-app path. Same rule as
+// auth.rs login_redirect, including the refusal of `//`: `//2130706433` is a
+// scheme-relative URL to 127.0.0.1, not a path. history.replaceState would
+// throw on it rather than leave the origin, but the query string is
+// attacker-controlled and the check should not lean on that.
 function nextAfterLogin() {
   const n = new URLSearchParams(window.location.search).get("next") || "";
-  return /^\/[A-Za-z0-9/_-]*$/.test(n) && n !== "/login" && n !== "/setup" ? n : "/deployments";
+  return /^\/(?!\/)[A-Za-z0-9/_-]*$/.test(n) && n !== "/login" && n !== "/setup" ? n : "/deployments";
 }
 
 export { useRouter, parse as parseRoute, pathFor, nextAfterLogin, TABS as DEPLOYMENT_TABS };
