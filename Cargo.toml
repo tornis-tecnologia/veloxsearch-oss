@@ -50,6 +50,11 @@ crate-type = ["rlib"]
 # identically (ADR-068). A path crate, not a module: the agent workspace must
 # depend on it without pulling in this crate's Kubernetes stack.
 velox-integrations = { path = "crates/velox-integrations", optional = true }
+# Compiling a policy into collector configuration. The core is where this
+# happens because it is the only side that holds VERIFIED packages (the
+# registry client and the signing keyring live here, ADR-039); Velox Mesh
+# stores and serves what the core compiled, and never needs the registry.
+velox-policy = { path = "crates/velox-policy", optional = true }
 axum = "0.8.0"
 # SPA static-file serving (ServeDir + index.html fallback) for the React build.
 tower-http = { version = "0.7", features = ["fs"], optional = true }
@@ -139,6 +144,7 @@ default = ["ssr"]
 # (Kept as a feature so the bare DTOs in `api` can still be compiled alone.)
 ssr = [
     "dep:velox-integrations",
+    "dep:velox-policy",
     "dep:tower-http",
     "dep:serde_yaml",
     "dep:kube",

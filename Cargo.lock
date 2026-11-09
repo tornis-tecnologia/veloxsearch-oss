@@ -2787,6 +2787,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "velox-policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "velox-integrations",
+]
+
+[[package]]
 name = "veloxsearch"
 version = "0.14.0"
 dependencies = [
@@ -2818,6 +2829,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "velox-integrations",
+ "velox-policy",
 ]
 
 [[package]]

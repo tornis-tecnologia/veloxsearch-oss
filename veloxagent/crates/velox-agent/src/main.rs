@@ -25,21 +25,55 @@
 //! ```
 
 mod preflight;
+mod runtime;
 mod supervisor;
 
-fn main() {
+/// `--flag value` out of the remaining arguments.
+fn flag(args: &[String], name: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == name)?;
+    args.get(i + 1).cloned()
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    // Install the process-wide rustls provider before any TLS use. Required,
+    // not defensive: reqwest is built on the `-no-provider` feature precisely
+    // so ring is not linked as a second provider, which leaves installing one
+    // to the caller. The core's `main()` does the same.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("version") => println!("velox-agent {}", env!("CARGO_PKG_VERSION")),
         Some("enroll") => {
-            eprintln!(
-                "velox-agent: enroll is not implemented yet (veloxagent/docs/PLAN.md fase 1)"
-            );
-            std::process::exit(2);
+            let (Some(mesh), Some(token)) = (flag(&args, "--mesh"), flag(&args, "--token")) else {
+                eprintln!("usage: velox-agent enroll --mesh URL --token TOKEN");
+                std::process::exit(64);
+            };
+            match runtime::enrol(&mesh, &token).await {
+                Ok(id) => {
+                    let paths = runtime::Paths::from_env();
+                    if let Err(e) = id.save(&paths) {
+                        eprintln!(
+                            "velox-agent: enrolled, but could not write {}: {e}",
+                            paths.dir.display()
+                        );
+                        std::process::exit(1);
+                    }
+                    println!("velox-agent: enrolled as {}", id.instance_uid);
+                    println!("state: {}", paths.dir.display());
+                }
+                Err(e) => {
+                    eprintln!("velox-agent: {e}");
+                    std::process::exit(1);
+                }
+            }
         }
         Some("run") => {
-            eprintln!("velox-agent: run is not implemented yet (veloxagent/docs/PLAN.md fase 1)");
-            std::process::exit(2);
+            if let Err(e) = runtime::run().await {
+                eprintln!("velox-agent: {e}");
+                std::process::exit(1);
+            }
         }
         // Implemented, because it is what makes ADR-069's bargain checkable:
         // the operator installs the engine, so the agent must be able to say

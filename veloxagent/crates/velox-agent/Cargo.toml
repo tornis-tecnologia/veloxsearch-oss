@@ -14,8 +14,18 @@ publish.workspace = true
 
 [dependencies]
 velox-opamp = { path = "../velox-opamp" }
+# Only to name the engine the way the compiler names it: a test here asserts
+# the key the agent looks for is the one `velox_policy::Engine` serialises,
+# so a rename on either side fails the build instead of silently delivering
+# an empty configuration.
+velox-policy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The check-in loop. Outbound only: the agent has no listening socket, which
+# is what lets it live behind NAT (ARCHITECTURE.md §4.3).
+reqwest.workspace = true
+rustls.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
