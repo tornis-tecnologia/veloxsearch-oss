@@ -2454,6 +2454,57 @@ mod server {
         Json(crate::mesh::status().await)
     }
 
+    /// The fleet in one read: where the operator is in the guided onboarding,
+    /// the policies, every agent's derived status and each policy's rollout.
+    /// The console never talks to the Mesh directly — the core holds the
+    /// session and the service token, and the Mesh's URL stays infrastructure.
+    async fn mesh_overview(_scope: Scope) -> Result<Json<serde_json::Value>, ApiError> {
+        crate::mesh::get_mesh("overview")
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
+
+    /// Compile a policy draft and store it as a new revision. Compiling
+    /// happens HERE because this is the only process holding verified
+    /// packages (ADR-039); the Mesh stores what it is handed.
+    async fn mesh_save_policy(
+        scope: Scope,
+        Json(req): Json<crate::mesh::PolicyDraft>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        // The destination must be a deployment this caller owns: a policy is
+        // a write of that deployment's data path.
+        let dep = scope.require(&req.deployment).await?;
+        let revision = crate::mesh::save_policy(&req, dep.namespace())
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(Json(serde_json::json!({ "revision": revision })))
+    }
+
+    /// Mint an enrollment token for a policy. Returned once; the Mesh keeps
+    /// only its hash.
+    async fn mesh_enrollment_token(
+        _scope: Scope,
+        Json(req): Json<serde_json::Value>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        crate::mesh::call_mesh("enrollment_token", &req)
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
+
+    /// Move an agent to another policy. No push: the agent's next check-in
+    /// sees a different hash and applies it.
+    async fn mesh_assign_policy(
+        _scope: Scope,
+        Json(req): Json<serde_json::Value>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        crate::mesh::call_mesh("assign_policy", &req)
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
+
     // -- integrations tab support (#76) ---------------------------------
 
     /// Uninstall an integration: tear down exactly the package's own
@@ -3118,6 +3169,10 @@ mod server {
         RoutePolicy { path: "/catalog_uninstall", policy: TenantScoped, note: "DELETES the package's teardown set from the deployment's OpenSearch; resolve-before-mutate, same surface as catalog_install." },
         RoutePolicy { path: "/integration_artifacts", policy: TenantScoped, note: "what a package brings (pipeline/template/index patterns/dashboards), read off the VERIFIED package; installation-wide metadata like /catalog, no deployment named, no write." },
         RoutePolicy { path: "/mesh_status", policy: AdminOnly, note: "whether a Velox Mesh is configured for this installation and reachable (ADR-068) — an install-level fact, and the URL is infrastructure a tenant has no use for." },
+        RoutePolicy { path: "/mesh_overview", policy: AdminOnly, note: "the whole fleet: onboarding step, policies, every agent's derived status, rollout per policy. Install-level — agents are hosts, not a tenant's deployment." },
+        RoutePolicy { path: "/mesh_save_policy", policy: TenantScoped, note: "compiles a policy against VERIFIED packages and stores it as a new revision; the destination deployment is resolve-before-mutate, because a policy writes that deployment's data path." },
+        RoutePolicy { path: "/mesh_enrollment_token", policy: AdminOnly, note: "mints a token that enrols a HOST into the fleet; install-level by nature." },
+        RoutePolicy { path: "/mesh_assign_policy", policy: AdminOnly, note: "moves a host between policies; install-level, same reason." },
         RoutePolicy { path: "/node_stats", policy: TenantScoped, note: "live cluster stats; unowned degrades to the empty snapshot." },
         RoutePolicy { path: "/metrics_series", policy: TenantScoped, note: "historical series out of the deployment's own index." },
         RoutePolicy { path: "/dashboard_credentials", policy: TenantScoped, note: "THE credential read — unowned is 404, never a password." },
@@ -3212,6 +3267,10 @@ mod server {
             .route(p("/catalog_uninstall"), post(catalog_uninstall))
             .route(p("/integration_artifacts"), post(integration_artifacts))
             .route(p("/mesh_status"), get(mesh_status))
+            .route(p("/mesh_overview"), get(mesh_overview))
+            .route(p("/mesh_save_policy"), post(mesh_save_policy))
+            .route(p("/mesh_enrollment_token"), post(mesh_enrollment_token))
+            .route(p("/mesh_assign_policy"), post(mesh_assign_policy))
             .route(p("/node_stats"), post(node_stats))
             .route(p("/metrics_series"), post(metrics_series))
             .route(p("/access_settings"), get(get_access_settings))

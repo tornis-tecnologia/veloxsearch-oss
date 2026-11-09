@@ -206,6 +206,12 @@ artefato para uma integração que tem duas.
   visível), `offline` (sem check-in por 5 min, fixo, igual ao Fleet), `parked`
   (sem assento, §6), `unenrolled`.
 
+> **Estado em 2026-11-09.** O 4.1–4.5 abaixo está implementado no essencial:
+> Postgres com as quatro tabelas, matrícula por token, check-in OpAMP,
+> revisões imutáveis, status derivado e a UI. Fora: atribuição por rótulos,
+> a fila `mesh_actions`, WebSocket e o `tenant_id` em uso (a coluna existe
+> desde a primeira migração, mas há um tenant só).
+
 ### 4.3 Protocolo: OpAMP sobre HTTP
 
 Agente inicia sempre; nada entra no host. `POST /v1/opamp` a cada 30 s ou

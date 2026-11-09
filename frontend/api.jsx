@@ -171,6 +171,19 @@ const API = {
   // install guide), configured but unreachable (show the URL and the error),
   // reachable (open the fleet). -> { configured, url, reachable, error }
   meshStatus: () => call("mesh_status", null, "GET"),
+  // The whole fleet in one read: where the operator is in the guided
+  // onboarding, the policies, every agent's DERIVED status (the Mesh stores
+  // facts, never a status column) and each policy's rollout.
+  // -> { onboarding, policies: [...], agents: [{status, up, applied_revision,
+  //      current_revision, config_error, ...}], rollout: {id: {...}}, seats, tier }
+  meshOverview: () => call("mesh_overview", null, "GET"),
+  // Compile a policy draft against VERIFIED packages and store it as a new
+  // revision. Agents pick it up on their next check-in; nothing is pushed.
+  meshSavePolicy: (draft) => call("mesh_save_policy", draft),
+  // Shown once — the Mesh keeps only its hash.
+  meshEnrollmentToken: (policy_id) => call("mesh_enrollment_token", { policy_id }),
+  meshAssignPolicy: (instance_uid, policy_id) =>
+    call("mesh_assign_policy", { instance_uid, policy_id }),
   // ── OTel observability stack (ADR-053) ───────────────────────
   // The SECOND collection option, additive to the recipes above: it ships OTLP
   // traces + metrics, which is what fills the Trace Analytics, service-map and

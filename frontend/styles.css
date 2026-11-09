@@ -1159,6 +1159,38 @@ button.badge { cursor: pointer; }
 .mesh-chip.on { color: var(--ok-text); border-color: var(--accent-border); }
 .mesh-chip svg { opacity: .8; }
 
+/* Velox Mesh: the fleet table and the guided first run. */
+.fleet { width: 100%; border-collapse: collapse; font-size: 13px; }
+.fleet th {
+  text-align: left; font-weight: 500; color: var(--text-3);
+  font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em;
+  padding: 0 12px 8px 0; border-bottom: 1px solid var(--border);
+}
+.fleet td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+.fleet tr:last-child td { border-bottom: none; }
+.fleet .fleet-err {
+  font-size: 11.5px; color: var(--danger-text); margin-top: 4px;
+  max-width: 42ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.onb-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.onb-step {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  font-size: 13.5px; color: var(--text-3);
+}
+.onb-step.now { background: var(--surface-2); color: var(--text); }
+.onb-step.ok { color: var(--text-2); }
+.onb-n {
+  width: 22px; height: 22px; flex-shrink: 0;
+  border-radius: 50%; background: var(--surface-3); color: var(--text-3);
+  font-family: var(--font-mono); font-size: 12px;
+  display: grid; place-items: center;
+}
+.onb-step.now .onb-n { background: var(--accent-soft); color: var(--ok-text); }
+.onb-step.ok .onb-n { color: var(--ok-text); }
+.onb-label { flex: 1; }
+
 .kvrow {
   display: flex; justify-content: space-between; gap: 16px;
   padding: 9px 0;

@@ -25,6 +25,10 @@ to notice:
     an operator is turning on.
   - **The Mesh's absence is a state, not an error.** A fresh install has no
     controller; the screen says how to get one instead of failing.
+  - **With a controller, the fleet is the product.** The guided first run is
+    ordered (exactly one step live, the earlier ones done), every agent row's
+    up/down agrees with its derived status, and the status reaches the screen
+    as a translated word rather than a raw enum.
   - Nothing renders an i18n key or `undefined` in any of three languages.
 
 Usage:
@@ -146,8 +150,13 @@ with sync_playwright() as p:
           "nginx shows collection + pipeline + template + index + dashboards")
     summary = page.locator('[data-testid="mesh-policy-summary"]').inner_text()
     check("nginx" in summary, "the policy summary names the integration")
-    check(page.locator('[data-testid="mesh-policy-save-blocked"]').count() == 1,
-          "saving is honestly blocked on the Mesh, not faked")
+    # Without a controller there is nothing to save to, and the screen says
+    # so rather than offering a button that cannot work. With one, the save
+    # step replaces that banner — asserted further down.
+    blocked = page.locator('[data-testid="mesh-policy-save-blocked"]').count()
+    savable = page.locator('[data-testid="mesh-policy-save"]').count()
+    check(blocked + savable == 1,
+          "either saving works or it is honestly blocked — never both, never neither")
 
     # kubernetes ships no pipeline — the inventory must reflect the package.
     if page.locator('[data-testid="mesh-integration-kubernetes"]').count():
@@ -157,6 +166,58 @@ with sync_playwright() as p:
         on = k.locator(".mesh-chip.on").count()
         off = k.locator(".mesh-chip:not(.on)").count()
         check(off >= 1, f"kubernetes shows what it does NOT ship (on={on}, off={off})")
+
+    # ---- the fleet, when a controller is configured ----------------------
+    # Without a Mesh these screens are the install guide and there is nothing
+    # to assert; with one, the fleet view is the product and every claim below
+    # is a thing that breaks silently.
+    page.click('[data-testid="mesh-tab-overview"]')
+    page.wait_for_selector('[data-testid="mesh-panel-overview"]', timeout=5000)
+    onb = page.locator('[data-testid="mesh-onboarding"], [data-testid="mesh-onboarding-done"]')
+    has_mesh = onb.count() > 0
+
+    if not has_mesh:
+        print("  · no Velox Mesh configured; fleet assertions skipped")
+    else:
+        # The guided first run is ORDERED: the step the Mesh says is live is
+        # the one marked, and the ones before it are done. A console that let
+        # an operator enrol an agent before a policy existed would be sending
+        # them to a dead end.
+        step = onb.first.get_attribute("data-step")
+        if step:
+            now = page.locator('.onb-step[data-state="now"]')
+            check(now.count() == 1, f"exactly one step is live (at {step})")
+            done = page.locator('.onb-step[data-state="ok"]').count()
+            idx = ["install_mesh", "create_policy", "enrol_agent", "await_first_apply"].index(step)
+            check(done == idx, f"the {idx} step(s) before it are done (got {done})")
+
+        page.click('[data-testid="mesh-tab-agents"]')
+        page.wait_for_selector('[data-testid="mesh-fleet"]', timeout=15000)
+        rows = page.locator('[data-testid="mesh-fleet"] tbody tr')
+        check(True, f"the fleet renders ({rows.count()} agent(s))")
+
+        for i in range(rows.count()):
+            r = rows.nth(i)
+            status = r.get_attribute("data-status")
+            up = r.get_attribute("data-up")
+            # up/down is NOT a second opinion on the status: it is derived
+            # from it, and the two must never disagree on screen.
+            expected_up = "0" if status in ("offline", "unenrolled") else "1"
+            check(up == expected_up, f"row {i}: {status} is up={expected_up}")
+            # The word is translated, never the raw enum leaking through.
+            check(status not in r.inner_text(), f"row {i}: the status is a word, not {status!r}")
+
+        # Adding a host is something you do while looking at the fleet, so the
+        # install guide stays on the same tab.
+        check(page.locator('[data-testid^="agents-panel-"]').count() == 1,
+              "the install guide sits under the fleet")
+
+        page.click('[data-testid="mesh-tab-policies"]')
+        page.wait_for_selector('[data-testid="mesh-policy-save"]', timeout=10000)
+        check(True, "a policy can be saved when a Mesh holds it")
+        if page.locator('[data-testid="mesh-rollout"]').count():
+            check(page.locator('[data-testid="mesh-rollout"] tr').count() > 0,
+                  "the rollout is shown per policy")
 
     if shot:
         page.screenshot(path=shot, full_page=True)

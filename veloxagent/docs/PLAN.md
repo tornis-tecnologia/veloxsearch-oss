@@ -377,11 +377,25 @@ Decisões que, erradas, custam a refazer tudo:
 
 ### Fase 1 — Mesh + Agent mínimos (8 semanas)
 
-A UI da jornada já existe no console (`/mesh`: visão geral, agentes,
-políticas) e o core já expõe `mesh_status` e `integration_artifacts`. O que
-falta é o controlador por trás dela: guardar políticas e revisões, matricular
-agentes e entregar a configuração. Até lá a aba de políticas monta e mostra,
-sem guardar — nada é simulado.
+**Feito (2026-11-09)**, verificado de ponta a ponta contra um Postgres real
+e um agente rodando:
+
+* **Mesh**: Postgres (`store.rs`, migração 001), `/v1/enroll` e `/v1/opamp`
+  para o agente, `/api/mesh/*` para o console atrás de um token de serviço.
+  Políticas com revisões imutáveis; segredos só em hash.
+* **Agente**: `enroll` e `run`. Identidade `0600`, preflight do motor,
+  supervisão (motor morto volta com backoff), aplicação segura
+  (staging → `--dry-run` → promoção → restart → rollback) e relato do
+  resultado com as palavras do motor.
+* **Status derivado** (`fleet.rs`, puro): `healthy`, `degraded`, `updating`,
+  `failed`, `offline`, `unenrolled`; *up/down* é só offline-ou-removido.
+  Rollout contado pelo eco dos agentes.
+* **Console**: jornada guiada e ordenada, frota com estado por host, salvar
+  política (o core compila contra pacotes verificados) e rollout por política.
+
+Falta da fase 1: atribuição por rótulos, ações (`upgrade`, `diagnostics`,
+`restart`), WebSocket, multi-tenant no Mesh e o pacote `.deb`/`.rpm` do
+agente.
 
 Meta: *um host fora do cluster matricula, recebe uma política com nginx e
 kubernetes-logs, grava no deployment, aparece saudável na UI.*

@@ -134,6 +134,111 @@ const TARGETS = [
   },
 ];
 
+/* ---- the fleet ------------------------------------------------------
+   The Mesh derives every status from facts it stored (last check-in, what
+   the agent echoed back); the console only renders the word and never
+   recomputes the rule, so "why is this agent red?" has one answer. --- */
+const STATUS_TONE = {
+  healthy: "green", degraded: "yellow", updating: "yellow",
+  failed: "red", offline: "red", unenrolled: "unknown",
+};
+
+/* The design system's `StatusPill` maps a word through `t.health_*`, which is
+   the CLUSTER's vocabulary (green/yellow/red). An agent's status is a
+   different set — updating, failed, offline — so this borrows the `.pill`
+   look and keeps its own words rather than bending health onto it. */
+function AgentPill({ status, t }) {
+  const tone = STATUS_TONE[status] || "unknown";
+  return (
+    <span className={`pill ${tone} sm`} data-status={status}>
+      <span className="dot" />{t[`mesh_st_${status}`] || status}
+    </span>
+  );
+}
+
+function seenAgo(ts, t) {
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - (ts || 0));
+  if (d < 5) return t.mesh_seen_now;
+  if (d < 60) return t.mesh_seen_s.replace("{n}", d);
+  if (d < 3600) return t.mesh_seen_m.replace("{n}", Math.floor(d / 60));
+  return t.mesh_seen_h.replace("{n}", Math.floor(d / 3600));
+}
+
+function FleetTable({ t, agents }) {
+  if (!agents || agents.length === 0) return <p className="hint">{t.mesh_fleet_empty}</p>;
+  return (
+    <table className="fleet" data-testid="mesh-fleet">
+      <thead>
+        <tr>
+          <th>{t.mesh_fleet_host}</th><th>{t.mesh_fleet_status}</th>
+          <th>{t.mesh_fleet_policy}</th><th>{t.mesh_fleet_rev}</th>
+          <th>{t.mesh_fleet_seen}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {agents.map(a => (
+          <tr key={a.instance_uid} data-testid={`fleet-row-${a.instance_uid.slice(0, 8)}`}
+            data-status={a.status} data-up={a.up ? "1" : "0"}>
+            <td className="mono">{a.hostname || a.instance_uid.slice(0, 12)}</td>
+            <td>
+              <AgentPill status={a.status} t={t} />
+              <span className="hint" style={{ marginLeft: 8 }}>{a.up ? t.mesh_up : t.mesh_down}</span>
+              {a.config_error && (
+                <div className="mono fleet-err" title={a.config_error}>{a.config_error}</div>
+              )}
+            </td>
+            <td className="mono">{a.policy_id || "—"}</td>
+            <td className="mono">
+              {a.applied_revision != null ? a.applied_revision : "—"}
+              {a.current_revision != null && a.applied_revision !== a.current_revision
+                && <span className="hint"> → {a.current_revision}</span>}
+            </td>
+            <td className="hint">{seenAgo(a.last_seen, t)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/* The guided first run. The order is a product rule, not a layout: a policy
+   with no controller to hold it, or an agent with no policy to run, is a
+   dead end. The Mesh decides which step is live (`fleet::onboarding`); this
+   only draws it. */
+const ONB_STEPS = ["install_mesh", "create_policy", "enrol_agent", "await_first_apply"];
+
+function Onboarding({ t, step, onTab }) {
+  if (step === "done") {
+    return <Banner tone="ok" title={t.mesh_onb_h} testid="mesh-onboarding-done">{t.mesh_onb_done}</Banner>;
+  }
+  const at = ONB_STEPS.indexOf(step);
+  const labels = [t.mesh_j1_h, t.mesh_j3_h, t.mesh_j2_h, t.mesh_j4_h];
+  const goes = [null, "policies", "agents", "policies"];
+  return (
+    <div className="onb" data-testid="mesh-onboarding" data-step={step}>
+      <h3 className="ag-h">{t.mesh_onb_h}</h3>
+      <p className="hint" style={{ margin: "0 0 14px", maxWidth: "70ch" }}>{t.mesh_onb_p}</p>
+      <ol className="onb-steps">
+        {labels.map((label, i) => {
+          const state = i < at ? "ok" : i === at ? "now" : "todo";
+          return (
+            <li key={label} className={`onb-step ${state}`} data-state={state}>
+              <span className="onb-n">{state === "ok" ? <Icon name="check" size={12} /> : i + 1}</span>
+              <span className="onb-label">{label}</span>
+              {state === "now" && <span className="badge yellow">{t.mesh_step_now}</span>}
+              {state === "ok" && <span className="hint">{t.mesh_step_ok}</span>}
+              {state === "now" && goes[i] && (
+                <Btn variant="ghost" size="sm" onClick={() => onTab(goes[i])}
+                  data-testid={`onb-go-${goes[i]}`}>{t[`mesh_tab_${goes[i]}`]}</Btn>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 /* A multi-line command with its own copy button. `Copyable` in ui.jsx is for
    single-line values (it ellipsises and never wraps); a repository stanza
    needs its lines kept. */
@@ -178,7 +283,7 @@ function DocsLink({ href, t }) {
 }
 
 /* ---- Tab 1: is there a Mesh, and what is the journey? ---------------- */
-function OverviewTab({ t, status, onToast, onTab }) {
+function OverviewTab({ t, status, overview, onToast, onTab }) {
   const notConfigured = !status || !status.configured;
   const unreachable = status && status.configured && status.reachable === false;
 
@@ -199,6 +304,12 @@ function OverviewTab({ t, status, onToast, onTab }) {
         <Banner tone="ok" title={t.mesh_ready_h} testid="mesh-ready" style={{ marginBottom: 18 }}>
           {t.mesh_ready_p.replace("{url}", status.url || "—")}
         </Banner>
+      )}
+
+      {overview && (
+        <div style={{ marginBottom: 22 }}>
+          <Onboarding t={t} step={overview.onboarding} onTab={onTab} />
+        </div>
       )}
 
       <h3 className="ag-h">{t.mesh_journey_h}</h3>
@@ -239,13 +350,21 @@ function OverviewTab({ t, status, onToast, onTab }) {
 }
 
 /* ---- Tab 2: get collection onto a host ------------------------------- */
-function AgentsTab({ t, onToast }) {
+function AgentsTab({ t, overview, onToast }) {
   const [target, setTarget] = useState(TARGETS[0].key);
   const d = TARGETS.find(x => x.key === target) || TARGETS[0];
   let n = 0;
 
   return (
     <>
+      {overview && (
+        <div className="ag-panel" style={{ borderTop: "1px solid var(--border)", borderRadius: "var(--radius)", marginBottom: 18 }}>
+          <h3 className="ag-h" style={{ marginBottom: 12 }}>{t.mesh_fleet_h}</h3>
+          <FleetTable t={t} agents={overview.agents} />
+        </div>
+      )}
+
+      <h3 className="ag-h" style={{ margin: "0 0 10px" }}>{t.mesh_add_host_h}</h3>
       <Banner tone="info" title={t.mesh_premise_h} style={{ margin: "0 0 14px" }}>
         <p style={{ margin: "0 0 10px" }}>{t.mesh_premise_p}</p>
         <div className="ag-facts">
@@ -344,8 +463,13 @@ function ArtifactChips({ a, t }) {
   );
 }
 
-function PoliciesTab({ t, deployments, onToast }) {
+function PoliciesTab({ t, deployments, overview, onReload, onToast }) {
   const [target, setTarget] = useState("");
+  const [name, setName] = useState("Web tier");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(null);
+  const [token, setToken] = useState(null);
+  const [saveErr, setSaveErr] = useState(null);
   const [catalog, setCatalog] = useState(null);
   const [picked, setPicked] = useState([]);
   const [artifacts, setArtifacts] = useState({});
@@ -448,9 +572,98 @@ function PoliciesTab({ t, deployments, onToast }) {
         )}
       </Step>
 
-      <Banner tone="warn" title={t.mesh_pol_save_h} testid="mesh-policy-save-blocked" style={{ marginTop: 18 }}>
-        {t.mesh_pol_save_p}
-      </Banner>
+      {/* Saving needs a controller. With one, this is the step that makes
+          the policy real: the core compiles it against verified packages and
+          the Mesh stores it as a new revision. */}
+      {overview ? (
+        <>
+          <Step n={4} title={t.mesh_save} t={t}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <input className="input" value={name} onChange={e => setName(e.target.value)}
+                aria-label={t.mesh_policy_name} data-testid="mesh-policy-name" style={{ maxWidth: 260 }} />
+              <Btn variant="primary" disabled={saving || picked.length === 0 || !target}
+                data-testid="mesh-policy-save"
+                onClick={async () => {
+                  setSaving(true); setSaveErr(null);
+                  try {
+                    const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "policy";
+                    const r = await API.meshSavePolicy({
+                      id, name: name.trim() || id, deployment: target, integrations: picked,
+                    });
+                    setSaved(r.revision);
+                    if (onToast) onToast(t.mesh_saved.replace("{rev}", r.revision), true);
+                    if (onReload) onReload();
+                  } catch (e) {
+                    setSaveErr(e.message);
+                    if (onToast) onToast(t.mesh_save_err, false);
+                  } finally { setSaving(false); }
+                }}>
+                {saving ? t.mesh_saving : t.mesh_save}
+              </Btn>
+              {saved != null && (
+                <span className="badge green" data-testid="mesh-policy-saved">
+                  {t.mesh_revision.replace("{n}", saved)}
+                </span>
+              )}
+            </div>
+            {saveErr && <Banner tone="danger" title={t.mesh_save_err} style={{ marginTop: 10 }}>{saveErr}</Banner>}
+          </Step>
+
+          <Step n={5} title={t.mesh_token_h} t={t}>
+            {saved == null ? (
+              <p className="hint">{t.mesh_need_policy}</p>
+            ) : (
+              <>
+                <Btn variant="ghost" icon="plus" data-testid="mesh-token-get"
+                  onClick={async () => {
+                    const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "policy";
+                    try {
+                      const r = await API.meshEnrollmentToken(id);
+                      setToken(r.token);
+                    } catch (e) { if (onToast) onToast(e.message, false); }
+                  }}>{t.mesh_token_get}</Btn>
+                {token && (
+                  <div style={{ marginTop: 10 }}>
+                    <CmdBlock t={t} onToast={onToast}
+                      text={`sudo velox-agent enroll --mesh MESH_URL --token ${token}`} />
+                    <p className="hint" style={{ marginTop: 6 }}>{t.mesh_token_once}</p>
+                  </div>
+                )}
+              </>
+            )}
+          </Step>
+
+          {overview.policies && overview.policies.length > 0 && (
+            <Step n={6} title={t.mesh_rollout_h} t={t}>
+              <table className="fleet" data-testid="mesh-rollout">
+                <tbody>
+                  {overview.policies.map(p => {
+                    const r = (overview.rollout || {})[p.id] || {};
+                    return (
+                      <tr key={p.id} data-testid={`rollout-${p.id}`} data-complete={r.complete ? "1" : "0"}>
+                        <td className="mono">{p.id}</td>
+                        <td>{t.mesh_rollout_p
+                          .replace("{current}", r.current || 0)
+                          .replace("{total}", r.total || 0)
+                          .replace("{rev}", p.current_revision)}</td>
+                        <td>
+                          {r.complete && <span className="badge green">{t.mesh_rollout_done}</span>}
+                          {r.updating > 0 && <span className="badge yellow">{t.mesh_rollout_wait.replace("{n}", r.updating)}</span>}
+                          {r.failed > 0 && <span className="badge red">{t.mesh_rollout_failed.replace("{n}", r.failed)}</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </Step>
+          )}
+        </>
+      ) : (
+        <Banner tone="warn" title={t.mesh_pol_save_h} testid="mesh-policy-save-blocked" style={{ marginTop: 18 }}>
+          {t.mesh_pol_save_p}
+        </Banner>
+      )}
     </div>
   );
 }
@@ -460,6 +673,8 @@ const TABS = ["overview", "agents", "policies"];
 function MeshView({ lang, tab, onTab, deployments, onToast }) {
   const t = STR[lang] || STR.pt;
   const [status, setStatus] = useState(null);
+  const [overview, setOverview] = useState(null);
+  const [tick, setTick] = useState(0);
   const active = TABS.includes(tab) ? tab : "overview";
 
   useEffect(() => {
@@ -472,6 +687,20 @@ function MeshView({ lang, tab, onTab, deployments, onToast }) {
     return () => { alive = false; };
   }, []);
 
+  // The fleet, refreshed on a cadence a little under the agents' own poll so
+  // "last seen" and a rollout move without the operator reloading. No Mesh
+  // (or no permission) simply leaves `overview` null and the screens fall
+  // back to explaining how to get one.
+  useEffect(() => {
+    let alive = true;
+    const load = () => API.meshOverview()
+      .then(o => { if (alive) setOverview(o); })
+      .catch(() => { if (alive) setOverview(null); });
+    load();
+    const h = setInterval(load, 10000);
+    return () => { alive = false; clearInterval(h); };
+  }, [tick]);
+
   return (
     <>
       <PageHeader title={t.nav_mesh} lead={t.mesh_lead} />
@@ -483,9 +712,12 @@ function MeshView({ lang, tab, onTab, deployments, onToast }) {
         ]}
         value={active} onChange={onTab} label={t.nav_mesh} testidPrefix="mesh-tab" />
 
-      {active === "overview" && <OverviewTab t={t} status={status} onToast={onToast} onTab={onTab} />}
-      {active === "agents" && <AgentsTab t={t} onToast={onToast} />}
-      {active === "policies" && <PoliciesTab t={t} deployments={deployments} onToast={onToast} />}
+      {active === "overview" && <OverviewTab t={t} status={status} overview={overview} onToast={onToast} onTab={onTab} />}
+      {active === "agents" && <AgentsTab t={t} overview={overview} onToast={onToast} />}
+      {active === "policies" && (
+        <PoliciesTab t={t} deployments={deployments} overview={overview}
+          onReload={() => setTick(x => x + 1)} onToast={onToast} />
+      )}
     </>
   );
 }

@@ -24,6 +24,7 @@
 //! again.
 
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// How long the console waits for the Mesh before calling it unreachable.
@@ -90,6 +91,184 @@ pub async fn status() -> MeshStatus {
             error: Some(e.to_string()),
         },
     }
+}
+
+// ---------------------------------------------------------------------------
+// Talking to the Mesh: compile here, store there
+// ---------------------------------------------------------------------------
+
+/// The console's side of a policy. The operator picks integrations and a
+/// destination; everything an agent needs is derived from that, here, because
+/// this is the only process that holds **verified** packages (ADR-039: the
+/// signing keyring is the whole security boundary, and one implementation of
+/// it is one attack surface). The Mesh stores and serves what it is handed
+/// and never calls the registry.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PolicyDraft {
+    pub id: String,
+    pub name: String,
+    /// The OpenSearch deployment the data lands in.
+    pub deployment: String,
+    /// Integration ids, in the order the operator added them.
+    pub integrations: Vec<String>,
+    /// Per-integration variables (schema 1.1), keyed by integration id.
+    #[serde(default)]
+    pub vars: BTreeMap<String, BTreeMap<String, String>>,
+    /// Published OpenSearch endpoint for agents outside the cluster; unset
+    /// means the in-cluster service name.
+    #[serde(default)]
+    pub os_host: Option<String>,
+}
+
+/// A `PackageStore` over packages this process fetched and verified.
+struct Verified(BTreeMap<(String, String), velox_integrations::Package>);
+
+impl velox_policy::PackageStore for Verified {
+    fn get(&self, id: &str, version: &str) -> Option<&velox_integrations::Package> {
+        self.0.get(&(id.to_string(), version.to_string()))
+    }
+}
+
+/// Fetch and verify every integration the draft names, compile the policy,
+/// and store it in the Mesh as a new revision.
+///
+/// Compiling here is what makes "add an integration" mean something: the
+/// agent gets the collection stanza, and `compiled.backend` names what the
+/// deployment must carry — which the core then installs with the same
+/// apply-engine the DaemonSet path uses, so both ends come from one package.
+pub async fn save_policy(draft: &PolicyDraft, namespace: &str) -> anyhow::Result<u64> {
+    use anyhow::Context as _;
+
+    let mut packages = BTreeMap::new();
+    let mut activations = Vec::new();
+    for id in &draft.integrations {
+        let artifacts = crate::catalog::artifacts(id)
+            .await
+            .with_context(|| format!("reading integration {id}"))?;
+        let fetched = crate::catalog::Registry::from_env()
+            .fetch_package(id)
+            .await?;
+        crate::catalog::verify_package(&fetched.manifest_yaml, &fetched.assets)
+            .with_context(|| format!("refusing to compile unverified integration {id}"))?;
+        let pkg = fetched.into_package()?;
+        packages.insert((id.clone(), artifacts.version.clone()), pkg);
+        activations.push(velox_policy::Activation {
+            package_id: id.clone(),
+            package_version: artifacts.version,
+            vars: draft.vars.get(id).cloned().unwrap_or_default(),
+        });
+    }
+
+    let policy = velox_policy::Policy {
+        id: draft.id.clone(),
+        name: draft.name.clone(),
+        // The Mesh owns revision numbering: it is the thing that knows what N
+        // already is, and two writers choosing N is how revisions collide.
+        revision: 0,
+        activations,
+        outputs: vec![velox_policy::Output::OpenSearch {
+            deployment: draft.deployment.clone(),
+        }],
+        agent: velox_policy::AgentSettings::default(),
+    };
+    let renderer = velox_policy::PackageRenderer {
+        store: &Verified(packages),
+        target: velox_policy::Target {
+            deployment: draft.deployment.clone(),
+            namespace: namespace.to_string(),
+            os_host: draft.os_host.clone(),
+        },
+    };
+    let compiled = velox_policy::compile(&policy, &renderer)
+        .map_err(|e| anyhow::anyhow!("compiling policy {}: {e}", draft.id))?;
+
+    let bodies: BTreeMap<String, String> = compiled
+        .bodies
+        .iter()
+        .map(|(engine, body)| {
+            let name = serde_json::to_value(engine)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{engine:?}"));
+            (name, body.clone())
+        })
+        .collect();
+
+    let out: serde_json::Value = call_mesh(
+        "put_policy",
+        &serde_json::json!({
+            "id": draft.id,
+            "name": draft.name,
+            "body": policy,
+            "compiled": bodies,
+            "compiled_hash": compiled.hash,
+        }),
+    )
+    .await?;
+    out.get("revision")
+        .and_then(|v| v.as_u64())
+        .context("the Mesh did not answer with a revision")
+}
+
+/// POST to the Mesh's console face with the shared service token. Every call
+/// goes through here so the token is read in one place and a Mesh that is not
+/// configured fails with one message.
+pub async fn call_mesh<T: serde::de::DeserializeOwned>(
+    path: &str,
+    body: &serde_json::Value,
+) -> anyhow::Result<T> {
+    let url = configured_url()
+        .ok_or_else(|| anyhow::anyhow!("no Velox Mesh is configured (VELOX_MESH_URL is unset)"))?;
+    let token = service_token()
+        .ok_or_else(|| anyhow::anyhow!("VELOX_MESH_SERVICE_TOKEN is unset on the control plane"))?;
+    let res = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?
+        .post(format!("{url}/api/mesh/{path}"))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await?;
+    read_mesh(res).await
+}
+
+/// GET the same way.
+pub async fn get_mesh<T: serde::de::DeserializeOwned>(path: &str) -> anyhow::Result<T> {
+    let url = configured_url()
+        .ok_or_else(|| anyhow::anyhow!("no Velox Mesh is configured (VELOX_MESH_URL is unset)"))?;
+    let token = service_token()
+        .ok_or_else(|| anyhow::anyhow!("VELOX_MESH_SERVICE_TOKEN is unset on the control plane"))?;
+    let res = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?
+        .get(format!("{url}/api/mesh/{path}"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    read_mesh(res).await
+}
+
+async fn read_mesh<T: serde::de::DeserializeOwned>(res: reqwest::Response) -> anyhow::Result<T> {
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        // The Mesh speaks the core's error shape, so its words reach the
+        // operator rather than a generic "request failed".
+        let msg = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str().map(str::to_string)))
+            .unwrap_or(text);
+        anyhow::bail!("the Mesh answered {status}: {msg}");
+    }
+    Ok(serde_json::from_str(&text)?)
+}
+
+/// The token this control plane authenticates to its Mesh with.
+pub fn service_token() -> Option<String> {
+    std::env::var("VELOX_MESH_SERVICE_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]

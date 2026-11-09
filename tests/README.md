@@ -94,8 +94,12 @@ to the tenant namespace.
 screens: the four-step journey, the per-target install guide (whose tab set
 mirrors the Fluent Bit project's own downloads index, ADR-069) and the policy
 composer, where turning on an integration must show both halves it brings.
-It needs Playwright and an authenticated install; it touches no cluster
-state, so it is safe against a live one.
+When a Velox Mesh is configured it also checks the fleet: the guided first
+run is ordered, each agent row's up/down agrees with its derived status, and
+a policy can be saved. Without one those are skipped, because the screens are
+then the install guide and there is nothing to assert. It needs Playwright
+and an authenticated install; it touches no cluster state, so it is safe
+against a live one.
 
 ## Fixtures
 
