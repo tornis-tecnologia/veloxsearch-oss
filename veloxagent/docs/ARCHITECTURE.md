@@ -118,10 +118,14 @@ source funciona sem alteração sob o Velox Mesh*. O que o time precisa manter:
 * A **verificação de assinatura** continua sendo a fronteira de segurança
   inteira. O Mesh só compila pacotes que `catalog::verify_package` aceitou,
   pelo mesmo keyring compilado.
-* O manifesto hoje não declara variáveis nem um asset para OTel. Para
-  políticas, o esquema precisa de duas extensões **na especificação**: `variables`
-  (nome, tipo, default, obrigatório) e um asset opcional `otel.yaml.tmpl`.
-  Pacotes sem elas continuam válidos (sem variáveis, só Fluent Bit).
+* O esquema **1.1** do manifesto traz as duas extensões que as políticas
+  pedem: `variables` (nome, tipo, default, obrigatório) e o asset opcional
+  `otel_config`. Variáveis não são tokens de interpolação: o template as
+  referencia como `${name}` e o engine substitui só os nomes declarados
+  (`docs/integrations/interpolation.md`). Pacotes 1.0 continuam válidos (sem
+  variáveis, só Fluent Bit), e o caminho DaemonSet do core preenche os
+  defaults — um `required` sem default torna o pacote não instalável ali, de
+  propósito.
 
 `velox-policy::FragmentRenderer` é a assinatura dessa fronteira; o fake nos
 testes dela mostra o contrato mínimo.

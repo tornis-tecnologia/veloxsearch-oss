@@ -24,7 +24,7 @@
 //! test and the spec, never something a package or a policy can introduce.
 
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// The closed, engine-owned interpolation variable set (`docs/integrations/
@@ -55,6 +55,9 @@ pub enum Error {
     Manifest(#[source] serde_yaml::Error),
     #[error("saved-objects.ndjson line {line}: {reason}")]
     SavedObjects { line: usize, reason: String },
+    /// A schema 1.1 variable the package or the policy got wrong.
+    #[error("variable `{name}`: {reason}")]
+    Variable { name: String, reason: String },
     #[error("{what}: {source}")]
     Io {
         what: String,
@@ -86,6 +89,9 @@ pub struct Manifest {
     pub assets: Assets,
     /// The explicit inventory uninstall removes.
     pub teardown: Teardown,
+    /// Schema 1.1 parameters; empty for every 1.0 package.
+    #[serde(default)]
+    pub variables: Vec<Variable>,
 }
 
 /// Asset filenames shipped in the package directory. `pipeline`/`index_template`
@@ -98,6 +104,34 @@ pub struct Assets {
     pub index_template: Option<String>,
     pub saved_objects: String,
     pub agent_config: String,
+    /// Schema 1.1: OpenTelemetry Collector template for the host engine. Only
+    /// Velox Agent runs it; the core digests and verifies it like any asset.
+    #[serde(default)]
+    pub otel_config: Option<String>,
+}
+
+/// How a policy value for a [`Variable`] is validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VarType {
+    String,
+    Integer,
+    Boolean,
+}
+
+/// One package parameter (schema 1.1). Referenced in the templates as
+/// `${name}`; **not** an interpolation token (`docs/integrations/
+/// interpolation.md`, "Package variables are not tokens"). `description` is
+/// for the UI and is not modeled here.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Variable {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: VarType,
+    #[serde(default)]
+    pub default: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// Everything a package creates in the customer's OpenSearch, so uninstall
@@ -143,6 +177,8 @@ pub struct Package {
     pub saved_objects: String,
     /// Raw `agent.conf.tmpl` (Fluent Bit config template).
     pub agent_config: String,
+    /// Raw `otel.yaml.tmpl` (schema 1.1; None when the package ships none).
+    pub otel_config: Option<String>,
 }
 
 /// Parse a `manifest.yaml` into the fields the engine reads.
@@ -174,14 +210,116 @@ impl Package {
         };
         let saved_objects = asset(&manifest.assets.saved_objects)?;
         let agent_config = asset(&manifest.assets.agent_config)?;
+        let otel_config = match &manifest.assets.otel_config {
+            Some(f) => Some(asset(f)?),
+            None => None,
+        };
         Ok(Package {
             manifest,
             pipeline,
             index_template,
             saved_objects,
             agent_config,
+            otel_config,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Package variables (schema 1.1) — declared holes, `${name}`, not tokens.
+// ---------------------------------------------------------------------------
+
+/// Resolve a package's declared variables against the values a policy set
+/// (`given`; empty on the core's DaemonSet path), falling back to `default`.
+/// Fails closed on: a name the manifest does not declare, a `required`
+/// variable with neither value nor default, a value or default of the wrong
+/// type, a multi-line value (it would splice a Fluent Bit directive), and a
+/// variable named after a closed token (the two syntaxes are one character
+/// apart). Returns `name → rendered value`, ready for [`apply_variables`].
+pub fn resolve_variables(
+    manifest: &Manifest,
+    given: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let declared: BTreeMap<&str, &Variable> = manifest
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), v))
+        .collect();
+    if let Some(name) = given.keys().find(|k| !declared.contains_key(k.as_str())) {
+        return Err(Error::Variable {
+            name: name.clone(),
+            reason: "not declared by the package manifest".into(),
+        });
+    }
+    let mut out = BTreeMap::new();
+    for v in &manifest.variables {
+        if CLOSED_TOKENS.contains(&v.name.as_str()) {
+            return Err(Error::Variable {
+                name: v.name.clone(),
+                reason: "shadows a closed interpolation token".into(),
+            });
+        }
+        let value = match (given.get(&v.name), &v.default) {
+            (Some(s), _) => check_type(&v.name, v.kind, s)?,
+            (None, Some(d)) => check_type(&v.name, v.kind, &yaml_scalar(&v.name, d)?)?,
+            (None, None) if v.required => {
+                return Err(Error::Variable {
+                    name: v.name.clone(),
+                    reason: "required and no value or default".into(),
+                })
+            }
+            (None, None) => continue,
+        };
+        out.insert(v.name.clone(), value);
+    }
+    Ok(out)
+}
+
+fn yaml_scalar(name: &str, v: &serde_yaml::Value) -> Result<String> {
+    match v {
+        serde_yaml::Value::String(s) => Ok(s.clone()),
+        serde_yaml::Value::Number(n) => Ok(n.to_string()),
+        serde_yaml::Value::Bool(b) => Ok(b.to_string()),
+        _ => Err(Error::Variable {
+            name: name.into(),
+            reason: "default is not a scalar".into(),
+        }),
+    }
+}
+
+fn check_type(name: &str, kind: VarType, s: &str) -> Result<String> {
+    let bad = |reason: &str| Error::Variable {
+        name: name.into(),
+        reason: reason.into(),
+    };
+    if s.chars().any(char::is_control) {
+        return Err(bad("value contains a control character or newline"));
+    }
+    match kind {
+        VarType::String => {}
+        VarType::Integer => {
+            s.parse::<i64>()
+                .map_err(|_| bad("value is not an integer"))?;
+        }
+        VarType::Boolean => {
+            if s != "true" && s != "false" {
+                return Err(bad("value is not `true` or `false`"));
+            }
+        }
+    }
+    Ok(s.to_string())
+}
+
+/// Substitute `${name}` for each resolved variable, and only those: any other
+/// `${...}` (an environment reference such as `${VELOX_OS_PASSWORD}`) passes
+/// through untouched. Run **before** [`render`]; the syntaxes do not overlap
+/// because a variable may not shadow a closed token.
+pub fn apply_variables(template: &str, vars: &BTreeMap<String, String>) -> String {
+    let mut out = template.to_string();
+    for (name, value) in vars {
+        out = out.replace(&format!("${{{name}}}"), value);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +707,9 @@ mod tests {
                     index_template: None,
                     saved_objects: "saved-objects.ndjson".into(),
                     agent_config: "agent.conf.tmpl".into(),
+                    otel_config: None,
                 },
+                variables: vec![],
                 teardown: Teardown {
                     ingest_pipeline: Some("demo".into()),
                     index_template: None,
@@ -584,7 +724,79 @@ mod tests {
             index_template: None,
             saved_objects: saved_objects.into(),
             agent_config: "[OUTPUT]\n    Index {index}\n".into(),
+            otel_config: None,
         }
+    }
+
+    fn with_variables(yaml_vars: &str) -> Manifest {
+        parse_manifest(&format!(
+            "id: demo\nindex: demo-logs\ndashboard: d\nassets:\n  saved_objects: s\n  agent_config: a\nteardown:\n  index_pattern: demo-logs\n  saved_objects: [d]\nvariables:\n{yaml_vars}"
+        ))
+        .unwrap()
+    }
+
+    /// Defaults fill what the policy did not set; a policy value wins; the
+    /// result substitutes `${{name}}` and nothing else.
+    #[test]
+    fn variables_resolve_from_policy_then_default_and_apply_as_dollar_braces() {
+        let m = with_variables(
+            "  - {name: path, type: string, description: {en: p}, default: /var/log/app.log}\n  - {name: port, type: integer, description: {en: p}, default: 8080}\n  - {name: tls, type: boolean, description: {en: t}, default: false}\n",
+        );
+        let given = BTreeMap::from([("port".to_string(), "9090".to_string())]);
+        let r = resolve_variables(&m, &given).unwrap();
+        assert_eq!(r["path"], "/var/log/app.log");
+        assert_eq!(r["port"], "9090");
+        assert_eq!(r["tls"], "false");
+        let t = "Path ${path}\n    Port ${port} tls=${tls} pw=${VELOX_OS_PASSWORD} {index}";
+        assert_eq!(
+            apply_variables(t, &r),
+            "Path /var/log/app.log\n    Port 9090 tls=false pw=${VELOX_OS_PASSWORD} {index}"
+        );
+    }
+
+    /// The five refusals, each naming the variable.
+    #[test]
+    fn variables_fail_closed() {
+        let m = with_variables(
+            "  - {name: path, type: string, description: {en: p}, required: true}\n",
+        );
+        let err = resolve_variables(&m, &BTreeMap::new()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "variable `path`: required and no value or default"
+        );
+
+        let given = BTreeMap::from([("other".to_string(), "x".to_string())]);
+        let err = resolve_variables(&m, &given).unwrap_err();
+        assert!(err
+            .to_string()
+            .starts_with("variable `other`: not declared"));
+
+        let given = BTreeMap::from([("path".to_string(), "a\nb".to_string())]);
+        assert!(resolve_variables(&m, &given)
+            .unwrap_err()
+            .to_string()
+            .contains("control character"));
+
+        let m = with_variables(
+            "  - {name: port, type: integer, description: {en: p}, default: eighty}\n",
+        );
+        assert!(resolve_variables(&m, &BTreeMap::new())
+            .unwrap_err()
+            .to_string()
+            .contains("not an integer"));
+
+        let m =
+            with_variables("  - {name: index, type: string, description: {en: p}, default: x}\n");
+        assert!(resolve_variables(&m, &BTreeMap::new())
+            .unwrap_err()
+            .to_string()
+            .contains("shadows a closed"));
+
+        // No variables declared, none given: the 1.0 case is a no-op.
+        let m = parse_manifest("id: a\nindex: b\ndashboard: c\nassets:\n  saved_objects: s\n  agent_config: a\nteardown:\n  index_pattern: b\n  saved_objects: [c]\n").unwrap();
+        assert!(m.variables.is_empty());
+        assert!(resolve_variables(&m, &BTreeMap::new()).unwrap().is_empty());
     }
 
     /// Install set == teardown set for a well-formed package, and the

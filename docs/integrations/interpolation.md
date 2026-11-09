@@ -59,6 +59,28 @@ These reconcile 1:1 with the set named in ADR-039:
 > re-syncs the Secret and restarts the pods once OpenSearch accepts the new
 > password). A package needs no change for this.
 
+## Package variables are not tokens (schema 1.1)
+
+A manifest at `schema_version: "1.1"` may declare `variables` (name, type,
+default, required — see `manifest.schema.json`). They exist so a Velox Mesh
+policy can parameterise an activation (a log path, a port) and so the core's
+DaemonSet path can fill the same holes from `default`. They do **not** widen
+the closed set above:
+
+- A declared variable is referenced as **`${name}`**, the shell/Fluent Bit
+  spelling, never as `{name}`. The engine (`velox_integrations::apply_variables`)
+  substitutes *exactly the declared names* and leaves every other `${...}`
+  alone — `${VELOX_OS_PASSWORD}`, which the agent builder injects, keeps
+  passing through to the collector untouched.
+- A variable may not be named after a closed token (`index`, `ns`, ...): the
+  engine refuses the package. The two syntaxes would otherwise be one
+  character apart.
+- Values are validated against the declared type and must be single-line
+  (`velox_integrations::resolve_variables`). A `required` variable with no
+  `default` makes the package un-installable on the DaemonSet path, which is
+  the author saying there is no sensible default.
+- The same declared variables apply to the optional `otel_config` asset.
+
 ## The rule
 
 1. The set above is **closed**. Adding a token is a **core change** (this doc +

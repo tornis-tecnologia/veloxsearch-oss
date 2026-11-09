@@ -26,9 +26,9 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 
 pub use velox_integrations::{
-    created_resources, parse_manifest, parse_saved_objects, render, saved_objects_bulk,
-    teardown_resources, Assets, Manifest, Package, ResourceKey, ResourceKind, Teardown, Vars,
-    CLOSED_TOKENS,
+    apply_variables, created_resources, parse_manifest, parse_saved_objects, render,
+    resolve_variables, saved_objects_bulk, teardown_resources, Assets, Manifest, Package,
+    ResourceKey, ResourceKind, Teardown, VarType, Variable, Vars, CLOSED_TOKENS,
 };
 
 /// The closed variable set for one deployment × package, resolved off the
@@ -86,7 +86,11 @@ pub async fn apply_package(deployment: &Deployment, pkg: &Package) -> Result<()>
         None => None,
     };
     let saved_objects = render(&pkg.saved_objects, &vars)?;
-    let agent_config = render(&pkg.agent_config, &vars)?;
+    // Schema 1.1 variables on the DaemonSet path: defaults only (there is no
+    // policy here); a `required` variable without a default refuses the
+    // install by name, before anything is written.
+    let declared = resolve_variables(&pkg.manifest, &BTreeMap::new())?;
+    let agent_config = render(&apply_variables(&pkg.agent_config, &declared), &vars)?;
 
     let base = crate::recipes::os_base(deployment);
     let c = crate::recipes::http()?;

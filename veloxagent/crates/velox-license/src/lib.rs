@@ -57,12 +57,37 @@ pub const DEFAULT_GRACE_DAYS: u32 = 30;
 /// crate are Unix seconds, UTC.
 const DAY: u64 = 86_400;
 
-/// Compiled-in licence-signing public keys: `(key id, raw 32-byte ed25519
-/// public key)`. Empty until the first issuing key is generated (veloxagent/keys/,
-/// private half never committed). An empty keyring means every signed
-/// document is rejected as `UnknownKey` — fail closed — while the free tier
-/// keeps working, because the free tier needs no document.
-pub const KEYRING: &[(&str, &[u8; 32])] = &[];
+/// The compiled-in licence-signing public keys, one `(key id, base64 of the
+/// raw 32-byte ed25519 key)` per file under `veloxagent/keys/` (its README
+/// has the format, custody and rotation rules). The private halves are never
+/// in the repository. Decoded once by [`keyring`]; a file that does not decode
+/// to 32 bytes fails the build's tests, not a customer's activation.
+const KEY_FILES: &[(&str, &str)] = &[(
+    "velox-license-2026-11",
+    include_str!("../../../keys/velox-license-2026-11.pub"),
+)];
+
+/// The keyring [`verify`] checks a document against: every key in
+/// [`KEY_FILES`], decoded. An unknown `key_id` is rejected as `UnknownKey` —
+/// fail closed — while the free tier keeps working, because the free tier
+/// needs no document.
+pub fn keyring() -> &'static [(&'static str, [u8; 32])] {
+    static KEYS: std::sync::OnceLock<Vec<(&'static str, [u8; 32])>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        KEY_FILES
+            .iter()
+            .map(|(id, b64)| {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64.trim())
+                    .unwrap_or_else(|e| panic!("keys/{id}.pub is not base64: {e}"));
+                let key: [u8; 32] = bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+                    panic!("keys/{id}.pub holds {} bytes, not 32", v.len())
+                });
+                (*id, key)
+            })
+            .collect()
+    })
+}
 
 /// The licence as the issuer writes it. Only the fields the Mesh reads are
 /// modelled; unknown fields are ignored so an issuer can add metadata (order
@@ -120,7 +145,7 @@ pub enum VerifyError {
 /// Verify `signed` against `keyring` and return the licence it carries.
 pub fn verify(
     signed: &SignedLicense,
-    keyring: &[(&str, &[u8; 32])],
+    keyring: &[(&str, [u8; 32])],
 ) -> Result<License, VerifyError> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let bytes = b64
@@ -325,9 +350,9 @@ mod tests {
     fn a_signed_document_verifies_and_the_three_rejects_are_distinct() {
         let kp = Ed25519KeyPair::generate().unwrap();
         let (signed, pk) = sign(&lic(25, None), &kp, "test-2026-11");
-        let keyring: &[(&str, &[u8; 32])] = &[("test-2026-11", &pk)];
+        let ring: &[(&str, [u8; 32])] = &[("test-2026-11", pk)];
 
-        assert_eq!(verify(&signed, keyring).unwrap().seats, 25);
+        assert_eq!(verify(&signed, ring).unwrap().seats, 25);
 
         // Unknown key: a Mesh older than the issuing key, or a wrong file.
         let other = SignedLicense {
@@ -335,7 +360,7 @@ mod tests {
             ..signed.clone()
         };
         assert_eq!(
-            verify(&other, keyring),
+            verify(&other, ring),
             Err(VerifyError::UnknownKey("test-2030-01".into()))
         );
 
@@ -346,7 +371,7 @@ mod tests {
             license: b64.encode(serde_json::to_vec(&edited).unwrap()),
             ..signed.clone()
         };
-        assert_eq!(verify(&tampered, keyring), Err(VerifyError::BadSignature));
+        assert_eq!(verify(&tampered, ring), Err(VerifyError::BadSignature));
 
         // Malformed: a paste error.
         let garbage = SignedLicense {
@@ -354,13 +379,13 @@ mod tests {
             ..signed.clone()
         };
         assert!(matches!(
-            verify(&garbage, keyring),
+            verify(&garbage, ring),
             Err(VerifyError::Malformed(_))
         ));
 
-        // The compiled-in keyring is empty today: fail closed.
+        // Against the compiled-in keyring a test key is unknown: fail closed.
         assert!(matches!(
-            verify(&signed, KEYRING),
+            verify(&signed, keyring()),
             Err(VerifyError::UnknownKey(_))
         ));
     }
@@ -372,5 +397,28 @@ mod tests {
         assert_eq!(l.grace_days, DEFAULT_GRACE_DAYS);
         assert_eq!(l.expires_at, None);
         assert!(l.features.is_empty());
+    }
+
+    /// The shipped keyring decodes, names the key by its file, and is the one
+    /// `verify` consults: a document signed by a test key is `UnknownKey`
+    /// against it, never `BadSignature` (the three rejects stay distinct).
+    #[test]
+    fn the_compiled_in_keyring_decodes_and_is_fail_closed() {
+        let ring = keyring();
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring[0].0, "velox-license-2026-11");
+        assert_ne!(ring[0].1, [0u8; 32]);
+
+        let kp = Ed25519KeyPair::generate().unwrap();
+        let (mut signed, _) = sign(&lic(5, None), &kp, "velox-license-2026-11");
+        assert_eq!(
+            verify(&signed, ring).unwrap_err(),
+            VerifyError::BadSignature
+        );
+        signed.key_id = "velox-license-2030-01".into();
+        assert!(matches!(
+            verify(&signed, ring),
+            Err(VerifyError::UnknownKey(_))
+        ));
     }
 }

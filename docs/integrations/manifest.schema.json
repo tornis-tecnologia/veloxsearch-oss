@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://veloxsearch.ai/schemas/integration-manifest-1.0.json",
+  "$id": "https://veloxsearch.ai/schemas/integration-manifest-1.1.json",
   "title": "VeloxSearch integration manifest",
   "description": "Schema for `manifest.yaml`, the declarative descriptor of an integration package (ADR-039). A package is pure data applied by the fixed core engine; this manifest names the assets, the index/dashboard they target, how the source is discovered, and what an uninstall must remove. The core validates every package against this schema on load and refuses any that does not conform. See docs/integrations/interpolation.md for the closed variable set assets may use and docs/integrations/signing.md for the signature block.",
   "type": "object",
@@ -20,9 +20,12 @@
   ],
   "properties": {
     "schema_version": {
-      "description": "Version of THIS manifest schema the package targets, so the engine can reject packages written against a schema it does not understand. Independent of the package's own `version`.",
+      "description": "Version of THIS manifest schema the package targets, so the engine can reject packages written against a schema it does not understand. Independent of the package's own `version`. `1.1` adds the optional `variables` and `assets.otel_config` (Velox Mesh, ADR-068); a package using either MUST declare `1.1`, so a core that only knows `1.0` refuses it instead of shipping a template with unfilled `${name}` holes.",
       "type": "string",
-      "const": "1.0"
+      "enum": [
+        "1.0",
+        "1.1"
+      ]
     },
     "id": {
       "description": "Stable package identifier. Also the ingest-pipeline id the core PUTs and the {recipe_id} interpolation value. DNS-label-safe; matches today's recipe ids (nginx, postgres, k8s-audit, ...).",
@@ -63,11 +66,22 @@
       "description": "OPTIONAL declarative predicate for detecting a candidate source in the customer's cluster (feeds #65's suggestion layer). Grounded in discovery.rs::match_recipe, which today matches a container image substring and yields a display kind. Omit for packages that are not workload-detected (kubernetes, ssh, k8s-audit, k8s-events monitor the cluster/nodes themselves, not a discovered image). Expressed as DATA only — never a code path.",
       "$ref": "#/$defs/discovery"
     },
+    "variables": {
+      "description": "OPTIONAL (schema 1.1). Parameters a Velox Mesh policy may set when it activates the package, and that the core's DaemonSet path fills from `default`. These are NOT interpolation tokens and do not widen the closed set (interpolation.md): a declared variable is referenced in `agent_config` / `otel_config` as `${name}` and the engine substitutes exactly the declared names, nothing else (`${VELOX_OS_PASSWORD}` and friends pass through untouched). A name in the closed set (`index`, `ns`, ...) is refused. A `required` variable without a `default` makes the package un-installable on the DaemonSet path, which is the point: the author is saying there is no sensible default.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/variable"
+      }
+    },
     "assets": {
       "description": "Filenames of the asset files shipped in the package directory, by logical role. `saved_objects` and `agent_config` are always present; `pipeline` and `index_template` are omitted by packages that need neither (e.g. kubernetes: dynamic mapping, no pipeline).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["saved_objects", "agent_config"],
+      "required": [
+        "saved_objects",
+        "agent_config"
+      ],
       "properties": {
         "pipeline": {
           "description": "Ingest-pipeline JSON, PUT to {os_host}/_ingest/pipeline/{id}. Grounded in configure_*'s pipeline PUT.",
@@ -84,6 +98,10 @@
         "agent_config": {
           "description": "Fluent Bit config template, interpolated then applied as the collector ConfigMap. Grounded in agents.rs::fluent_bit_conf. May use only the closed interpolation set.",
           "$ref": "#/$defs/asset_file"
+        },
+        "otel_config": {
+          "description": "OPTIONAL (schema 1.1). OpenTelemetry Collector configuration template for the host engine `otelcol`, interpolated with the same closed set and the same declared variables as `agent_config`. Only Velox Agent runs it (otelcol on a host is the exception, ARCHITECTURE.md §5.5); the core's DaemonSet path verifies and digests it like any asset but applies nothing from it.",
+          "$ref": "#/$defs/asset_file"
         }
       }
     },
@@ -91,7 +109,10 @@
       "description": "Explicit inventory of everything this package creates in the customer's OpenSearch, so uninstall removes exactly these and leaves nothing orphaned (ADR-039 'Uninstall becomes real' — today disable() only removes the agent). `ingest_pipeline`/`index_template` are optional to mirror `assets`.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["index_pattern", "saved_objects"],
+      "required": [
+        "index_pattern",
+        "saved_objects"
+      ],
       "properties": {
         "ingest_pipeline": {
           "description": "Id of the ingest pipeline to DELETE ({os_host}/_ingest/pipeline/<id>). Present iff assets.pipeline is.",
@@ -113,7 +134,10 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
@@ -121,12 +145,18 @@
       "description": "Detached-inline signature over the canonical package digest (see signing.md). The core rejects any package without a valid signature from a trusted key BEFORE applying anything — this is the entire security boundary, because packages are data.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["algorithm", "key_id", "value"],
+      "required": [
+        "algorithm",
+        "key_id",
+        "value"
+      ],
       "properties": {
         "algorithm": {
           "description": "Signature algorithm. Fixed to ed25519 for v1 (see signing.md recommendation).",
           "type": "string",
-          "enum": ["ed25519"]
+          "enum": [
+            "ed25519"
+          ]
         },
         "key_id": {
           "description": "Identifier of the public key in the core's built-in trusted keyring used to verify `value`. Unknown key_id => reject.",
@@ -153,11 +183,22 @@
       "description": "Localized string map. `en` required; `es`/`pt` optional but recommended. No other locales (closed set for the product's target markets).",
       "type": "object",
       "additionalProperties": false,
-      "required": ["en"],
+      "required": [
+        "en"
+      ],
       "properties": {
-        "en": { "type": "string", "minLength": 1 },
-        "es": { "type": "string", "minLength": 1 },
-        "pt": { "type": "string", "minLength": 1 }
+        "en": {
+          "type": "string",
+          "minLength": 1
+        },
+        "es": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pt": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "asset_file": {
@@ -169,7 +210,10 @@
     "discovery": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "any_of"],
+      "required": [
+        "kind",
+        "any_of"
+      ],
       "properties": {
         "kind": {
           "description": "Human display label for the detected source (match_recipe's display string, e.g. 'Nginx', 'MySQL / MariaDB'). Shown in the discovery/suggestion UI.",
@@ -180,7 +224,9 @@
           "description": "A source is a candidate for this package if ANY predicate matches (mirrors match_recipe returning the first needle hit). Each entry is exactly one predicate.",
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/discovery_predicate" }
+          "items": {
+            "$ref": "#/$defs/discovery_predicate"
+          }
         }
       }
     },
@@ -205,14 +251,86 @@
           "description": "Reserved (#65): all key/value pairs must be present on the workload's pod template labels.",
           "type": "object",
           "minProperties": 1,
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "ports": {
           "description": "Reserved (#65): all listed container ports must be declared by the workload.",
           "type": "array",
           "minItems": 1,
-          "items": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
         }
+      }
+    },
+    "variable": {
+      "description": "One package parameter. `name` is what the templates reference as `${name}`; `type` is how a policy value is validated (`integer` must parse as i64, `boolean` as `true`/`false`); `default` must be of that type. Values are single-line: a control character or newline in a value is refused, because it would splice a Fluent Bit directive.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "description"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,31}$"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "string",
+            "integer",
+            "boolean"
+          ]
+        },
+        "description": {
+          "$ref": "#/$defs/i18n"
+        },
+        "default": {
+          "type": [
+            "string",
+            "integer",
+            "boolean"
+          ]
+        },
+        "required": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    }
+  },
+  "if": {
+    "anyOf": [
+      {
+        "required": [
+          "variables"
+        ]
+      },
+      {
+        "properties": {
+          "assets": {
+            "required": [
+              "otel_config"
+            ]
+          }
+        },
+        "required": [
+          "assets"
+        ]
+      }
+    ]
+  },
+  "then": {
+    "properties": {
+      "schema_version": {
+        "const": "1.1"
       }
     }
   }

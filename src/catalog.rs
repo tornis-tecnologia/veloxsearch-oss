@@ -417,12 +417,19 @@ impl FetchedPackage {
             .transpose()?;
         let saved_objects = text(&manifest.assets.saved_objects)?;
         let agent_config = text(&manifest.assets.agent_config)?;
+        let otel_config = manifest
+            .assets
+            .otel_config
+            .as_deref()
+            .map(text)
+            .transpose()?;
         Ok(crate::integrations::Package {
             manifest,
             pipeline,
             index_template,
             saved_objects,
             agent_config,
+            otel_config,
         })
     }
 }

@@ -172,12 +172,11 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
             .store
             .get(&activation.package_id, &activation.package_version)
             .ok_or_else(|| "package is not in the verified store".to_string())?;
-        // The manifest declares no variables yet (PLAN.md fase 0, item 2);
-        // until the spec gains them, a policy that sets any is wrong, not
-        // silently ignored.
-        if let Some(k) = activation.vars.keys().next() {
-            return Err(format!("package declares no variables (got '{k}')"));
-        }
+        // Schema 1.1 variables: validated against the manifest, defaults
+        // filled, unknown names refused — the same function the core's
+        // DaemonSet path runs with an empty policy map.
+        let resolved = velox_integrations::resolve_variables(&pkg.manifest, &activation.vars)
+            .map_err(|e| e.to_string())?;
         // Today's templates bake `out_opensearch` in. A gateway output needs
         // the `out_http` rewrite the phase-3 contract defines
         // (ARCHITECTURE.md §5.2); refuse rather than ship a config that
@@ -206,12 +205,21 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
         if let Some(h) = &self.target.os_host {
             vars = vars.with_os_host(h);
         }
-        let body =
-            velox_integrations::render(&pkg.agent_config, &vars).map_err(|e| e.to_string())?;
-        Ok(vec![Fragment {
+        let render = |tmpl: &str| {
+            velox_integrations::render(&velox_integrations::apply_variables(tmpl, &resolved), &vars)
+                .map_err(|e| e.to_string())
+        };
+        let mut out = vec![Fragment {
             engine: Engine::FluentBit,
-            body,
-        }])
+            body: render(&pkg.agent_config)?,
+        }];
+        if let Some(otel) = &pkg.otel_config {
+            out.push(Fragment {
+                engine: Engine::OtelCollector,
+                body: render(otel)?,
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -383,7 +391,9 @@ mod tests {
                     index_template: None,
                     saved_objects: "saved-objects.ndjson".into(),
                     agent_config: "agent.conf.tmpl".into(),
+                    otel_config: None,
                 },
+                variables: vec![],
                 teardown: Teardown {
                     ingest_pipeline: None,
                     index_template: None,
@@ -398,7 +408,33 @@ mod tests {
             index_template: None,
             saved_objects: String::new(),
             agent_config: agent_config.into(),
+            otel_config: None,
         }
+    }
+
+    /// A schema-1.1 package: one variable with a default, one required, and
+    /// an OTel asset.
+    fn parameterised() -> Package {
+        let mut pkg = nginx_like(
+            "[INPUT]\n    Path ${path}\n    Port ${port}\n[OUTPUT]\n    Index {index}\n",
+        );
+        pkg.manifest.variables = vec![
+            velox_integrations::Variable {
+                name: "path".into(),
+                kind: velox_integrations::VarType::String,
+                default: Some("/var/log/nginx/access.log".into()),
+                required: false,
+            },
+            velox_integrations::Variable {
+                name: "port".into(),
+                kind: velox_integrations::VarType::Integer,
+                default: None,
+                required: true,
+            },
+        ];
+        pkg.otel_config =
+            Some("receivers:\n  filelog:\n    include: [${path}]\n# {recipe_id}\n".into());
+        pkg
     }
 
     struct Store(BTreeMap<(String, String), Package>);
@@ -508,7 +544,7 @@ mod tests {
             .vars
             .insert("path".into(), "/var/log/x".into());
         assert!(
-            matches!(compile(&p, &r), Err(CompileError::Render { ref reason, .. }) if reason.contains("declares no variables"))
+            matches!(compile(&p, &r), Err(CompileError::Render { ref reason, .. }) if reason.contains("not declared"))
         );
 
         let mut p = policy(&["nginx"]);
@@ -525,6 +561,39 @@ mod tests {
         }];
         assert!(
             matches!(compile(&p, &r), Err(CompileError::Render { ref reason, .. }) if reason.contains("'other'"))
+        );
+    }
+
+    /// Schema 1.1 end to end: the policy value wins over the default, the
+    /// default fills what the policy left out, a missing required variable
+    /// is refused by name, and the OTel asset becomes the second fragment
+    /// with the same substitutions.
+    #[test]
+    fn package_renderer_applies_declared_variables_and_renders_the_otel_asset() {
+        let mut m = BTreeMap::new();
+        m.insert(("nginx".to_string(), "1.0.0".to_string()), parameterised());
+        let s = Store(m);
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+
+        let mut p = policy(&["nginx"]);
+        p.activations[0].vars.insert("port".into(), "8081".into());
+        let c = compile(&p, &r).unwrap();
+        let fb = &c.bodies[&Engine::FluentBit];
+        assert!(fb.contains("Path /var/log/nginx/access.log"), "{fb}");
+        assert!(fb.contains("Port 8081"), "{fb}");
+        assert!(fb.contains("Index nginx-logs"), "{fb}");
+        let otel = &c.bodies[&Engine::OtelCollector];
+        assert_eq!(
+            otel,
+            "receivers:\n  filelog:\n    include: [/var/log/nginx/access.log]\n# nginx\n"
+        );
+
+        let p = policy(&["nginx"]);
+        assert!(
+            matches!(compile(&p, &r), Err(CompileError::Render { ref reason, .. }) if reason == "variable `port`: required and no value or default")
         );
     }
 }

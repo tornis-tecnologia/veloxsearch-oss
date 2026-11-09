@@ -345,12 +345,27 @@ Decisões que, erradas, custam a refazer tudo:
    liga `veloxsearch` nem `kube`.
 2. **Esquema de manifesto**: `variables` e asset opcional `otel.yaml.tmpl` em
    `docs/integrations/manifest.schema.json` + validador. Mudança de especificação.
+   **Feito (2026-11-09)** como `schema_version: "1.1"`: `variables` (nome,
+   tipo, default, obrigatório) e `assets.otel_config`, opcionais; pacote que
+   usa qualquer um deve declarar 1.1. Variáveis **não** são tokens: entram
+   como `${name}` e só os nomes declarados são substituídos
+   (`velox_integrations::resolve_variables` / `apply_variables`,
+   interpolation.md). O validador JSON-Schema continua no registry.
 3. **OpAMP**: fechar o subconjunto de mensagens (`velox-opamp`), gerar tipos a
    partir do `.proto` oficial com `prost` ao lado do JSON, testes de
    compatibilidade contra `opamp-go` (servidor de exemplo) para não divergir
-   do padrão.
+   do padrão. **Parcial (2026-11-09)**: o `.proto` oficial está vendorizado
+   em `velox-opamp/proto/` (Apache-2.0, commit registrado no NOTICE) e um
+   teste lê o arquivo e prova que cada campo e cada variante do JSON existe
+   na mensagem de mesmo nome. `prost` e o teste contra `opamp-go` ficam para
+   o marco "fim da fase 1", que decide se o JSON basta.
 4. **Chaves**: gerar o par de licença (`veloxagent/keys/velox-license-2026-11.pub`
    compilado; privada fora do repo, mesmo procedimento do registry).
+   **Feito (2026-11-09)**: `.pub` em `veloxagent/keys/` com README de
+   custódia e rotação; `velox_license::keyring()` compila o arquivo. A
+   privada está fora do repositório e precisa ir para o cofre dos
+   mantenedores (segredo do GitHub Actions, ADR-054) antes de emitir a
+   primeira licença.
 5. **Bancada de carga**: gerador de logs (`flog`-like) + k3s de 3 nós +
    OpenSearch de referência; define a linha de base do nível 0 antes de
    existir nível 1.
