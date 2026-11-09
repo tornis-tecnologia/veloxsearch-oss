@@ -19,11 +19,14 @@ subscription.
 ## Layout
 
 ```
+../crates/velox-integrations/  the integration-package contract shared with the core:
+                             manifest, closed token set, `render` (pure; ADR-068)
 veloxagent/
   Cargo.toml                 separate Cargo workspace (not a member of the root crate)
+  deny.toml                  cargo-deny policy for this workspace's own graph
   crates/
     velox-license/           signed licence documents, free tier, seat accounting (pure)
-    velox-policy/            policy model + compiler over the shared integration renderer (pure)
+    velox-policy/            policy model + compiler; `PackageRenderer` over velox-integrations (pure)
     velox-opamp/             the OpAMP message subset the agent and the Mesh exchange
     velox-mesh/              the controller binary
     velox-agent/             the host agent binary
@@ -42,6 +45,7 @@ English convention.
 ```bash
 cd veloxagent
 cargo test                       # every crate
+../.github/scripts/check-agent-boundary.sh   # velox-agent links neither the core nor kube
 cargo build --release            # target/release/velox-mesh, target/release/velox-agent
 VELOX_MESH_ADDR=127.0.0.1:4320 ./target/release/velox-mesh
 ./target/release/velox-agent version

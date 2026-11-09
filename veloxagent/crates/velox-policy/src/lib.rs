@@ -7,15 +7,16 @@
 //! ## The decoupling rule (veloxagent/docs/ARCHITECTURE.md §3)
 //!
 //! Integrations are **data** (a signed package: manifest + assets, ADR-039).
-//! What turns a package plus variables into a collector fragment lives in the
-//! core today (`src/agents.rs::fluent_bit_conf_template`,
-//! `src/integrations.rs` interpolation) and is to be extracted into a shared
-//! crate (`velox-integrations`, PLAN.md fase 0) that both workspaces depend
-//! on. This crate never renders a package itself: it asks a
-//! [`FragmentRenderer`] for each activation and only **assembles** the result
-//! into one configuration per engine. Velox Mesh therefore owns distribution
-//! and lifecycle, never the integrations' content, and an integration written
-//! for the core's DaemonSet path works unchanged under Velox Mesh.
+//! What turns a package plus variables into a collector fragment is the
+//! shared `velox-integrations` crate (`crates/velox-integrations`, ADR-068),
+//! the same renderer and closed token set the core's DaemonSet path uses.
+//! The compiler never renders a package itself: it asks a [`FragmentRenderer`]
+//! for each activation and only **assembles** the result into one
+//! configuration per engine. [`PackageRenderer`] is the production renderer,
+//! over a [`PackageStore`] of verified packages. Velox Mesh therefore owns
+//! distribution and lifecycle, never the integrations' content, and an
+//! integration written for the core's DaemonSet path works unchanged under
+//! Velox Mesh.
 //!
 //! ## Shape of a policy
 //!
@@ -29,14 +30,17 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
+use velox_integrations::Package;
 
 /// Which child process a fragment is for. The agent supervises one of each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Engine {
-    /// Logs: Fluent Bit, the engine every existing integration targets.
+    /// Logs, host metrics and the OTLP relay: Fluent Bit, the engine every
+    /// existing integration targets (ARCHITECTURE.md §5.5).
     FluentBit,
-    /// Metrics and traces: the OpenTelemetry Collector.
+    /// The OpenTelemetry Collector on the host, by exception only (an
+    /// integration that ships an `otel.yaml.tmpl`).
     OtelCollector,
 }
 
@@ -119,10 +123,96 @@ pub enum CompileError {
     NoOutput,
 }
 
-/// The open-source side of the boundary. Implemented over the core's
-/// renderer; faked in tests.
+/// The boundary between "which integrations, for whom" (this crate) and
+/// "what an integration renders to" (`velox-integrations`). [`PackageRenderer`]
+/// is the real one; tests fake it.
 pub trait FragmentRenderer {
     fn render(&self, activation: &Activation, outputs: &[Output]) -> Result<Vec<Fragment>, String>;
+}
+
+/// Where verified packages come from: the Mesh's package cache, filled only
+/// by packages `catalog::verify_package` accepted (signature verification is
+/// the whole security boundary, ADR-039; the Mesh adds no second one).
+pub trait PackageStore {
+    fn get(&self, id: &str, version: &str) -> Option<&Package>;
+}
+
+/// What the agent's collector reaches: the OpenSearch endpoint a policy's
+/// `Output::OpenSearch { deployment }` resolves to. The namespace keeps
+/// `{tenant}` and the in-cluster `{os_host}` identical to the DaemonSet path;
+/// `os_host` overrides the latter for hosts outside the cluster, which cannot
+/// resolve `<deployment>.<ns>.svc` (ARCHITECTURE.md §5.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub deployment: String,
+    pub namespace: String,
+    pub os_host: Option<String>,
+}
+
+/// What a rendered config carries where the core's path carries the admin
+/// credentials: the agent exports both from the scoped credential the Mesh
+/// hands it over the connection-settings channel, and Fluent Bit expands
+/// `${VAR}` at start (the core's `PASSWORD_REF` does the same for ConfigMaps).
+pub const OS_USER_REF: &str = "${VELOX_OS_USER}";
+pub const OS_PASSWORD_REF: &str = "${VELOX_OS_PASSWORD}";
+
+/// The production [`FragmentRenderer`]: `velox_integrations::render` over the
+/// package's `agent.conf.tmpl`, with the closed variable set resolved from the
+/// policy's OpenSearch output. The same function, the same eight tokens and the
+/// same fail-closed rule as the core — the "works unchanged" guarantee is this
+/// struct being thin.
+pub struct PackageRenderer<'a, S: PackageStore + ?Sized> {
+    pub store: &'a S,
+    pub target: Target,
+}
+
+impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
+    fn render(&self, activation: &Activation, outputs: &[Output]) -> Result<Vec<Fragment>, String> {
+        let pkg = self
+            .store
+            .get(&activation.package_id, &activation.package_version)
+            .ok_or_else(|| "package is not in the verified store".to_string())?;
+        // The manifest declares no variables yet (PLAN.md fase 0, item 2);
+        // until the spec gains them, a policy that sets any is wrong, not
+        // silently ignored.
+        if let Some(k) = activation.vars.keys().next() {
+            return Err(format!("package declares no variables (got '{k}')"));
+        }
+        // Today's templates bake `out_opensearch` in. A gateway output needs
+        // the `out_http` rewrite the phase-3 contract defines
+        // (ARCHITECTURE.md §5.2); refuse rather than ship a config that
+        // ignores the policy's output.
+        let dep = outputs
+            .iter()
+            .find_map(|o| match o {
+                Output::OpenSearch { deployment } => Some(deployment.as_str()),
+                Output::Gateway { .. } => None,
+            })
+            .ok_or_else(|| "no OpenSearch output; gateway outputs land in phase 3".to_string())?;
+        if dep != self.target.deployment {
+            return Err(format!(
+                "output names deployment '{dep}' but the target is '{}'",
+                self.target.deployment
+            ));
+        }
+        let mut vars = velox_integrations::Vars::new(
+            &self.target.deployment,
+            &self.target.namespace,
+            &pkg.manifest.index,
+            &pkg.manifest.id,
+            OS_USER_REF,
+            OS_PASSWORD_REF,
+        );
+        if let Some(h) = &self.target.os_host {
+            vars = vars.with_os_host(h);
+        }
+        let body =
+            velox_integrations::render(&pkg.agent_config, &vars).map_err(|e| e.to_string())?;
+        Ok(vec![Fragment {
+            engine: Engine::FluentBit,
+            body,
+        }])
+    }
 }
 
 /// The configuration an agent receives: one body per engine it must run,
@@ -276,5 +366,165 @@ mod tests {
         let mut p = policy(&["nginx"]);
         p.outputs.clear();
         assert_eq!(compile(&p, &Fake), Err(CompileError::NoOutput));
+    }
+
+    // ---- PackageRenderer: the real boundary, over an in-memory store ----
+
+    use velox_integrations::{Assets, Manifest, Teardown};
+
+    fn nginx_like(agent_config: &str) -> Package {
+        Package {
+            manifest: Manifest {
+                id: "nginx".into(),
+                index: "nginx-logs".into(),
+                dashboard: "velox-nginx".into(),
+                assets: Assets {
+                    pipeline: None,
+                    index_template: None,
+                    saved_objects: "saved-objects.ndjson".into(),
+                    agent_config: "agent.conf.tmpl".into(),
+                },
+                teardown: Teardown {
+                    ingest_pipeline: None,
+                    index_template: None,
+                    index_pattern: "nginx-logs".into(),
+                    saved_objects: vec![],
+                    index_patterns: vec![],
+                    ism_policies: vec![],
+                    datasources: vec![],
+                },
+            },
+            pipeline: None,
+            index_template: None,
+            saved_objects: String::new(),
+            agent_config: agent_config.into(),
+        }
+    }
+
+    struct Store(BTreeMap<(String, String), Package>);
+    impl PackageStore for Store {
+        fn get(&self, id: &str, version: &str) -> Option<&Package> {
+            self.0.get(&(id.to_string(), version.to_string()))
+        }
+    }
+
+    const TMPL: &str = "[OUTPUT]\n    Host {os_host}\n    HTTP_User {os_user}\n    HTTP_Passwd {os_password}\n    Index {index}\n    # {tenant} {recipe_id} {ns}\n";
+
+    fn store(tmpl: &str) -> Store {
+        let mut m = BTreeMap::new();
+        m.insert(("nginx".to_string(), "1.0.0".to_string()), nginx_like(tmpl));
+        Store(m)
+    }
+
+    fn target(os_host: Option<&str>) -> Target {
+        Target {
+            deployment: "logs-a1b2".into(),
+            namespace: "veloxsearch".into(),
+            os_host: os_host.map(str::to_string),
+        }
+    }
+
+    /// The package renders with the same eight tokens the core uses, the
+    /// credentials as `${VAR}` references, and the in-cluster host by default.
+    #[test]
+    fn package_renderer_uses_the_shared_renderer_and_credential_refs() {
+        let s = store(TMPL);
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+        let c = compile(&policy(&["nginx"]), &r).unwrap();
+        let fb = &c.bodies[&Engine::FluentBit];
+        assert!(fb.contains("Host logs-a1b2.veloxsearch.svc"), "{fb}");
+        assert!(fb.contains("HTTP_User ${VELOX_OS_USER}"), "{fb}");
+        assert!(fb.contains("HTTP_Passwd ${VELOX_OS_PASSWORD}"), "{fb}");
+        assert!(fb.contains("Index nginx-logs"), "{fb}");
+        assert!(fb.contains("# velox-logs-a1b2 nginx veloxsearch"), "{fb}");
+        assert!(!c.bodies.contains_key(&Engine::OtelCollector));
+    }
+
+    /// A host outside the cluster gets the published endpoint instead.
+    #[test]
+    fn package_renderer_honours_an_off_cluster_host() {
+        let s = store(TMPL);
+        let r = PackageRenderer {
+            store: &s,
+            target: target(Some("logs.example.internal:9200")),
+        };
+        let c = compile(&policy(&["nginx"]), &r).unwrap();
+        assert!(c.bodies[&Engine::FluentBit].contains("Host logs.example.internal:9200"));
+    }
+
+    /// The fail-closed rule survives the boundary: a package with a foreign
+    /// token is refused, and the error names the activation.
+    #[test]
+    fn package_renderer_fails_closed_on_a_foreign_token() {
+        let s = store("Secret {cluster_admin_ssh}\n");
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+        let err = compile(&policy(&["nginx"]), &r).unwrap_err();
+        match err {
+            CompileError::Render {
+                package_id, reason, ..
+            } => {
+                assert_eq!(package_id, "nginx");
+                assert!(reason.contains("cluster_admin_ssh"), "{reason}");
+                assert!(reason.contains("closed variable set"), "{reason}");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Only verified packages render; a version the store never saw is an
+    /// error, never a fetch.
+    #[test]
+    fn package_renderer_refuses_an_unknown_package() {
+        let s = store(TMPL);
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+        let mut p = policy(&["nginx"]);
+        p.activations[0].package_version = "9.9.9".into();
+        let err = compile(&p, &r).unwrap_err();
+        assert!(
+            matches!(err, CompileError::Render { ref reason, .. } if reason.contains("verified store"))
+        );
+    }
+
+    /// Honest refusals for what phase 0 does not do yet: policy variables
+    /// (no manifest schema for them) and gateway outputs (phase 3).
+    #[test]
+    fn package_renderer_refuses_what_the_spec_does_not_define_yet() {
+        let s = store(TMPL);
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+        let mut p = policy(&["nginx"]);
+        p.activations[0]
+            .vars
+            .insert("path".into(), "/var/log/x".into());
+        assert!(
+            matches!(compile(&p, &r), Err(CompileError::Render { ref reason, .. }) if reason.contains("declares no variables"))
+        );
+
+        let mut p = policy(&["nginx"]);
+        p.outputs = vec![Output::Gateway {
+            endpoint: "https://gw:8443".into(),
+        }];
+        assert!(
+            matches!(compile(&p, &r), Err(CompileError::Render { ref reason, .. }) if reason.contains("phase 3"))
+        );
+
+        let mut p = policy(&["nginx"]);
+        p.outputs = vec![Output::OpenSearch {
+            deployment: "other".into(),
+        }];
+        assert!(
+            matches!(compile(&p, &r), Err(CompileError::Render { ref reason, .. }) if reason.contains("'other'"))
+        );
     }
 }

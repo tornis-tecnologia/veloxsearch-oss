@@ -185,6 +185,31 @@ jobs:
       # the crate. Behaviour is the `rust` job's business.
       - run: cargo check --all-targets
 
+  # The agent workspace (ADR-068). Its own job because it is its own
+  # workspace: `cargo test` at the root never sees it. Besides fmt/clippy/
+  # test it proves the build boundary the ADR rests on — the agent binary
+  # links neither the control plane nor kube — on the resolved graph.
+  veloxagent:
+    name: veloxagent (fmt, clippy, test, boundary)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: veloxagent
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: veloxagent
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --all-targets
+      - name: velox-agent links neither the core nor kube
+        working-directory: .
+        run: ./.github/scripts/check-agent-boundary.sh
+
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest
@@ -291,3 +316,10 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+      # The agent workspace resolves its own graph and has its own deny.toml
+      # (ADR-068); one run never covers both.
+      - name: veloxagent workspace
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          manifest-path: veloxagent/Cargo.toml

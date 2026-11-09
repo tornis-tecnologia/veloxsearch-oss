@@ -53,6 +53,7 @@ wire format can be reasoned about without dragging in kube-rs.
 | `auth_provider.rs`, `auth_probe.rs` | Per-deployment LDAP/OIDC provider generation and the pre-save reachability probe |
 | `bootstrap.rs` | First-run conformity gate; cert-manager / operator self-install |
 | `recipes.rs`, `agents.rs`, `integrations.rs`, `catalog.rs` | Log integrations: built-in recipes, the Fluent Bit agents, the data-only apply engine, the signed-registry client |
+| `crates/velox-integrations/` | The integration-package contract — manifest, closed token set, `render`, resource accounting — as a pure crate shared with the Velox Mesh workspace (ADR-068). `integrations.rs` re-exports it and keeps the OpenSearch writes. |
 | `otel_stack.rs` | The OpenTelemetry collection stack (an additive second option alongside recipes) |
 | `capacity.rs`, `profiles.rs`, `metrics.rs`, `telemetry.rs`, `discovery.rs` | Sizing, cluster capacity, health sampling, discovery of existing telemetry |
 | `snapshot.rs`, `upgrade.rs`, `activity.rs`, `provisioning.rs`, `version_feed.rs` | Day-2: snapshots, version upgrades, "is it settled?", deferred provisioning work |

@@ -162,7 +162,7 @@ fn read(dir: &std::path::Path, recipe: &str, file: &str) -> String {
 
 /// Fixed off-cluster variable values for render checks.
 fn test_vars(recipe: &str) -> Vars {
-    Vars::new(
+    integrations::vars(
         &golden_deployment(),
         recipes::recipe_index(recipe),
         recipe,
@@ -324,7 +324,7 @@ fn agent_config_is_frozen_rust_output() {
         );
 
         // Round-trip with the same namespace `fluent_bit_conf` resolves.
-        let live_vars = Vars::new(
+        let live_vars = integrations::vars(
             &golden_deployment(),
             recipes::recipe_index(recipe),
             recipe,

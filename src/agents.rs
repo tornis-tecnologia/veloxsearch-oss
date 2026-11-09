@@ -365,7 +365,7 @@ pub(crate) fn fluent_bit_conf(
     user: &str,
     password: &str,
 ) -> String {
-    let vars = crate::integrations::Vars::new(
+    let vars = crate::integrations::vars(
         deployment,
         crate::recipes::recipe_index(recipe),
         recipe,
@@ -961,7 +961,7 @@ mod tests {
     fn a_registry_package_config_gets_the_same_filter() {
         // The package path hands the builder the package template rendered by
         // the engine; the stanza is added there too, byte for byte.
-        let vars = crate::integrations::Vars::new(
+        let vars = crate::integrations::vars(
             &dep(),
             crate::recipes::recipe_index("k8s-events"),
             "k8s-events",

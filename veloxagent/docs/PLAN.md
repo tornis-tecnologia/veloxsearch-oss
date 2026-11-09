@@ -338,6 +338,11 @@ Decisões que, erradas, custam a refazer tudo:
    `CLOSED_TOKENS` + parsing de manifesto) para `crates/velox-integrations/`,
    AGPL como o resto, consumida pelo core e por `veloxagent/`. Refatoração
    pura: mesma licença, sem auditoria de autoria. ADR-068.
+   **Feito (2026-11-09)**: o core re-exporta o crate em `integrations.rs` e
+   ficou só com as escritas no cluster; `velox-policy::PackageRenderer` é o
+   `FragmentRenderer` de produção sobre o mesmo `render`. O script
+   `check-agent-boundary.sh` prova no grafo resolvido que `velox-agent` não
+   liga `veloxsearch` nem `kube`.
 2. **Esquema de manifesto**: `variables` e asset opcional `otel.yaml.tmpl` em
    `docs/integrations/manifest.schema.json` + validador. Mudança de especificação.
 3. **OpAMP**: fechar o subconjunto de mensagens (`velox-opamp`), gerar tipos a
@@ -351,7 +356,9 @@ Decisões que, erradas, custam a refazer tudo:
    existir nível 1.
 6. **CI**: job `veloxagent` (fmt, clippy `-D warnings`, test; o
    `check-headers.sh` já cobre a pasta com o cabeçalho AGPL); `cargo deny`
-   com allowlist própria.
+   com allowlist própria. **Feito (2026-11-09)**: job `veloxagent` em
+   `ci.yml` com a checagem de fronteira, e `veloxagent/deny.toml` no job
+   `supply-chain`.
 
 ### Fase 1 — Mesh + Agent mínimos (8 semanas)
 

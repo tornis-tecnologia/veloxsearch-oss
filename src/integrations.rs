@@ -1,6 +1,6 @@
 // Copyright (C) 2026 Tornis Desenvolvimento
 // SPDX-License-Identifier: AGPL-3.0-only
-//! ADR-039 integration apply-engine.
+//! ADR-039 integration apply-engine — the half that touches the cluster.
 //!
 //! One fixed engine that installs / uninstalls a **data-only** integration
 //! package (a `manifest.yaml` + four assets) against a deployment's OpenSearch,
@@ -11,399 +11,54 @@
 //! data, and — unlike the old `disable()` — tears down exactly what a package
 //! creates, so a clean install yields a clean uninstall.
 //!
-//! Scope (#73): the engine + the uninstall fix + interpolation safety. The
-//! signature-verification and registry-load layers (#71/#72) sit *in front* of
-//! this engine (a `Package` here is already verified + parsed). Extracting the
-//! 12 built-in recipes into shipped packages is #74 — the built-in path in
-//! `recipes.rs` stays authoritative and unchanged; this module only adds a
-//! reusable engine and lets `disable()` reuse the same teardown.
+//! The contract itself — manifest, closed token set, renderer, resource
+//! accounting — lives in the shared `velox-integrations` crate
+//! (`crates/velox-integrations`, ADR-068) and is re-exported here unchanged,
+//! so `integrations::render` / `integrations::CLOSED_TOKENS` keep their
+//! names. Velox Mesh renders policies with that same crate; this module is
+//! what only the core does: resolve the variables off the live deployment and
+//! perform the OpenSearch writes. The signature-verification and registry-load
+//! layers (#71/#72, `catalog.rs`) sit *in front* of this engine (a `Package`
+//! here is already verified + parsed).
 
 use crate::scope::Deployment;
 use anyhow::{Context, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-/// The closed, engine-owned interpolation variable set (`docs/integrations/
-/// interpolation.md`, ADR-039). Exactly these eight names may appear as
-/// `{name}` in an asset; any other `{lower_case_token}` is a hard error.
-/// Extending it is a core change (this table + a test), never something a
-/// package can introduce.
-pub const CLOSED_TOKENS: [&str; 8] = [
-    "deployment",
-    "index",
-    "os_user",
-    "os_password",
-    "os_host",
-    "ns",
-    "tenant",
-    "recipe_id",
-];
+pub use velox_integrations::{
+    created_resources, parse_manifest, parse_saved_objects, render, saved_objects_bulk,
+    teardown_resources, Assets, Manifest, Package, ResourceKey, ResourceKind, Teardown, Vars,
+    CLOSED_TOKENS,
+};
 
-// ---------------------------------------------------------------------------
-// Manifest (the subset the engine consumes — see manifest.schema.json for the
-// full validated contract, enforced by #71 before a package reaches here).
-// ---------------------------------------------------------------------------
-
-/// The parsed `manifest.yaml`. Only the fields the apply-engine reads are
-/// modeled; serde_yaml ignores the rest (title/summary/signature/discovery),
-/// which the schema validator (#71) has already checked.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct Manifest {
-    /// Package id — also the ingest-pipeline id PUT and the `{recipe_id}` value.
-    pub id: String,
-    /// The OpenSearch index the package writes to — the `{index}` value and the
-    /// index-template / index-pattern id.
-    pub index: String,
-    /// Saved-object id of the out-of-the-box dashboard (informational here).
-    #[allow(dead_code)]
-    pub dashboard: String,
-    /// Asset filenames by role.
-    pub assets: Assets,
-    /// The explicit inventory uninstall removes.
-    pub teardown: Teardown,
+/// The closed variable set for one deployment × package, resolved off the
+/// `Deployment` handle. The namespace comes off the handle rather than being
+/// passed alongside it (#80): with per-tenant namespaces two sources could
+/// disagree, and the one that wins would decide which cluster a collector
+/// ships to. `os_host` and `tenant` are derived inside the shared crate, the
+/// same way for the DaemonSet path and for Velox Mesh.
+pub fn vars(
+    deployment: &Deployment,
+    index: &str,
+    recipe_id: &str,
+    os_user: &str,
+    os_password: &str,
+) -> Vars {
+    Vars::new(
+        &deployment.to_string(),
+        deployment.namespace(),
+        index,
+        recipe_id,
+        os_user,
+        os_password,
+    )
 }
 
-/// Asset filenames shipped in the package directory. `pipeline`/`index_template`
-/// are absent for packages that need neither (e.g. kubernetes: dynamic mapping).
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct Assets {
-    #[serde(default)]
-    pub pipeline: Option<String>,
-    #[serde(default)]
-    pub index_template: Option<String>,
-    pub saved_objects: String,
-    pub agent_config: String,
-}
-
-/// Everything a package creates in the customer's OpenSearch, so uninstall
-/// removes exactly these (ADR-039 "Uninstall becomes real"). Also constructed
-/// in-binary by `recipes::recipe_teardown` so the built-in `disable()` reuses
-/// the same teardown path.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct Teardown {
-    /// Ingest-pipeline id to DELETE. Present iff `assets.pipeline` is.
-    #[serde(default)]
-    pub ingest_pipeline: Option<String>,
-    /// Index-template id to DELETE. Present iff `assets.index_template` is.
-    #[serde(default)]
-    pub index_template: Option<String>,
-    /// Index-pattern saved-object id to DELETE (equals `index` today).
-    pub index_pattern: String,
-    /// Dashboard + visualization saved-object ids to DELETE.
-    pub saved_objects: Vec<String>,
-    /// Extra index-pattern ids beyond `index_pattern`. A recipe creates exactly
-    /// one; the OTel stack (ADR-053) creates three, and reuses this same
-    /// teardown machinery rather than growing a parallel one.
-    #[serde(default)]
-    pub index_patterns: Vec<String>,
-    /// ISM policy ids to detach (`_ism/remove`) and DELETE.
-    #[serde(default)]
-    pub ism_policies: Vec<String>,
-    /// SQL-plugin datasource names to DELETE (`_plugins/_query/_datasources`).
-    #[serde(default)]
-    pub datasources: Vec<String>,
-}
-
-/// A verified, parsed package: the manifest plus the raw bytes of each asset it
-/// names. Construction (registry pull / disk load / signature check) happens
-/// upstream; the engine only consumes it.
-#[derive(Debug, Clone)]
-pub struct Package {
-    pub manifest: Manifest,
-    /// Raw `pipeline.json` (None when the package ships none).
-    pub pipeline: Option<String>,
-    /// Raw `index-template.json` (None when the package ships none).
-    pub index_template: Option<String>,
-    /// Raw `saved-objects.ndjson` (index-pattern + dashboard + visualizations).
-    pub saved_objects: String,
-    /// Raw `agent.conf.tmpl` (Fluent Bit config template).
-    pub agent_config: String,
-}
-
-/// Parse a `manifest.yaml` into the fields the engine reads.
-pub fn parse_manifest(yaml: &str) -> Result<Manifest> {
-    serde_yaml::from_str(yaml).context("parsing integration manifest.yaml")
-}
-
-impl Package {
-    /// Load a package from a directory: `manifest.yaml` plus each asset file it
-    /// names. Used by the engine's tests against the nginx fixture, and by the
-    /// registry/offline loaders (#72) once those land.
-    pub fn load_from_dir(dir: &std::path::Path) -> Result<Package> {
-        let manifest_yaml = std::fs::read_to_string(dir.join("manifest.yaml"))
-            .with_context(|| format!("reading {}/manifest.yaml", dir.display()))?;
-        let manifest = parse_manifest(&manifest_yaml)?;
-        let read = |name: &str| -> Result<String> {
-            std::fs::read_to_string(dir.join(name))
-                .with_context(|| format!("reading asset '{name}'"))
-        };
-        let pipeline = match &manifest.assets.pipeline {
-            Some(f) => Some(read(f)?),
-            None => None,
-        };
-        let index_template = match &manifest.assets.index_template {
-            Some(f) => Some(read(f)?),
-            None => None,
-        };
-        let saved_objects = read(&manifest.assets.saved_objects)?;
-        let agent_config = read(&manifest.assets.agent_config)?;
-        Ok(Package {
-            manifest,
-            pipeline,
-            index_template,
-            saved_objects,
-            agent_config,
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Interpolation — the closed variable set (fail closed on foreign tokens).
-// ---------------------------------------------------------------------------
-
-/// Resolved values for the closed variable set, for one deployment × package.
-/// `new` is pure (unit-testable without a cluster); `resolve` builds it from the
-/// live deployment (its admin creds + namespace).
-pub struct Vars {
-    deployment: String,
-    index: String,
-    os_user: String,
-    os_password: String,
-    os_host: String,
-    ns: String,
-    tenant: String,
-    recipe_id: String,
-}
-
-impl Vars {
-    /// Build the variable set from primitives. `os_host` and `tenant` are
-    /// derived exactly as the live plumbing derives them (`{deployment}.{ns}.svc`
-    /// and `recipes::tenant_name`), so a rendered asset matches what the
-    /// built-in recipes produce.
-    ///
-    /// The namespace comes off the deployment rather than being passed
-    /// alongside it (#80): with per-tenant namespaces two sources could
-    /// disagree, and the one that wins would decide which cluster a collector
-    /// ships to.
-    pub fn new(
-        deployment: &Deployment,
-        index: &str,
-        recipe_id: &str,
-        os_user: &str,
-        os_password: &str,
-    ) -> Vars {
-        let ns = deployment.namespace();
-        Vars {
-            os_host: format!("{deployment}.{ns}.svc"),
-            tenant: crate::recipes::tenant_name(deployment),
-            deployment: deployment.to_string(),
-            ns: ns.to_string(),
-            index: index.to_string(),
-            recipe_id: recipe_id.to_string(),
-            os_user: os_user.to_string(),
-            os_password: os_password.to_string(),
-        }
-    }
-
-    /// Resolve the variable set for a live deployment: its admin credentials
-    /// (from the per-cluster Secret) and its own namespace.
-    async fn resolve(deployment: &Deployment, manifest: &Manifest) -> Vars {
-        let (u, p) = crate::k8s::admin_creds(deployment).await;
-        Vars::new(deployment, &manifest.index, &manifest.id, &u, &p)
-    }
-
-    fn get(&self, name: &str) -> Option<&str> {
-        Some(match name {
-            "deployment" => &self.deployment,
-            "index" => &self.index,
-            "os_user" => &self.os_user,
-            "os_password" => &self.os_password,
-            "os_host" => &self.os_host,
-            "ns" => &self.ns,
-            "tenant" => &self.tenant,
-            "recipe_id" => &self.recipe_id,
-            _ => return None,
-        })
-    }
-}
-
-/// Substitute the closed variable set into an asset, **failing closed** on any
-/// foreign token. A *token* is `{` + a lowercase-initial identifier
-/// (`[a-z][A-Za-z0-9_]*`) + `}`:
-///   - a known name (CLOSED_TOKENS) → its value;
-///   - any other lowercase-initial name → `Err` (a package cannot invent a hole).
-///
-/// Everything else passes through untouched: grok syntax (`%{COMBINEDAPACHELOG}`,
-/// `%{POSINT:pid}` — uppercase / colon, not a token) and JSON structural braces
-/// (`{"type":…}` — `{` not followed by a bare identifier). `{{` escapes a literal
-/// `{` (so `{{index}` yields the text `{index}` without substitution); a `}` is
-/// always literal. Escaping is deliberately asymmetric — a `}}` escape would be
-/// impossible to distinguish from two adjacent JSON closing braces (`{}}`), and
-/// a lone `}` is never ambiguous because only a full `{name}` is a token. This
-/// lets one scanner validate JSON, pipeline and Fluent-Bit assets without
-/// choking on their non-template braces.
-pub fn render(template: &str, vars: &Vars) -> Result<String> {
-    let chars: Vec<char> = template.chars().collect();
-    let n = chars.len();
-    let mut out = String::with_capacity(template.len());
-    let mut i = 0;
-    while i < n {
-        let c = chars[i];
-        match c {
-            '{' if i + 1 < n && chars[i + 1] == '{' => {
-                out.push('{');
-                i += 2;
-            }
-            '{' => {
-                // Read a candidate token name: identifier chars up to a `}`.
-                let start = i + 1;
-                let mut j = start;
-                while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
-                    j += 1;
-                }
-                if j < n && j > start && chars[j] == '}' {
-                    let name: String = chars[start..j].iter().collect();
-                    if let Some(v) = vars.get(&name) {
-                        out.push_str(v);
-                        i = j + 1;
-                        continue;
-                    }
-                    // A lowercase-initial `{name}` that isn't known is a template
-                    // hole the package tried to invent — reject (fail closed).
-                    // Uppercase-initial (grok `%{DATA}`) is not a token attempt.
-                    if name.starts_with(|ch: char| ch.is_ascii_lowercase()) {
-                        anyhow::bail!(
-                            "foreign interpolation token {{{name}}} is not in the \
-                             closed variable set (allowed: {})",
-                            CLOSED_TOKENS.join(", ")
-                        );
-                    }
-                }
-                out.push('{');
-                i += 1;
-            }
-            other => {
-                out.push(other);
-                i += 1;
-            }
-        }
-    }
-    Ok(out)
-}
-
-// ---------------------------------------------------------------------------
-// Resource accounting — proves clean-install ⇒ clean-uninstall as set equality.
-// ---------------------------------------------------------------------------
-
-/// A class of OpenSearch object an integration creates. Paired with an id, this
-/// keys the "what a package installs" set against "what its teardown removes".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ResourceKind {
-    IngestPipeline,
-    IndexTemplate,
-    IndexPattern,
-    SavedObject,
-    /// ISM retention policy (ADR-053; recipes never create one — the purpose
-    /// profile owns `velox-retention`, which is not a per-package object).
-    IsmPolicy,
-    /// SQL-plugin datasource (ADR-053).
-    Datasource,
-}
-
-/// `(kind, id)` — one installed / torn-down object.
-pub type ResourceKey = (ResourceKind, String);
-
-/// Everything applying `pkg` creates in the customer's OpenSearch, derived from
-/// the package itself (assets present + the ids inside `saved-objects.ndjson`).
-pub fn created_resources(pkg: &Package) -> Result<BTreeSet<ResourceKey>> {
-    let mut set = BTreeSet::new();
-    if pkg.pipeline.is_some() {
-        set.insert((ResourceKind::IngestPipeline, pkg.manifest.id.clone()));
-    }
-    if pkg.index_template.is_some() {
-        set.insert((ResourceKind::IndexTemplate, pkg.manifest.index.clone()));
-    }
-    for o in parse_saved_objects(&pkg.saved_objects)? {
-        if o.kind == "index-pattern" {
-            set.insert((ResourceKind::IndexPattern, o.id));
-        } else {
-            set.insert((ResourceKind::SavedObject, o.id));
-        }
-    }
-    Ok(set)
-}
-
-/// Everything the manifest's `teardown` will remove.
-pub fn teardown_resources(t: &Teardown) -> BTreeSet<ResourceKey> {
-    let mut set = BTreeSet::new();
-    if let Some(id) = &t.ingest_pipeline {
-        set.insert((ResourceKind::IngestPipeline, id.clone()));
-    }
-    if let Some(id) = &t.index_template {
-        set.insert((ResourceKind::IndexTemplate, id.clone()));
-    }
-    set.insert((ResourceKind::IndexPattern, t.index_pattern.clone()));
-    for id in &t.index_patterns {
-        set.insert((ResourceKind::IndexPattern, id.clone()));
-    }
-    for id in &t.saved_objects {
-        set.insert((ResourceKind::SavedObject, id.clone()));
-    }
-    for id in &t.ism_policies {
-        set.insert((ResourceKind::IsmPolicy, id.clone()));
-    }
-    for id in &t.datasources {
-        set.insert((ResourceKind::Datasource, id.clone()));
-    }
-    set
-}
-
-/// One saved object's type + id (from an ndjson line).
-struct SavedObj {
-    kind: String,
-    id: String,
-}
-
-/// Parse `saved-objects.ndjson` into `(type, id)` pairs (one JSON object per
-/// non-blank line). Used both to account for created objects and to recover the
-/// object *type* the Dashboards DELETE API needs at teardown.
-fn parse_saved_objects(ndjson: &str) -> Result<Vec<SavedObj>> {
-    let mut out = Vec::new();
-    for (n, line) in ndjson.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let v: serde_json::Value = serde_json::from_str(line)
-            .with_context(|| format!("saved-objects.ndjson: invalid JSON on line {}", n + 1))?;
-        let kind = v
-            .get("type")
-            .and_then(|x| x.as_str())
-            .with_context(|| format!("saved-objects.ndjson line {}: missing \"type\"", n + 1))?
-            .to_string();
-        let id = v
-            .get("id")
-            .and_then(|x| x.as_str())
-            .with_context(|| format!("saved-objects.ndjson line {}: missing \"id\"", n + 1))?
-            .to_string();
-        out.push(SavedObj { kind, id });
-    }
-    Ok(out)
-}
-
-/// Parse `saved-objects.ndjson` into the JSON array `_bulk_create` expects.
-fn saved_objects_bulk(ndjson: &str) -> Result<Vec<serde_json::Value>> {
-    let mut out = Vec::new();
-    for (n, line) in ndjson.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        out.push(
-            serde_json::from_str(line)
-                .with_context(|| format!("saved-objects.ndjson: invalid JSON on line {}", n + 1))?,
-        );
-    }
-    Ok(out)
+/// Resolve the variable set for a live deployment: its admin credentials
+/// (from the per-cluster Secret) and its own namespace.
+async fn resolve_vars(deployment: &Deployment, manifest: &Manifest) -> Vars {
+    let (u, p) = crate::k8s::admin_creds(deployment).await;
+    vars(deployment, &manifest.index, &manifest.id, &u, &p)
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +73,7 @@ fn saved_objects_bulk(ndjson: &str) -> Result<Vec<serde_json::Value>> {
 ///  4. `_bulk_create` the saved objects into the deployment's Dashboards tenant;
 ///  5. deploy the agent from the rendered config.
 pub async fn apply_package(deployment: &Deployment, pkg: &Package) -> Result<()> {
-    let vars = Vars::resolve(deployment, &pkg.manifest).await;
+    let vars = resolve_vars(deployment, &pkg.manifest).await;
 
     // Interpolation safety first: render (⇒ validate) EVERY asset up front so a
     // foreign `{token}` fails the whole install before a single write.
@@ -616,12 +271,15 @@ mod tests {
     /// so the path comes from `VELOX_REGISTRY_PATH` (checkout root) like the
     /// `registry_golden` gates; `None` = loud skip when unset (CI's
     /// test:registry-gates job always provides the checkout).
+    ///
+    /// The pure renderer tests (closed set, foreign token, grok/JSON braces,
+    /// escaping) moved to `crates/velox-integrations` with the code.
     fn nginx_fixture() -> Option<std::path::PathBuf> {
         Some(crate::registry_golden::registry_dir()?.join("nginx"))
     }
 
     fn nginx_vars() -> Vars {
-        Vars::new(
+        vars(
             &Deployment::for_test("logs-ab12", "veloxsearch-test", None),
             "nginx-logs",
             "nginx",
@@ -630,88 +288,25 @@ mod tests {
         )
     }
 
-    /// The substitution table has EXACTLY the closed set — no more, no fewer —
-    /// and every name resolves (interpolation.md test obligation).
+    /// The handle, not a second argument, decides the namespace (#80): the
+    /// derived tokens come out exactly as the live plumbing computes them.
     #[test]
-    fn closed_token_table_matches_contract() {
-        let expected: BTreeSet<&str> = [
-            "deployment",
-            "index",
-            "os_user",
-            "os_password",
-            "os_host",
-            "ns",
-            "tenant",
-            "recipe_id",
-        ]
-        .into_iter()
-        .collect();
-        let actual: BTreeSet<&str> = CLOSED_TOKENS.into_iter().collect();
-        assert_eq!(actual, expected, "CLOSED_TOKENS drifted from the contract");
-
+    fn vars_resolve_off_the_deployment_handle() {
         let v = nginx_vars();
+        assert_eq!(v.get("deployment"), Some("logs-ab12"));
+        assert_eq!(v.get("ns"), Some("veloxsearch-test"));
+        assert_eq!(v.get("os_host"), Some("logs-ab12.veloxsearch-test.svc"));
+        assert_eq!(
+            v.get("tenant").map(str::to_string),
+            Some(crate::recipes::tenant_name(&Deployment::for_test(
+                "logs-ab12",
+                "veloxsearch-test",
+                None
+            )))
+        );
         for name in CLOSED_TOKENS {
             assert!(v.get(name).is_some(), "no value resolves for {{{name}}}");
         }
-        // Derived tokens computed exactly as the live plumbing does.
-        assert_eq!(v.get("os_host"), Some("logs-ab12.veloxsearch-test.svc"));
-        assert_eq!(v.get("tenant"), Some("velox-logs-ab12"));
-    }
-
-    /// Every closed token substitutes to its value.
-    #[test]
-    fn render_substitutes_closed_tokens() {
-        let v = nginx_vars();
-        let t = "d={deployment} ns={ns} host={os_host} u={os_user} p={os_password} \
-                 i={index} t={tenant} r={recipe_id}";
-        let got = render(t, &v).unwrap();
-        assert_eq!(
-            got,
-            "d=logs-ab12 ns=veloxsearch-test host=logs-ab12.veloxsearch-test.svc \
-             u=admin p=s3cr3t-pw i=nginx-logs t=velox-logs-ab12 r=nginx"
-        );
-        // Nothing left unrendered.
-        assert!(!got.contains('{'), "unrendered token remained: {got}");
-    }
-
-    /// A package referencing a token outside the closed set is REJECTED, not
-    /// silently passed through (the interpolation.md golden token).
-    #[test]
-    fn render_rejects_foreign_token() {
-        let v = nginx_vars();
-        let err = render("HTTP_Passwd {cluster_admin_ssh}", &v).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("cluster_admin_ssh"), "unhelpful error: {msg}");
-        assert!(
-            msg.contains("closed variable set"),
-            "unhelpful error: {msg}"
-        );
-    }
-
-    /// Grok syntax and JSON structural braces are NOT tokens — they pass through
-    /// untouched (so pipeline/template/ndjson assets survive the scan).
-    #[test]
-    fn render_preserves_grok_and_json_braces() {
-        let v = nginx_vars();
-        let grok = r#"{ "grok": { "patterns": ["%{COMBINEDAPACHELOG}", "%{POSINT:pid}"] } }"#;
-        assert_eq!(render(grok, &v).unwrap(), grok);
-        let json = r#"{"type":"visualization","id":"velox-nginx-reqs","attributes":{}}"#;
-        assert_eq!(render(json, &v).unwrap(), json);
-    }
-
-    /// `{{` escapes a literal `{`, so a brace-word can be emitted verbatim
-    /// WITHOUT substitution and WITHOUT tripping the foreign-token guard.
-    #[test]
-    fn render_escapes_open_brace() {
-        let v = nginx_vars();
-        // `{{index}` → literal `{index}` (not substituted to the index name).
-        assert_eq!(render("a {{index} b", &v).unwrap(), "a {index} b");
-        // A brace-word that would otherwise be a foreign token is safe when the
-        // opening brace is escaped.
-        assert_eq!(
-            render("literal {{cluster_admin_ssh} here", &v).unwrap(),
-            "literal {cluster_admin_ssh} here"
-        );
     }
 
     /// The nginx fixture parses and its manifest names the expected ids.

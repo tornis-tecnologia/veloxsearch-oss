@@ -61,7 +61,9 @@ pub(crate) fn os_base_in(name: &str, namespace: &str) -> String {
 /// than the shared Global tenant, so they're isolated per deployment. Derived
 /// from the deployment name (already DNS-safe, ADR-020).
 pub fn tenant_name(deployment: &Deployment) -> String {
-    format!("velox-{deployment}")
+    // One formula, owned by the shared crate so the `{tenant}` token renders
+    // the same under Velox Mesh (ADR-068).
+    velox_integrations::tenant_name(&deployment.to_string())
 }
 
 /// The tenant to scope saved objects to, or `None` when this deployment uses

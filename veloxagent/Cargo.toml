@@ -28,6 +28,10 @@ publish = false
 # developer with the core built has the sources cached and the two trees never
 # disagree on a wire format (serde_json, serde_yaml).
 [workspace.dependencies]
+# The integration-package contract, shared with the core (ADR-068). The one
+# path outside this workspace, on purpose: it is what makes "an integration
+# written for the core works unchanged under Velox Mesh" true by construction.
+velox-integrations = { path = "../crates/velox-integrations" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
