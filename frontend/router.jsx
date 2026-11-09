@@ -13,6 +13,7 @@
      /deployments/:id           → /deployments/:id/overview
      /deployments/:id/:tab      overview | data | backup | access | config | activity
      /capacity
+     /agents                    host install guide (ADR-069)
      /settings
      /login, /setup             owned by the boot gate (app.jsx), never rendered
                                 as screens by this router
@@ -49,6 +50,7 @@ function parse(pathname, search) {
       return { name: "deployment", id, tab, upgrade: q.get("upgrade") === "1" };
     }
     case "capacity": return { name: "capacity" };
+    case "agents": return { name: "agents" };
     case "settings": return { name: "settings" };
     case "login": case "setup": return { name: "auth" };
     default: return { name: "deployments" };
@@ -60,6 +62,7 @@ function pathFor(r) {
     case "create": return "/deployments/new";
     case "deployment": return `/deployments/${r.id}/${r.tab || "overview"}${r.upgrade ? "?upgrade=1" : ""}`;
     case "capacity": return "/capacity";
+    case "agents": return "/agents";
     case "settings": return "/settings";
     default: return "/deployments";
   }

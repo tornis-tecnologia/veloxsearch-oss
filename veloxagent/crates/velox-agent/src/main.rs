@@ -8,15 +8,23 @@
 //! Velox-specific line of code inside either engine — both stay replaceable
 //! upstream binaries (veloxagent/docs/PLAN.md §3, the Fluent Bit critique).
 //!
-//! Skeleton: the command surface and the pure plan for applying a Fluent Bit
-//! configuration safely. No process is spawned yet.
+//! **The engines are not ours to install** (ADR-069): VeloxSearch ships no
+//! Fluent Bit binary and never downloads one. The operator installs it from
+//! their distribution's or the project's repository — the console carries the
+//! procedure per distribution — and the agent supervises what it finds,
+//! refusing loudly below `preflight::MIN_FLUENT_BIT`.
+//!
+//! Skeleton: the command surface, the pure plan for applying a Fluent Bit
+//! configuration safely, and the host preflight. No engine is spawned yet.
 //!
 //! ```text
 //! velox-agent enroll --mesh https://mesh.example:4320 --token <enrollment token>
 //! velox-agent run
+//! velox-agent doctor
 //! velox-agent version
 //! ```
 
+mod preflight;
 mod supervisor;
 
 fn main() {
@@ -33,8 +41,20 @@ fn main() {
             eprintln!("velox-agent: run is not implemented yet (veloxagent/docs/PLAN.md fase 1)");
             std::process::exit(2);
         }
+        // Implemented, because it is what makes ADR-069's bargain checkable:
+        // the operator installs the engine, so the agent must be able to say
+        // whether this host is ready before anything is enrolled.
+        Some("doctor") => {
+            let verdict = preflight::probe();
+            println!("{}", verdict.message());
+            if !verdict.usable() {
+                std::process::exit(1);
+            }
+        }
         _ => {
-            eprintln!("usage: velox-agent <enroll --mesh URL --token TOKEN | run | version>");
+            eprintln!(
+                "usage: velox-agent <enroll --mesh URL --token TOKEN | run | doctor | version>"
+            );
             std::process::exit(64);
         }
     }

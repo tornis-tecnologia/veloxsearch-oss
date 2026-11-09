@@ -1086,6 +1086,52 @@ button.badge { cursor: pointer; }
   white-space: pre;
 }
 
+/* A command block with its own copy button (views_agents.jsx). The button
+   floats over the top-right of the <pre>; the padding keeps it off the first
+   line's text, and it only gains contrast on hover so the command stays the
+   thing being read. */
+.cmdblock { position: relative; }
+.cmdblock .codeblock { margin: 0; padding-right: 44px; }
+.cmdblock .cmd-copy {
+  position: absolute; top: 7px; right: 7px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text-3);
+  padding: 5px 7px; display: grid; place-items: center;
+}
+.cmdblock .cmd-copy:hover { color: var(--accent); background: var(--surface-3); }
+
+/* Agents: the per-distribution install guide. */
+.ag-panel {
+  border: 1px solid var(--border); border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--surface); padding: 20px 22px;
+}
+.ag-note {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 0 0 18px; font-size: 13px; color: var(--text-2);
+}
+.ag-note svg { flex-shrink: 0; margin-top: 2px; color: var(--text-3); }
+.ag-step { padding: 0 0 20px; }
+.ag-step + .ag-step { border-top: 1px solid var(--border); padding-top: 20px; }
+.ag-step-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ag-step-head h3 { font-size: 14.5px; margin: 0; font-weight: 600; }
+.ag-step-n {
+  width: 22px; height: 22px; flex-shrink: 0;
+  border-radius: 50%; background: var(--surface-3); color: var(--text-2);
+  font-family: var(--font-mono); font-size: 12px;
+  display: grid; place-items: center;
+}
+.ag-step-body { padding-left: 32px; }
+.ag-facts { display: grid; gap: 4px; font-size: 13px; }
+.ag-foot {
+  border-top: 1px solid var(--border); padding-top: 16px;
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+}
+.ag-foot .ag-note { margin: 0; max-width: 62ch; }
+@media (max-width: 720px) {
+  .ag-step-body { padding-left: 0; }
+}
+
 .kvrow {
   display: flex; justify-content: space-between; gap: 16px;
   padding: 9px 0;

@@ -392,6 +392,11 @@ kubernetes-logs, grava no deployment, aparece saudável na UI.*
   staging, dry-run, promoção, reload, confirmação, restart, rollback);
   credencial de dados em `0600`; `instance_uid` persistido; relatório de saúde
   e métricas do Fluent Bit; unidade systemd; instalador em uma linha.
+  **Não** empacotar o Fluent Bit junto (ADR-069): o `.deb`/`.rpm` do agente
+  leva só o agente, e a tela *Agentes* do console carrega o procedimento por
+  distribuição. `velox-agent doctor` já existe e recusa abaixo da 3.2.
+  Alinhar o `AGENT_IMAGE` do core (`fluent/fluent-bit:3.1.9`) com esse mínimo
+  é parte da fase.
 * **Kubernetes**: DaemonSet Velox um por nó (Fluent Bit + agente sidecar)
   substitui as workloads por receita do core; buffer `filesystem` em
   hostPath por padrão; ativação por annotation `veloxsearch.ai/integration`.

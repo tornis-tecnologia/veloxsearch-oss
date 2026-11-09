@@ -90,6 +90,11 @@ each form, and for the one thing that is not obvious: with
 egress hole, so the LDAP fixture needs `netpol-tenant-egress-ldap.yaml` applied
 to the tenant namespace.
 
+`agents_check.py <base> <user> <pw> [shot.png]` drives the **Agents** screen,
+the per-distribution host install guide (ADR-069). It needs Playwright and an
+authenticated install; it touches no cluster state, so it is safe against a
+live one.
+
 ## Fixtures
 
 `tests/fixtures/integrations/nginx/` is a complete integration package —

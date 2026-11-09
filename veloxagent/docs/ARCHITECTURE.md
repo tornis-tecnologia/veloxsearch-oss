@@ -452,11 +452,30 @@ comprovante da assinatura de suporte, e o contrato comercial é o que obriga.
   segura de config (`supervisor.rs`: staging → `--dry-run` → promoção atômica
   → hot reload → confirmação → restart → rollback para o *last-known-good*).
   Falha de config é reportada com a mensagem do engine, verbatim.
-* **Engines pinados** por versão de agente, distribuídos junto (o agente
-  "sabe" qual Fluent Bit roda, e qual otelcol quando a exceção do §5.5 o
-  liga). No caso normal o host roda dois processos: agente e Fluent Bit. Upgrade do agente = upgrade dos
-  engines, por OpAMP *packages*, artefato assinado, rollout por percentual
-  com janela de manutenção (Fleet faz; vale copiar), rollback ao anterior.
+* **Não distribuímos os engines** (ADR-069). O upstream do Fluent Bit não
+  publica binário estático para Linux — o caminho é o repositório apt/yum do
+  próprio projeto, ou o pacote da distribuição onde existe — e embutir um
+  faria de nós o construtor de um código C, donos da resposta a CVE dele. O
+  operador instala; o agente supervisiona o que encontra. No caso normal o
+  host roda dois processos: agente e Fluent Bit.
+* **Versão mínima 3.2, verificada pelo agente.** É de onde o YAML é o formato
+  padrão de configuração (o clássico `.conf` sai no fim de 2026); *hot reload*
+  é da 2.1.0 e a entrada OTLP da 2.0.0. `velox-agent doctor` acha o binário,
+  lê `--version` e recusa abaixo do mínimo dizendo qual achou
+  (`preflight.rs`). A versão do engine é do host, não da frota: o Mesh mostra
+  a dispersão, e uma política que exige recurso mais novo falha nos agentes
+  que não o têm, por nome.
+* **Caminhos absolutos em toda config gerada.** O Fluent Bit só preserva o
+  diretório da configuração principal através de um *hot reload* a partir da
+  5.1.2; caminho relativo recarregado numa 3.2 ou 4.x resolve errado. É o que
+  mantém o mínimo em 3.2 em vez de 5.1.2.
+* **`--dry-run` é sondado, não presumido.** O upstream documenta a flag mas
+  nunca disse em que versão ela entrou. Sem ela, o agente aplica sem
+  pré-validação e avisa — a confirmação de saúde e o rollback seguem valendo.
+* **A instalação é procedimento documentado**, uma aba por distribuição na
+  tela *Agentes* do console, com os comandos do upstream verbatim. Debian e
+  Ubuntu não empacotam o Fluent Bit e a tela diz isso; o RHEL 9 não tem build
+  do projeto e aponta para o EPEL. Site fechado espelha o repositório.
 * **Estado no host**: `instance_uid`, credencial (`0600`), política aplicada,
   anterior, buffer `filesystem` do Fluent Bit (e fila `file_storage` do
   otelcol, quando ligado).
