@@ -51,6 +51,17 @@ VELOX_MESH_ADDR=127.0.0.1:4320 ./target/release/velox-mesh
 ./target/release/velox-agent version
 ```
 
+Phase 0 has no screens (the Mesh console is phase 1). To inspect what it does
+build, compile a policy against real packages and read what an agent would
+receive — the shared renderer, the closed token set, schema-1.1 variables and
+every fail-closed refusal:
+
+```bash
+cargo run -p velox-policy --example compile -- <veloxsearch-registry checkout>
+cargo run -p velox-policy --example compile -- <checkout> nginx \
+    --var log_path=/var/log/nginx/access.log --host logs.example.internal
+```
+
 Source files carry the repository's standard header, checked by
 `.github/scripts/check-headers.sh`:
 
