@@ -13,7 +13,8 @@
      /deployments/:id           → /deployments/:id/overview
      /deployments/:id/:tab      overview | data | backup | access | config | activity
      /capacity
-     /agents                    host install guide (ADR-069)
+     /mesh                      → /mesh/overview
+     /mesh/:tab                 overview | agents | policies (ADR-068)
      /settings
      /login, /setup             owned by the boot gate (app.jsx), never rendered
                                 as screens by this router
@@ -30,6 +31,9 @@
 import { useState, useEffect, useCallback } from "react";
 
 const TABS = ["overview", "data", "backup", "access", "config", "activity"];
+// Velox Mesh sub-screens (ADR-068 §4.5). Same rule as the deployment tabs:
+// an unknown segment falls back rather than 404ing a bookmark.
+const MESH_TABS = ["overview", "agents", "policies"];
 const TAB_ALIASES = {
   edit: "config", integrations: "data", snapshot: "backup",
   security: "access", auth: "access",
@@ -50,7 +54,10 @@ function parse(pathname, search) {
       return { name: "deployment", id, tab, upgrade: q.get("upgrade") === "1" };
     }
     case "capacity": return { name: "capacity" };
-    case "agents": return { name: "agents" };
+    case "mesh": {
+      const tab = MESH_TABS.includes(seg[1]) ? seg[1] : "overview";
+      return { name: "mesh", tab };
+    }
     case "settings": return { name: "settings" };
     case "login": case "setup": return { name: "auth" };
     default: return { name: "deployments" };
@@ -62,7 +69,7 @@ function pathFor(r) {
     case "create": return "/deployments/new";
     case "deployment": return `/deployments/${r.id}/${r.tab || "overview"}${r.upgrade ? "?upgrade=1" : ""}`;
     case "capacity": return "/capacity";
-    case "agents": return "/agents";
+    case "mesh": return `/mesh/${r.tab || "overview"}`;
     case "settings": return "/settings";
     default: return "/deployments";
   }

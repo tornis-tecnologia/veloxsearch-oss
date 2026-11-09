@@ -90,10 +90,12 @@ each form, and for the one thing that is not obvious: with
 egress hole, so the LDAP fixture needs `netpol-tenant-egress-ldap.yaml` applied
 to the tenant namespace.
 
-`agents_check.py <base> <user> <pw> [shot.png]` drives the **Agents** screen,
-the per-distribution host install guide (ADR-069). It needs Playwright and an
-authenticated install; it touches no cluster state, so it is safe against a
-live one.
+`mesh_check.py <base> <user> <pw> [shot.png]` drives the **Velox Mesh**
+screens: the four-step journey, the per-target install guide (whose tab set
+mirrors the Fluent Bit project's own downloads index, ADR-069) and the policy
+composer, where turning on an integration must show both halves it brings.
+It needs Playwright and an authenticated install; it touches no cluster
+state, so it is safe against a live one.
 
 ## Fixtures
 

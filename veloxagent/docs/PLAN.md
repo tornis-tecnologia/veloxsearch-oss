@@ -377,6 +377,12 @@ Decisões que, erradas, custam a refazer tudo:
 
 ### Fase 1 — Mesh + Agent mínimos (8 semanas)
 
+A UI da jornada já existe no console (`/mesh`: visão geral, agentes,
+políticas) e o core já expõe `mesh_status` e `integration_artifacts`. O que
+falta é o controlador por trás dela: guardar políticas e revisões, matricular
+agentes e entregar a configuração. Até lá a aba de políticas monta e mostra,
+sem guardar — nada é simulado.
+
 Meta: *um host fora do cluster matricula, recebe uma política com nginx e
 kubernetes-logs, grava no deployment, aparece saudável na UI.*
 

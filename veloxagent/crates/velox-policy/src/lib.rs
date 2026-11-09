@@ -18,6 +18,28 @@
 //! integration written for the core's DaemonSet path works unchanged under
 //! Velox Mesh.
 //!
+//! ## An activation has two halves
+//!
+//! Turning on an integration is not only a collector stanza. The Elastic
+//! Fleet journey an operator already knows — *agent → policy → integration* —
+//! means that picking "nginx" brings everything that makes nginx logs
+//! **useful**, not just collected:
+//!
+//! | Half | What it is | Who performs it |
+//! | --- | --- | --- |
+//! | edge | the Fluent Bit / otelcol stanza that tails and ships | the agent, from [`Compiled::bodies`] |
+//! | backend | ingest pipeline, index template, index pattern, dashboards | the core, on the target deployment |
+//!
+//! Both halves come out of the **same signed package** (ADR-039), so they
+//! cannot drift: the manifest that names `agent.conf.tmpl` also names
+//! `pipeline.json`, `index-template.json` and `saved-objects.ndjson`, and the
+//! core's apply-engine already installs that side per deployment. This crate
+//! therefore compiles a policy into *both*: the engine bodies, and
+//! [`Compiled::backend`] — the inventory the target deployment must carry
+//! before the policy's data means anything. The Mesh does not write to
+//! OpenSearch; it states the requirement and the core fulfils it, the same
+//! split the core keeps between its pure modules and `k8s.rs`.
+//!
 //! ## Shape of a policy
 //!
 //! A policy is a named, versioned set of *activations* (package id + version +
@@ -111,6 +133,51 @@ pub struct Fragment {
     pub body: String,
 }
 
+/// The backend half of one activation: what the target deployment must carry
+/// for this integration's data to be parsed, mapped, retained and shown.
+///
+/// It names the package rather than carrying rendered bodies, because the core
+/// already installs exactly this (`integrations::apply_package`) and owns every
+/// OpenSearch write. `resources` is the inventory for the UI — the four
+/// families an operator sees when they pick an integration — derived from the
+/// package itself, so it cannot claim an artifact the package does not ship.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendRequirement {
+    pub deployment: String,
+    pub package_id: String,
+    pub package_version: String,
+    /// `(kind, id)` for everything installing this package creates.
+    pub resources: Vec<(String, String)>,
+}
+
+/// The artifact families an operator chooses between when they read an
+/// integration. A package always ships an agent config; the rest are optional
+/// and the manifest says which it has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ArtifactSummary {
+    pub ingest_pipeline: bool,
+    pub index_template: bool,
+    pub index_patterns: usize,
+    pub dashboards: usize,
+}
+
+impl ArtifactSummary {
+    /// Count the families in a package's created-resource set.
+    pub fn of(resources: &[(String, String)]) -> ArtifactSummary {
+        let mut s = ArtifactSummary::default();
+        for (kind, _) in resources {
+            match kind.as_str() {
+                "IngestPipeline" => s.ingest_pipeline = true,
+                "IndexTemplate" => s.index_template = true,
+                "IndexPattern" => s.index_patterns += 1,
+                "SavedObject" => s.dashboards += 1,
+                _ => {}
+            }
+        }
+        s
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CompileError {
     #[error("activation {package_id}@{package_version}: {reason}")]
@@ -128,6 +195,17 @@ pub enum CompileError {
 /// is the real one; tests fake it.
 pub trait FragmentRenderer {
     fn render(&self, activation: &Activation, outputs: &[Output]) -> Result<Vec<Fragment>, String>;
+
+    /// The backend half of the same activation. The default is "none", so a
+    /// renderer that only cares about the edge (the tests' fake) stays
+    /// three lines long; [`PackageRenderer`] overrides it from the package.
+    fn backend(
+        &self,
+        _activation: &Activation,
+        _outputs: &[Output],
+    ) -> Result<Option<BackendRequirement>, String> {
+        Ok(None)
+    }
 }
 
 /// Where verified packages come from: the Mesh's package cache, filled only
@@ -166,21 +244,18 @@ pub struct PackageRenderer<'a, S: PackageStore + ?Sized> {
     pub target: Target,
 }
 
-impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
-    fn render(&self, activation: &Activation, outputs: &[Output]) -> Result<Vec<Fragment>, String> {
-        let pkg = self
-            .store
+impl<S: PackageStore + ?Sized> PackageRenderer<'_, S> {
+    fn package(&self, activation: &Activation) -> Result<&Package, String> {
+        self.store
             .get(&activation.package_id, &activation.package_version)
-            .ok_or_else(|| "package is not in the verified store".to_string())?;
-        // Schema 1.1 variables: validated against the manifest, defaults
-        // filled, unknown names refused — the same function the core's
-        // DaemonSet path runs with an empty policy map.
-        let resolved = velox_integrations::resolve_variables(&pkg.manifest, &activation.vars)
-            .map_err(|e| e.to_string())?;
-        // Today's templates bake `out_opensearch` in. A gateway output needs
-        // the `out_http` rewrite the phase-3 contract defines
-        // (ARCHITECTURE.md §5.2); refuse rather than ship a config that
-        // ignores the policy's output.
+            .ok_or_else(|| "package is not in the verified store".to_string())
+    }
+
+    /// The deployment a policy's data lands in. Today's templates bake
+    /// `out_opensearch` in, so a gateway output needs the `out_http` rewrite
+    /// the phase-3 contract defines (ARCHITECTURE.md §5.2); refuse rather
+    /// than ship a config that ignores the policy's output.
+    fn target<'o>(&self, outputs: &'o [Output]) -> Result<&'o str, String> {
         let dep = outputs
             .iter()
             .find_map(|o| match o {
@@ -194,6 +269,19 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
                 self.target.deployment
             ));
         }
+        Ok(dep)
+    }
+}
+
+impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
+    fn render(&self, activation: &Activation, outputs: &[Output]) -> Result<Vec<Fragment>, String> {
+        let pkg = self.package(activation)?;
+        // Schema 1.1 variables: validated against the manifest, defaults
+        // filled, unknown names refused — the same function the core's
+        // DaemonSet path runs with an empty policy map.
+        let resolved = velox_integrations::resolve_variables(&pkg.manifest, &activation.vars)
+            .map_err(|e| e.to_string())?;
+        self.target(outputs)?;
         let mut vars = velox_integrations::Vars::new(
             &self.target.deployment,
             &self.target.namespace,
@@ -221,6 +309,31 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
         }
         Ok(out)
     }
+
+    /// The other half: everything this package creates in the target
+    /// deployment's OpenSearch, read off the package itself. The Mesh writes
+    /// none of it — it states the requirement and the core's apply-engine
+    /// fulfils it, so "what the DaemonSet path installs" and "what a policy
+    /// brings" are the same set by construction.
+    fn backend(
+        &self,
+        activation: &Activation,
+        outputs: &[Output],
+    ) -> Result<Option<BackendRequirement>, String> {
+        let pkg = self.package(activation)?;
+        let deployment = self.target(outputs)?.to_string();
+        let resources = velox_integrations::created_resources(pkg)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(kind, id)| (kind.name().to_string(), id))
+            .collect();
+        Ok(Some(BackendRequirement {
+            deployment,
+            package_id: pkg.manifest.id.clone(),
+            package_version: activation.package_version.clone(),
+            resources,
+        }))
+    }
 }
 
 /// The configuration an agent receives: one body per engine it must run,
@@ -232,6 +345,11 @@ pub struct Compiled {
     /// Engine → full configuration body. An engine absent here is one the
     /// agent must stop.
     pub bodies: BTreeMap<Engine, String>,
+    /// What each activation needs on the deployment it ships to, in
+    /// activation order. Empty only for a policy whose every output is a
+    /// gateway (the queue tier owns the backend side there).
+    #[serde(default)]
+    pub backend: Vec<BackendRequirement>,
     /// sha256 over `revision` and every body, hex. Deterministic: the same
     /// revision compiles to the same hash on every Mesh replica.
     pub hash: String,
@@ -244,17 +362,19 @@ pub fn compile(policy: &Policy, renderer: &dyn FragmentRenderer) -> Result<Compi
         return Err(CompileError::NoOutput);
     }
     let mut bodies: BTreeMap<Engine, Vec<String>> = BTreeMap::new();
+    let mut backend: Vec<BackendRequirement> = Vec::new();
     for act in &policy.activations {
-        let frags =
-            renderer
-                .render(act, &policy.outputs)
-                .map_err(|reason| CompileError::Render {
-                    package_id: act.package_id.clone(),
-                    package_version: act.package_version.clone(),
-                    reason,
-                })?;
+        let fail = |reason: String| CompileError::Render {
+            package_id: act.package_id.clone(),
+            package_version: act.package_version.clone(),
+            reason,
+        };
+        let frags = renderer.render(act, &policy.outputs).map_err(fail)?;
         for f in frags {
             bodies.entry(f.engine).or_default().push(f.body);
+        }
+        if let Some(req) = renderer.backend(act, &policy.outputs).map_err(fail)? {
+            backend.push(req);
         }
     }
     let bodies: BTreeMap<Engine, String> = bodies
@@ -275,6 +395,7 @@ pub fn compile(policy: &Policy, renderer: &dyn FragmentRenderer) -> Result<Compi
         policy_id: policy.id.clone(),
         revision: policy.revision,
         bodies,
+        backend,
         hash,
     })
 }
@@ -595,5 +716,135 @@ mod tests {
         assert!(
             matches!(compile(&p, &r), Err(CompileError::Render { ref reason, .. }) if reason == "variable `port`: required and no value or default")
         );
+    }
+
+    // ---- the backend half of an activation (the Fleet journey) ----
+
+    /// A package with every artifact family, the way a real integration
+    /// ships: a pipeline, a template, an index pattern and a dashboard.
+    fn full_package() -> Package {
+        let mut pkg = nginx_like("[OUTPUT]\n    Index {index}\n");
+        pkg.pipeline = Some("{}".into());
+        pkg.index_template = Some("{}".into());
+        pkg.saved_objects = concat!(
+            "{\"type\":\"index-pattern\",\"id\":\"nginx-logs\"}\n",
+            "{\"type\":\"dashboard\",\"id\":\"velox-nginx-overview\"}\n",
+            "{\"type\":\"visualization\",\"id\":\"velox-nginx-reqs\"}\n"
+        )
+        .into();
+        pkg.manifest.teardown.ingest_pipeline = Some("nginx".into());
+        pkg.manifest.teardown.index_template = Some("nginx-logs".into());
+        pkg
+    }
+
+    fn full_store() -> Store {
+        let mut m = BTreeMap::new();
+        m.insert(("nginx".to_string(), "1.0.0".to_string()), full_package());
+        Store(m)
+    }
+
+    /// Picking an integration brings BOTH halves: the agent stanza and the
+    /// inventory the target deployment must carry. This is the property the
+    /// Fleet-style journey rests on — an operator who turns on nginx gets
+    /// parsing, mapping and a dashboard, not just a tail.
+    #[test]
+    fn an_activation_compiles_to_an_edge_half_and_a_backend_half() {
+        let s = full_store();
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+        let c = compile(&policy(&["nginx"]), &r).unwrap();
+
+        // Edge half.
+        assert!(c.bodies[&Engine::FluentBit].contains("Index nginx-logs"));
+
+        // Backend half: one requirement, naming the deployment the policy
+        // ships to and the package that fulfils it.
+        assert_eq!(c.backend.len(), 1);
+        let b = &c.backend[0];
+        assert_eq!(b.deployment, "logs-a1b2");
+        assert_eq!(
+            (b.package_id.as_str(), b.package_version.as_str()),
+            ("nginx", "1.0.0")
+        );
+
+        // The inventory is read off the package, so it cannot claim an
+        // artifact the package does not ship.
+        let kinds: Vec<&str> = b.resources.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(kinds.contains(&"IngestPipeline"));
+        assert!(kinds.contains(&"IndexTemplate"));
+        assert!(kinds.contains(&"IndexPattern"));
+        assert!(kinds.contains(&"SavedObject"));
+        assert!(b
+            .resources
+            .iter()
+            .any(|(_, id)| id == "velox-nginx-overview"));
+
+        let sum = ArtifactSummary::of(&b.resources);
+        assert_eq!(
+            sum,
+            ArtifactSummary {
+                ingest_pipeline: true,
+                index_template: true,
+                index_patterns: 1,
+                dashboards: 2, // the dashboard + its visualization
+            }
+        );
+    }
+
+    /// A package that ships no pipeline and no template says so, instead of
+    /// the screen promising four families for every integration (the
+    /// `kubernetes` package is exactly this: dynamic mapping, no pipeline).
+    #[test]
+    fn the_inventory_reflects_what_the_package_actually_ships() {
+        let mut m = BTreeMap::new();
+        let mut bare = nginx_like("[OUTPUT]\n    Index {index}\n");
+        bare.saved_objects = "{\"type\":\"index-pattern\",\"id\":\"k8s-logs\"}\n".into();
+        m.insert(("nginx".to_string(), "1.0.0".to_string()), bare);
+        let s = Store(m);
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+        let c = compile(&policy(&["nginx"]), &r).unwrap();
+        assert_eq!(
+            ArtifactSummary::of(&c.backend[0].resources),
+            ArtifactSummary {
+                ingest_pipeline: false,
+                index_template: false,
+                index_patterns: 1,
+                dashboards: 0,
+            }
+        );
+    }
+
+    /// Two activations, two requirements, in activation order — so the UI can
+    /// show "this policy brings N artifacts" without re-deriving anything.
+    #[test]
+    fn every_activation_contributes_its_own_requirement() {
+        let mut m = BTreeMap::new();
+        m.insert(("nginx".to_string(), "1.0.0".to_string()), full_package());
+        let mut pg = full_package();
+        pg.manifest.id = "postgres".into();
+        pg.manifest.index = "postgres-logs".into();
+        m.insert(("postgres".to_string(), "1.0.0".to_string()), pg);
+        let s = Store(m);
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+        let c = compile(&policy(&["nginx", "postgres"]), &r).unwrap();
+        let ids: Vec<&str> = c.backend.iter().map(|b| b.package_id.as_str()).collect();
+        assert_eq!(ids, vec!["nginx", "postgres"]);
+    }
+
+    /// The fake renderer answers "no backend half" by default, so a compile
+    /// that only cares about the edge still works — and a policy with no
+    /// usable output never reaches the backend question.
+    #[test]
+    fn a_renderer_without_a_backend_half_still_compiles() {
+        let c = compile(&policy(&["nginx"]), &Fake).unwrap();
+        assert!(c.backend.is_empty());
     }
 }

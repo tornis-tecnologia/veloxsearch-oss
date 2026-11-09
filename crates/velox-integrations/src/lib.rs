@@ -480,6 +480,22 @@ pub enum ResourceKind {
     Datasource,
 }
 
+impl ResourceKind {
+    /// A stable name for the wire and the UI. Spelled out rather than derived
+    /// from `Debug`, because a rename of the variant would otherwise change an
+    /// API response and a screen's labels silently.
+    pub fn name(self) -> &'static str {
+        match self {
+            ResourceKind::IngestPipeline => "IngestPipeline",
+            ResourceKind::IndexTemplate => "IndexTemplate",
+            ResourceKind::IndexPattern => "IndexPattern",
+            ResourceKind::SavedObject => "SavedObject",
+            ResourceKind::IsmPolicy => "IsmPolicy",
+            ResourceKind::Datasource => "Datasource",
+        }
+    }
+}
+
 /// `(kind, id)` — one installed / torn-down object.
 pub type ResourceKey = (ResourceKind, String);
 
@@ -855,5 +871,17 @@ mod tests {
         assert!(m.teardown.ism_policies.is_empty());
         let err = parse_manifest("id: [\n").unwrap_err();
         assert!(matches!(err, Error::Manifest(_)));
+    }
+
+    /// The wire names are fixed: a variant rename must not change an API
+    /// response or a screen's labels without the test saying so.
+    #[test]
+    fn resource_kind_names_are_stable() {
+        assert_eq!(ResourceKind::IngestPipeline.name(), "IngestPipeline");
+        assert_eq!(ResourceKind::IndexTemplate.name(), "IndexTemplate");
+        assert_eq!(ResourceKind::IndexPattern.name(), "IndexPattern");
+        assert_eq!(ResourceKind::SavedObject.name(), "SavedObject");
+        assert_eq!(ResourceKind::IsmPolicy.name(), "IsmPolicy");
+        assert_eq!(ResourceKind::Datasource.name(), "Datasource");
     }
 }

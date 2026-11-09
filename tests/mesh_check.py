@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Velox Mesh — the fleet journey (ADR-068, ADR-069).
+
+The journey is Elastic Fleet's, because operators already know it:
+
+    install the controller -> install an agent on a host
+                           -> create a collection policy
+                           -> add integrations to the policy
+
+Each assertion below guards a property that is easy to break and expensive
+to notice:
+
+  - **The install guide mirrors the project's own downloads index.** We ship
+    no collection engine (ADR-069), so the set of targets is Fluent Bit's to
+    decide, not ours. A target quietly dropped (or an invented one, like a
+    Fedora page the project does not publish) fails here.
+  - **The commands are upstream's, verbatim.** A paraphrased shell command is
+    a support ticket, so each tab must still carry its own repository path.
+  - **An integration brings both halves.** Turning on nginx must show the
+    collection stanza AND the pipeline, template, index pattern and
+    dashboards — read off the signed package, never a hand-kept table. This
+    is the whole promise of the last journey step.
+  - **The inventory is the package's, not a template.** A package with no
+    pipeline must render with no pipeline, or the screen is lying about what
+    an operator is turning on.
+  - **The Mesh's absence is a state, not an error.** A fresh install has no
+    controller; the screen says how to get one instead of failing.
+  - Nothing renders an i18n key or `undefined` in any of three languages.
+
+Usage:
+  mesh_check.py <base> <user> <pw> [shot.png]
+"""
+import sys
+from playwright.sync_api import sync_playwright
+
+base, user, pw = sys.argv[1:4]
+shot = sys.argv[4] if len(sys.argv) > 4 else None
+
+# The targets the Fluent Bit project documents at
+# docs.fluentbit.io/manual/installation/downloads, each with a string that
+# must appear in its panel. `None` marks a target the project documents but
+# we have no commands for: we link out rather than invent a procedure, so
+# only the agent steps are present.
+TARGETS = {
+    "amazon": "packages.fluentbit.io/amazonlinux",
+    "buildroot": None,
+    "debian": "packages.fluentbit.io/debian",
+    "raspbian": "packages.fluentbit.io/raspbian",
+    "redhat": "packages.fluentbit.io/centos",
+    "rocky": "packages.fluentbit.io/almalinux",
+    "ubuntu": "packages.fluentbit.io/ubuntu",
+    "yocto": None,
+    "macos": None,
+    "windows": "fluent-bit",
+}
+
+fail = []
+
+
+def check(cond, msg):
+    if not cond:
+        fail.append(msg)
+        print(f"  ✗ {msg}")
+    else:
+        print(f"  ✓ {msg}")
+
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page(viewport={"width": 1440, "height": 1100})
+    errors = []
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    page.on("pageerror", lambda e: errors.append(str(e)))
+
+    page.goto(f"{base}/login", wait_until="networkidle")
+    if page.locator('[data-testid="nav-mesh"]').count() == 0:
+        page.fill('input[name="username"], input[type="text"]', user)
+        page.fill('input[type="password"]', pw)
+        page.click('button[type="submit"]')
+        page.wait_for_load_state("networkidle")
+
+    # ---- the section and its three tabs ---------------------------------
+    page.click('[data-testid="nav-mesh"]')
+    page.wait_for_selector('[data-testid="mesh-panel-overview"]', timeout=15000)
+    check("/mesh" in page.url, f"the sidebar lands on /mesh (got {page.url})")
+
+    # No controller on a fresh install: a STATE with a way forward, not an error.
+    check(page.locator('[data-testid="mesh-absent"]').count() == 1
+          or page.locator('[data-testid="mesh-ready"]').count() == 1
+          or page.locator('[data-testid="mesh-unreachable"]').count() == 1,
+          "the overview states whether a Mesh is installed")
+    overview = page.locator('[data-testid="mesh-panel-overview"]').inner_text()
+    check(overview.count("\n") > 5 and "VELOX_MESH_URL" in overview,
+          "the overview carries the four-step journey and how to point the console at a Mesh")
+
+    # Deep links survive a reload (ADR-067: every screen has a URL).
+    page.goto(f"{base}/mesh/policies", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="mesh-panel-policies"]', timeout=15000)
+    check(True, "/mesh/policies opens the policies tab directly")
+
+    # ---- the install guide ----------------------------------------------
+    page.click('[data-testid="mesh-tab-agents"]')
+    tabs = page.locator('[data-testid^="agents-tab-"]')
+    tabs.first.wait_for(timeout=5000)
+    check(tabs.count() == len(TARGETS),
+          f"{len(TARGETS)} install targets, mirroring the project's index (got {tabs.count()})")
+
+    for key, needle in TARGETS.items():
+        page.click(f'[data-testid="agents-tab-{key}"]')
+        panel = page.locator(f'[data-testid="agents-panel-{key}"]')
+        panel.wait_for(timeout=5000)
+        body = panel.inner_text()
+        blocks = panel.locator(".cmdblock .codeblock").count()
+        if needle:
+            check(needle in body, f"{key}: the upstream command is verbatim ({needle})")
+            check(blocks >= 4, f"{key}: engine steps plus agent steps (got {blocks} blocks)")
+        else:
+            # Link-only: the agent steps are still there, the engine's are not.
+            check(blocks == 3, f"{key}: links out for the engine, keeps the 3 agent steps (got {blocks})")
+            check(panel.locator('a[href*="docs.fluentbit.io"]').count() >= 1,
+                  f"{key}: links to the project's own page")
+        for bad in ("undefined", "mesh_", "{min}"):
+            check(bad not in body, f"{key}: nothing renders {bad!r}")
+
+    # The two facts an operator cannot discover from our silence.
+    for key in ("debian", "ubuntu"):
+        page.click(f'[data-testid="agents-tab-{key}"]')
+        body = page.locator(f'[data-testid="agents-panel-{key}"]').inner_text().lower()
+        check("não empacotam" in body or "do not package" in body or "no empaquetan" in body,
+              f"{key}: says the distribution does not package Fluent Bit")
+    page.click('[data-testid="agents-tab-redhat"]')
+    check("EPEL" in page.locator('[data-testid="agents-panel-redhat"]').inner_text(),
+          "redhat: names EPEL as the RHEL 9 route")
+    check("3.2" in page.locator(".ag-facts").inner_text(), "the minimum Fluent Bit version is shown")
+
+    # ---- the policy composer: an integration brings both halves ----------
+    page.click('[data-testid="mesh-tab-policies"]')
+    page.wait_for_selector('[data-testid="mesh-integration-nginx"]', timeout=20000)
+    page.click('[data-testid="mesh-integration-nginx"]')
+    page.wait_for_selector('[data-testid="mesh-integration-nginx"] .mesh-chip.on', timeout=20000)
+    card = page.locator('[data-testid="mesh-integration-nginx"]').inner_text()
+    # nginx is the worked example of a complete package: all four families.
+    for family in ("Pipeline", "Template"):
+        check(family in card, f"nginx shows its {family}")
+    check(".mesh-chip" and page.locator('[data-testid="mesh-integration-nginx"] .mesh-chip.on').count() >= 5,
+          "nginx shows collection + pipeline + template + index + dashboards")
+    summary = page.locator('[data-testid="mesh-policy-summary"]').inner_text()
+    check("nginx" in summary, "the policy summary names the integration")
+    check(page.locator('[data-testid="mesh-policy-save-blocked"]').count() == 1,
+          "saving is honestly blocked on the Mesh, not faked")
+
+    # kubernetes ships no pipeline — the inventory must reflect the package.
+    if page.locator('[data-testid="mesh-integration-kubernetes"]').count():
+        page.click('[data-testid="mesh-integration-kubernetes"]')
+        page.wait_for_timeout(2500)
+        k = page.locator('[data-testid="mesh-integration-kubernetes"]')
+        on = k.locator(".mesh-chip.on").count()
+        off = k.locator(".mesh-chip:not(.on)").count()
+        check(off >= 1, f"kubernetes shows what it does NOT ship (on={on}, off={off})")
+
+    if shot:
+        page.screenshot(path=shot, full_page=True)
+        print(f"  · screenshot {shot}")
+
+    # ERR_NETWORK_CHANGED is Chrome reporting that the HOST's network changed
+    # under an in-flight request (a VPN, a wifi hop). It is not something the
+    # SPA can cause or prevent, and failing on it would make this check flaky
+    # on a laptop. Everything else still fails the run — a real fetch error,
+    # a hydration warning or a thrown exception is exactly what this looks for.
+    ignorable = ("favicon", "ERR_NETWORK_CHANGED")
+    noise = [e for e in errors if not any(i.lower() in e.lower() for i in ignorable)]
+    check(not noise, f"console clean (got {noise[:2]})")
+    browser.close()
+
+if fail:
+    print(f"\nFAILED: {len(fail)}")
+    sys.exit(1)
+print("\nVelox Mesh screens OK")

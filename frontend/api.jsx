@@ -157,6 +157,20 @@ const API = {
   catalogInstall: (deployment, id, version) =>
     call("catalog_install", { deployment, id, version: version || null }),
   catalogUninstall: (deployment, id) => call("catalog_uninstall", { deployment, id }),
+  // What ONE integration brings, read off the verified package: the ingest
+  // pipeline, the index template, the index patterns, the dashboards and any
+  // schema-1.1 variables. No deployment: the inventory is the package's, the
+  // same for every deployment, and the Velox Mesh policy screen shows it
+  // BEFORE anything is installed.
+  // -> { id, version, index, ingest_pipeline, index_template, index_patterns,
+  //      dashboards, otel_config, variables: [{name, kind, default, required}] }
+  integrationArtifacts: (id) => call("integration_artifacts", { id }),
+  // ── Velox Mesh (ADR-068) ─────────────────────────────────────
+  // Is a fleet controller configured for this installation, and can we reach
+  // it? Three states the console must tell apart: not configured (show the
+  // install guide), configured but unreachable (show the URL and the error),
+  // reachable (open the fleet). -> { configured, url, reachable, error }
+  meshStatus: () => call("mesh_status", null, "GET"),
   // ── OTel observability stack (ADR-053) ───────────────────────
   // The SECOND collection option, additive to the recipes above: it ships OTLP
   // traces + metrics, which is what fills the Trace Analytics, service-map and

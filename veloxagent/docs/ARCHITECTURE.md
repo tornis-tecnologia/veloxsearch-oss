@@ -130,6 +130,37 @@ source funciona sem alteração sob o Velox Mesh*. O que o time precisa manter:
 `velox-policy::FragmentRenderer` é a assinatura dessa fronteira; o fake nos
 testes dela mostra o contrato mínimo.
 
+### 3.1 A jornada, e por que uma ativação tem duas metades
+
+O operador percorre quatro passos, na ordem do Elastic Fleet porque é a que
+ele já conhece e é a certa:
+
+```
+instalar o Velox Mesh ──► instalar o agente no host ──► criar uma política ──► ligar integrações
+```
+
+O último passo é o que dá sentido aos outros, e só cumpre a promessa se ligar
+uma integração trouxer tudo que a torna **útil**, não só coletada:
+
+| Metade | O que é | Quem executa |
+| --- | --- | --- |
+| ponta | a stanza do Fluent Bit/otelcol que segue e envia | o agente, de `Compiled::bodies` |
+| destino | pipeline de ingestão, template de índice, index pattern, dashboards | o core, no deployment alvo |
+
+As duas saem do **mesmo pacote assinado**, então não divergem: o manifesto que
+nomeia `agent.conf.tmpl` nomeia também `pipeline.json`, `index-template.json`
+e `saved-objects.ndjson`, e o apply-engine do core já instala esse lado por
+deployment. `velox-policy::compile` devolve as duas — `bodies` e
+`backend: Vec<BackendRequirement>`. O Mesh **não escreve no OpenSearch**: ele
+declara a exigência e o core a cumpre, a mesma separação que o core mantém
+entre módulos puros e `k8s.rs`.
+
+O console mostra isso antes de instalar qualquer coisa: `POST
+/api/integration_artifacts` lê o pacote **verificado** e devolve o inventário,
+então um pacote sem pipeline aparece sem pipeline (o `kubernetes` é esse caso
+— mapeamento dinâmico, sem pipeline). A tela não promete quatro famílias de
+artefato para uma integração que tem duas.
+
 ## 4. Velox Mesh
 
 ### 4.1 Processo e estado

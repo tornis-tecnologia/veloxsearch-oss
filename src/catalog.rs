@@ -434,6 +434,115 @@ impl FetchedPackage {
     }
 }
 
+/// What turning on one integration brings, read off its signed package.
+///
+/// The Fleet journey an operator knows is *agent → policy → integration*, and
+/// the promise of that last step is that picking "nginx" gives them parsed,
+/// mapped, retained and charted nginx logs — not a tail. This is that promise,
+/// enumerated, so the console can show it **before** anything is installed and
+/// `velox-policy::BackendRequirement` can carry the same list into a policy.
+///
+/// Every field is derived from the package, never from a hand-kept table: a
+/// package that ships no pipeline reports none (`kubernetes` is exactly that —
+/// dynamic mapping, no pipeline), so the screen cannot promise four artifact
+/// families for an integration that has two.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IntegrationArtifacts {
+    pub id: String,
+    pub version: String,
+    /// The index the collected data lands in.
+    pub index: String,
+    /// The ingest pipeline id, when the package ships one.
+    pub ingest_pipeline: Option<String>,
+    /// The index-template id, when the package ships one.
+    pub index_template: Option<String>,
+    /// Index-pattern saved-object ids (what makes the data visible in
+    /// Dashboards).
+    pub index_patterns: Vec<String>,
+    /// Dashboard and visualization saved-object ids.
+    pub dashboards: Vec<String>,
+    /// The package ships an OTel collector template as well as the Fluent Bit
+    /// one (manifest schema 1.1).
+    pub otel_config: bool,
+    /// Schema-1.1 variables a policy may set: `(name, type, default, required)`.
+    pub variables: Vec<ArtifactVariable>,
+}
+
+/// One schema-1.1 variable, flattened for the console.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactVariable {
+    pub name: String,
+    pub kind: String,
+    pub default: Option<String>,
+    pub required: bool,
+}
+
+/// Fetch, **verify** and enumerate what a package brings. Verification is the
+/// whole security boundary (ADR-039) and it applies here exactly as it does on
+/// install: this is a read, but it is a read of registry content, and reading
+/// an unsigned package's manifest to render a screen would be a way to put
+/// attacker-chosen text in front of an operator.
+pub async fn artifacts(id: &str) -> Result<IntegrationArtifacts> {
+    if !valid_component(id) {
+        bail!("invalid integration id: {id:?}");
+    }
+    let reg = Registry::from_env();
+    let fetched = reg.fetch_package(id).await?;
+    verify_package(&fetched.manifest_yaml, &fetched.assets)
+        .with_context(|| format!("refusing to read integration {id}"))?;
+    let version = manifest_field(&fetched.manifest_yaml, "version").unwrap_or_default();
+    let pkg = fetched.into_package()?;
+    if pkg.manifest.id != id {
+        bail!(
+            "package identity mismatch: asked for {id}, manifest says {}",
+            pkg.manifest.id
+        );
+    }
+
+    let mut index_patterns = Vec::new();
+    let mut dashboards = Vec::new();
+    for (kind, oid) in crate::integrations::created_resources(&pkg)? {
+        match kind {
+            crate::integrations::ResourceKind::IndexPattern => index_patterns.push(oid),
+            crate::integrations::ResourceKind::SavedObject => dashboards.push(oid),
+            _ => {}
+        }
+    }
+    Ok(IntegrationArtifacts {
+        id: pkg.manifest.id.clone(),
+        version,
+        index: pkg.manifest.index.clone(),
+        ingest_pipeline: pkg.manifest.teardown.ingest_pipeline.clone(),
+        index_template: pkg.manifest.teardown.index_template.clone(),
+        index_patterns,
+        dashboards,
+        otel_config: pkg.otel_config.is_some(),
+        variables: pkg
+            .manifest
+            .variables
+            .iter()
+            .map(|v| ArtifactVariable {
+                name: v.name.clone(),
+                kind: format!("{:?}", v.kind).to_lowercase(),
+                default: v.default.as_ref().and_then(|d| match d {
+                    serde_yaml::Value::String(s) => Some(s.clone()),
+                    serde_yaml::Value::Number(n) => Some(n.to_string()),
+                    serde_yaml::Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                }),
+                required: v.required,
+            })
+            .collect(),
+    })
+}
+
+/// A top-level scalar from a manifest, for the fields the engine's `Manifest`
+/// does not model (`version` is the catalog's, not the apply-engine's).
+fn manifest_field(manifest_yaml: &str, key: &str) -> Option<String> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(manifest_yaml).ok()?;
+    doc.get(key)?.as_str().map(str::to_string)
+}
+
 /// One path component that is safe to concatenate into a URL or a filesystem
 /// path: lower-case ids and asset filenames only, no separators, no `..`.
 pub(crate) fn valid_component(s: &str) -> bool {
@@ -1029,6 +1138,14 @@ pub struct CatalogInstallReq {
     pub id: String,
     #[serde(default)]
     pub version: Option<String>,
+}
+
+/// Ask what one integration brings. No deployment: the answer is the
+/// package's own inventory, identical for every deployment, and the console
+/// shows it before anything is installed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IntegrationArtifactsReq {
+    pub id: String,
 }
 
 /// `POST /api/catalog_uninstall` (#76).

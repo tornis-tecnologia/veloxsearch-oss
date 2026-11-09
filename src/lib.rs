@@ -42,6 +42,12 @@ pub mod integrations;
 #[cfg(feature = "ssr")]
 pub mod catalog;
 
+/// Whether this installation has a Velox Mesh, so the console can open the
+/// fleet screens or explain how to install one (ADR-068: a separate binary
+/// the core never embeds).
+#[cfg(feature = "ssr")]
+pub mod mesh;
+
 // ADR-053: the OTel observability stack — the second collection option,
 // additive to the Fluent Bit recipes above.
 #[cfg(feature = "ssr")]

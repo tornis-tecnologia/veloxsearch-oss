@@ -2428,7 +2428,31 @@ mod server {
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
     }
+    /// What one integration brings, before anything is installed: the
+    /// collection config, the ingest pipeline, the index template, the index
+    /// patterns and the dashboards. The console shows this when an operator
+    /// picks an integration for a policy, which is the moment the Fleet-style
+    /// promise ("turn it on and it is useful") is either kept or broken.
+    /// Installation-wide like `/catalog`, and the package is verified before
+    /// a byte of it is described.
+    async fn integration_artifacts(
+        _scope: Scope,
+        Json(req): Json<crate::catalog::IntegrationArtifactsReq>,
+    ) -> Result<Json<crate::catalog::IntegrationArtifacts>, ApiError> {
+        integration_id(&req.id)?;
+        crate::catalog::artifacts(&req.id)
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
     // -- end catalog routes (#75) ---------------------------------------
+
+    /// Whether this installation has a Velox Mesh (ADR-068). The console
+    /// branches on it: no Mesh ⇒ the install guide, Mesh but unreachable ⇒
+    /// the URL and the error, Mesh ⇒ the fleet.
+    async fn mesh_status(_scope: Scope) -> Json<crate::mesh::MeshStatus> {
+        Json(crate::mesh::status().await)
+    }
 
     // -- integrations tab support (#76) ---------------------------------
 
@@ -3092,6 +3116,8 @@ mod server {
         RoutePolicy { path: "/catalog", policy: TenantScoped, note: "package list is installation-wide; the installed overlay is per deployment, and an unowned name reads as no-deployment." },
         RoutePolicy { path: "/catalog_install", policy: TenantScoped, note: "applies a package to a deployment; resolve-before-mutate." },
         RoutePolicy { path: "/catalog_uninstall", policy: TenantScoped, note: "DELETES the package's teardown set from the deployment's OpenSearch; resolve-before-mutate, same surface as catalog_install." },
+        RoutePolicy { path: "/integration_artifacts", policy: TenantScoped, note: "what a package brings (pipeline/template/index patterns/dashboards), read off the VERIFIED package; installation-wide metadata like /catalog, no deployment named, no write." },
+        RoutePolicy { path: "/mesh_status", policy: AdminOnly, note: "whether a Velox Mesh is configured for this installation and reachable (ADR-068) — an install-level fact, and the URL is infrastructure a tenant has no use for." },
         RoutePolicy { path: "/node_stats", policy: TenantScoped, note: "live cluster stats; unowned degrades to the empty snapshot." },
         RoutePolicy { path: "/metrics_series", policy: TenantScoped, note: "historical series out of the deployment's own index." },
         RoutePolicy { path: "/dashboard_credentials", policy: TenantScoped, note: "THE credential read — unowned is 404, never a password." },
@@ -3184,6 +3210,8 @@ mod server {
             .route(p("/catalog_install"), post(catalog_install))
             // -- integrations tab support (#76)
             .route(p("/catalog_uninstall"), post(catalog_uninstall))
+            .route(p("/integration_artifacts"), post(integration_artifacts))
+            .route(p("/mesh_status"), get(mesh_status))
             .route(p("/node_stats"), post(node_stats))
             .route(p("/metrics_series"), post(metrics_series))
             .route(p("/access_settings"), get(get_access_settings))

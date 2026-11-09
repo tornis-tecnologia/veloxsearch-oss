@@ -46,6 +46,11 @@ second product. The team does not want it.
    distribution.** The console carries the procedure — one tab per
    distribution, the upstream repository commands verbatim, copy-paste — so
    the operator never has to reconcile our instructions with Fluent Bit's.
+   **The set of targets is the project's, not ours**: the tabs mirror
+   `docs.fluentbit.io/manual/installation/downloads`, including the ones we
+   have no commands for (Buildroot, Yocto, macOS), which link to the project's
+   page rather than inventing a procedure. We do not add a target the project
+   does not document, even where a distribution happens to package Fluent Bit.
    Where the distribution packages Fluent Bit itself (Fedora, EPEL) that
    package is accepted; where it does not (Debian, Ubuntu, Arch) the upstream
    repository is required, and the screen says so rather than pretending
