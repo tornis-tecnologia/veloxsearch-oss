@@ -1,48 +1,51 @@
 // Copyright (C) 2026 Tornis Desenvolvimento
 // SPDX-License-Identifier: AGPL-3.0-only
 /* ============================================================
-   Deployment detail — Overview / Edit / Integrations / Backup / Security / Auth
-   Wired to the API (issue #27):
-     Overview      → node_stats (poll) + dashboard_url
-     Edit          → save_cluster
-     Integrations  → catalog (runtime registry, #76) + monitoring_status
-                     + catalog_install / catalog_uninstall
-     Security      → dashboard_credentials (on-demand reveal) + reset_admin_password
+   Deployment detail — one header, six tabs grouped by TASK:
+
+     overview   is it alive and taking data?      node_stats + metrics_series
+     data       how does data get in?             catalog + OTel stack
+     backup     can I get it back?                snapshot_config
+     access     who gets in, from where?          credentials + auth provider + IP list
+     config     size, retention, UI, delete       save_cluster + retention + next_ui
+     activity   what is it doing right now?       activity + deployment_activity_log
+
+   The old tabs were grouped by implementation (Edit / Security / Auth), so
+   "give my team access" meant opening three of them. Delete lives at the
+   bottom of Configuration and in the header's ⋯ menu — not under every tab.
+
+   Numbers: one source per fact. The storage tile, the node rows and the
+   trend chart all read `capacity_enforced` the same way (#95), so a
+   local-path volume can no longer show 2930% on one line and 2 GB on the
+   next. Health is a word through <StatusPill>; "green" never reaches the
+   screen.
    ============================================================ */
-import { useState, useEffect, useRef, useCallback } from "react";
-import { STR, SIZES, sizeMeta } from "./i18n.jsx";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { STR, sizeMeta } from "./i18n.jsx";
 import { API, adaptMetrics, adaptSeries } from "./api.jsx";
-import { Icon, copyText, Copyable, Btn, Confirm, Field, MiniMeter, StatTile } from "./ui.jsx";
+import {
+  Icon, copyText, Copyable, Btn, Confirm, Dialog, Field, FactField, FormSection, MiniMeter, StatTile,
+  Banner, Tabs, Menu, PageHeader, StatusPill, healthTone,
+  fmtInt, fmtDec, fmtShort, fmtBytes, fmtQty, fmtGib,
+} from "./ui.jsx";
 import { AuthProviderTab } from "./views_auth_provider.jsx";
 import { SnapshotTab } from "./views_snapshot.jsx";
-import { ActivityPanel, lockReason, LockNotice } from "./views_activity.jsx";
+import { ActivityPanel, ActivityDetails, lockReason, LockNotice } from "./views_activity.jsx";
+import { relAge } from "./views_status.jsx";
 
-// Short unit suffix. The tiles put two of these side by side ("12.4 G / 50 G")
-// inside a fixed-width card, and the full "GiB" spelling was the widest thing
-// in the row — it wrapped before the number it was qualifying did.
-function gib(n) { return n.toFixed(1) + " G"; }
+function fmt(s, ...args) {
+  return args.reduce((acc, v, i) => acc.replaceAll(`{${i}}`, v), s || "");
+}
 
-// Per-node percentages, derived in one place so the row meters, the "hottest
-// node" summary and the emphasis threshold can never disagree.
+// Per-node percentages, derived in one place so the row meters and the
+// emphasis threshold can never disagree.
 function heapPct(n) { return n.heapTotal ? (n.heapUsed / n.heapTotal) * 100 : 0; }
 function nodeDiskPct(n) { return n.diskTotal ? (n.diskUsed / n.diskTotal) * 100 : 0; }
 
-// Documents gained per minute across the sampled window. Answers "is it growing
-// and how fast", which a total on its own cannot. `ts` is epoch milliseconds.
-function perMinute(points, lang) {
-  const first = points[0];
-  const last = points[points.length - 1];
-  const mins = (last.ts - first.ts) / 60000;
-  if (!(mins > 0)) return "—";
-  const delta = (last.docs - first.docs) / mins;
-  if (delta <= 0) return lang === "pt" ? "estável" : lang === "es" ? "estable" : "steady";
-  const v = delta >= 1000 ? `${(delta / 1000).toFixed(1)}k` : delta.toFixed(0);
-  return `↗ +${v}${lang === "pt" ? "/min" : "/min"}`;
-}
+// The size name in the user's language; a custom size keeps what the CR says.
+function sizeLabel(size, t) { return t[`size_${size}`] || sizeMeta(size).label; }
 
-// Parse a K8s storage quantity ("5Gi" / "512Mi" / "2G" / plain bytes) to bytes,
-// for the resize guard's client-side shrink check. Returns null when blank or
-// unparseable so the caller can skip the comparison (backend still enforces it).
+// Parse a K8s storage quantity to bytes for the resize guard's shrink check.
 function parseDisk(s) {
   if (!s) return null;
   const m = String(s).trim().match(/^([\d.]+)\s*(Gi|Mi|Ki|Ti|G|M|K|T)?$/);
@@ -54,10 +57,51 @@ function parseDisk(s) {
   return parseFloat(m[1]) * mult;
 }
 
-// Minimal dependency-free sparkline: a normalized SVG polyline over a fixed
-// 100×28 viewBox (stretched to fill its card). `max` pins the vertical scale
-// for bounded metrics (cpu/heap → 100%); unbounded metrics auto-scale to their
-// own peak. Reuses the accent color so it sits with the existing meters.
+// A "nice" axis ceiling: 1 / 2 / 5 × 10^k just above the peak.
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 5, 10]) if (m * p >= v) return m * p;
+  return 10 * p;
+}
+function hhmm(ts) {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/* --- LineChart: axis, grid, area, time labels. Dependency-free SVG; the
+   viewBox leaves room for the outermost labels. --- */
+function LineChart({ points, lang, fmtY, height = 170 }) {
+  const t = STR[lang];
+  if (!points || points.length < 2) return <div className="chart-empty">{t.chart_no_data}</div>;
+  const W = 640, H = height, L = 44, R = 12, T = 12, B = 24;
+  const maxV = niceMax(Math.max(...points.map(p => p.v)));
+  const t0 = points[0].ts, t1 = points[points.length - 1].ts;
+  const x = (ts) => L + ((ts - t0) / Math.max(1, t1 - t0)) * (W - L - R);
+  const y = (v) => T + (1 - Math.max(0, Math.min(1, v / maxV))) * (H - T - B);
+  const path = points.map((p, i) => `${i ? "L" : "M"}${x(p.ts).toFixed(1)} ${y(p.v).toFixed(1)}`).join(" ");
+  const last = points[points.length - 1];
+  const ticks = [0, 0.5, 1];
+  const xt = [0, 1 / 3, 2 / 3, 1].map(f => t0 + f * (t1 - t0));
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${fmtY(last.v)} · ${hhmm(t0)}–${hhmm(t1)}`}>
+      {ticks.map(f => (
+        <g key={f}>
+          <line className={f === 0 ? "axis" : "grid"} x1={L} x2={W - R} y1={y(f * maxV)} y2={y(f * maxV)} />
+          <text x={L - 6} y={y(f * maxV) + 3} textAnchor="end">{fmtY(f * maxV)}</text>
+        </g>
+      ))}
+      <path className="area" d={`${path} L${x(t1).toFixed(1)} ${y(0)} L${x(t0).toFixed(1)} ${y(0)} Z`} />
+      <path className="line" d={path} />
+      <circle className="end" cx={x(last.ts)} cy={y(last.v)} r="4" />
+      {xt.map((ts, i) => (
+        <text key={i} x={x(ts)} y={H - 6} textAnchor={i === 0 ? "start" : i === 3 ? "end" : "middle"}>{hhmm(ts)}</text>
+      ))}
+    </svg>
+  );
+}
+
+/* --- Sparkline: a trend with no axis, for the secondary cards. --- */
 function Spark({ values, max, color }) {
   const n = values.length;
   if (n === 0) return null;
@@ -71,7 +115,7 @@ function Spark({ values, max, color }) {
     .join(" ");
   return (
     <svg className="spark" viewBox="0 0 100 28" preserveAspectRatio="none"
-      style={{ width: "100%", height: 28, display: "block", marginTop: 6 }}>
+      style={{ width: "100%", height: 28, display: "block", marginTop: 6 }} aria-hidden="true">
       <polyline points={pts} fill="none" stroke={color || "var(--accent)"}
         strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"
         vectorEffect="non-scaling-stroke" />
@@ -79,83 +123,21 @@ function Spark({ values, max, color }) {
   );
 }
 
-// The "second moment" view (#9): per-metric sparklines over the recent window.
-// The series is fetched ONCE by the Overview and handed down, because the
-// summary tiles read the same points — two components polling the same endpoint
-// would double the load and could disagree with each other on screen.
-function MetricsTimeSeries({ points, lang }) {
-  const t = STR[lang];
+// The windows the trend chart offers → (minutes, buckets) for metrics_series.
+const WINDOWS = [["1h", 60, 60], ["6h", 360, 72], ["24h", 1440, 96]];
 
-  if (points.length < 2) {
-    return (
-      <div data-testid="metrics-timeseries" style={{ marginTop: 16 }}>
-        <h3 className="section-title">{t.mt_h}</h3>
-        <p className="hint">{t.mt_empty}</p>
-      </div>
-    );
-  }
-
-  const last = points[points.length - 1];
-  const cards = [
-    { label: t.cpu, val: `${last.cpu.toFixed(0)}%`, values: points.map(p => p.cpu), max: 100 },
-    { label: t.heap, val: `${last.heap.toFixed(0)}%`, values: points.map(p => p.heap), max: 100 },
-    { label: t.mt_disk, val: gib(last.diskUsed), values: points.map(p => p.diskUsed) },
-    { label: t.mt_indexing, val: `${last.rate.toFixed(1)}${t.mt_per_sec}`, values: points.map(p => p.rate) },
-  ];
-
-  return (
-    <div data-testid="metrics-timeseries" style={{ marginTop: 16 }}>
-      <h3 className="section-title">{t.mt_h}</h3>
-      <div className="node-grid">
-        {cards.map(c => (
-          <div className="node-card" key={c.label}>
-            <div className="metric-head">
-              <span className="lbl">{c.label}</span>
-              <span className="val tnum">{c.val}</span>
-            </div>
-            <Spark values={c.values} max={c.max} />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── version upgrade (ADR-048) ───────────────────────────────────────────────
-// The running version is always visible; when a newer tested target exists the
-// chip grows an "atualização disponível" affordance and the upgrade button. The
-// button is never a bare icon and never hidden in a menu.
-//
-// Everything shown here is read from the CR (via the SSE-driven `d` and
-// /api/upgrade_options): the rules (no downgrade, ≤1 major, green cluster) are
-// the backend's, and a reload or a backend restart loses no progress.
-function fmt(s, ...args) {
-  return args.reduce((acc, v, i) => acc.replaceAll(`{${i}}`, v), s || "");
-}
-
-// A REFUSED upgrade only. The pending/upgrading progress moved to
-// `ActivityPanel` (ADR-050), which covers creation, upgrade and restart with
-// one surface — but a refusal is not an activity: the operator rejected the
-// version, nothing is in flight, and the deployment is settled. So it would
-// render nothing at all, and the operator's message is the only place that
-// refusal exists (ADR-048 invariant 4). Hence this narrow survivor.
+/* --- A REFUSED upgrade only (ADR-048 invariant 4). --- */
 function UpgradeFailure({ u, lang }) {
   const t = STR[lang];
   if (!u || u.state !== "failed") return null;
   return (
-    <div className="card pad" style={{ marginBottom: 16, borderColor: "var(--danger-border)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 13.5 }}>
-        <Icon name="shield" size={15} style={{ color: "var(--danger)" }} />
-        <b style={{ fontFamily: "var(--font-mono)" }}>{t.upg_state_failed}</b>
-      </div>
-      {/* The operator's own refusal, verbatim — it is the only place it exists. */}
-      {u.reason && (
-        <p style={{ margin: "8px 0 0", color: "var(--danger)", fontSize: 12.5, fontFamily: "var(--font-mono)" }}>{u.reason}</p>
-      )}
-    </div>
+    <Banner tone="danger" icon="shield" title={t.upg_state_failed} testid="upgrade-failed">
+      {u.reason && <pre>{u.reason}</pre>}
+    </Banner>
   );
 }
 
+/* --- Version upgrade (ADR-048): the header button and its dialog. --- */
 function UpgradeControl({ d, lang, onToast, openUpgrade }) {
   const t = STR[lang];
   const [opts, setOpts] = useState(null);
@@ -168,17 +150,14 @@ function UpgradeControl({ d, lang, onToast, openUpgrade }) {
   const [err, setErr] = useState("");
   const state = (d.upgrade && d.upgrade.state) || "idle";
 
-  // Reload the options whenever the deployment's version or upgrade state
-  // moves — the SSE stream drives `d`, so this follows the real cluster.
+  useEffect(() => { if (openUpgrade) setOpen(true); }, [openUpgrade]);
+
   useEffect(() => {
     let alive = true;
     API.upgradeOptions(d.id)
       .then(o => {
         if (!alive) return;
         setOpts(o);
-        // The suggested version leads the list, so it is also the default
-        // selection — the tag the user clicked and the preselected target are
-        // the same thing.
         setTarget(prev => prev || o.suggested_version || (o.targets && o.targets[0] ? o.targets[0].version : ""));
       })
       .catch(() => { if (alive) setOpts(null); });
@@ -188,7 +167,6 @@ function UpgradeControl({ d, lang, onToast, openUpgrade }) {
   const version = d.version || (opts && opts.version) || "";
   const targets = (opts && opts.targets) || [];
   const dashBehind = !!(opts && opts.dashboards_behind);
-  // The hourly upstream check's find for THIS deployment (ADR-048 rev. 2).
   const suggested = d.suggested_version || (opts && opts.suggested_version) || "";
   const blocked = (opts && opts.blocked_reason) || "";
   const canOffer = targets.length > 0 || dashBehind;
@@ -203,134 +181,89 @@ function UpgradeControl({ d, lang, onToast, openUpgrade }) {
       setAck(false);
       onToast(t.upg_started);
     } catch (e) {
-      // The pre-flight's refusal IS the message, and it renders under the
-      // control rather than in a toast (nothing was written when it fails).
       setErr(e.message || String(e));
     } finally {
       setBusy(false);
     }
   }
 
-  // The running version itself lives in the Overview's meta line (it is a fact
-  // about the deployment, not about upgrading); this control is only the
-  // "there is something newer" affordance.
   if (!version) return null;
   return (
     <>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: canOffer && state === "idle" ? 16 : 0 }}>
-        {canOffer && state === "idle" && (
+      {canOffer && state === "idle" && (
+        <Btn variant="ghost" icon="arrowUp" data-testid="upgrade-open"
+          onClick={() => { setErr(""); if (suggested) setTarget(suggested); setOpen(true); }}>
+          {dashBehind && !targets.length
+            ? t.upg_dash_retry
+            : suggested ? `${t.upg_btn} ${suggested}` : t.upg_btn}
+        </Btn>
+      )}
+
+      <Dialog open={open} onClose={() => !busy && setOpen(false)} title={t.upg_h} width={520} busy={busy} testid="upgrade-dialog">
+        {blocked ? (
           <>
-            <span className="hint" style={{ margin: 0 }}>{t.upg_available}</span>
-            {/* The hourly check's find is named on the button itself — the same
-                "Upgrade v3.8.0" tag the deployment list shows. */}
-            <Btn variant="primary" icon="arrowR"
-              onClick={() => { setErr(""); if (suggested) setTarget(suggested); setOpen(true); }}>
-              {dashBehind && !targets.length
-                ? t.upg_dash_retry
-                : suggested ? `Upgrade v${suggested}` : t.upg_btn}
-            </Btn>
+            <p className="lead" style={{ marginTop: 0 }}><b>{t.upg_blocked_h}</b></p>
+            <p className="hint">{blocked}</p>
+          </>
+        ) : (
+          <>
+            {dashBehind && (
+              <p className="hint">{fmt(t.upg_dash_behind, version, d.dashboards_version || "?")}</p>
+            )}
+            {targets.length > 0 && (
+              <Field label={t.upg_target} htmlFor="upg-target">
+                <select id="upg-target" className="select mono" value={target} disabled={advanced}
+                  onChange={e => setTarget(e.target.value)}>
+                  {targets.map(o => (
+                    <option key={o.version} value={o.version}>
+                      {o.version} · {t[`upg_note_${o.note}`] || o.note}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+
+            <h4 className="section-title" style={{ marginTop: 18 }}>{t.upg_blast_h}</h4>
+            <p className="hint">{t.upg_blast_p}</p>
+            <h4 className="section-title" style={{ marginTop: 14, color: "var(--danger-text)" }}>{t.upg_noback_h}</h4>
+            <p className="hint">{t.upg_noback_p}</p>
+            <p className="hint" style={{ marginTop: 8 }}>
+              {d.snapshot && d.snapshot.configured
+                ? fmt(t.upg_snapshot_ok, d.snapshot.schedule || "")
+                : t.upg_snapshot_p}
+            </p>
+
+            <details style={{ marginTop: 12 }} open={advanced}>
+              <summary style={{ cursor: "pointer", fontSize: 13 }}
+                onClick={e => { e.preventDefault(); setAdvanced(a => !a); }}>{t.upg_advanced}</summary>
+              <div style={{ marginTop: 10 }}>
+                <Field label={t.upg_custom} hint={t.upg_custom_hint} htmlFor="upg-custom">
+                  <input id="upg-custom" className="input mono" value={custom} placeholder="3.8.0"
+                    onChange={e => setCustom(e.target.value)} />
+                </Field>
+                <label className="check-row" style={{ alignItems: "flex-start", fontSize: 12.5 }}>
+                  <input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} />
+                  <span>{t.upg_unverified}</span>
+                </label>
+              </div>
+            </details>
           </>
         )}
-      </div>
 
-      {open && (
-        <div
-          style={{
-            position: "fixed", inset: 0, zIndex: 300,
-            background: "rgb(0 0 0 / 0.55)", backdropFilter: "blur(3px)",
-            display: "grid", placeItems: "center", padding: 20,
-          }}
-          onClick={() => !busy && setOpen(false)}
-          onKeyDown={e => { if (e.key === "Escape" && !busy) setOpen(false); }}
-        >
-          <div className="card pad" role="dialog" aria-modal="true" aria-label={t.upg_h}
-            style={{ maxWidth: 520, width: "100%", maxHeight: "85vh", overflowY: "auto" }}
-            onClick={e => e.stopPropagation()}>
-            <h3 style={{ margin: "0 0 14px", fontFamily: "var(--font-mono)", fontSize: 16 }}>{t.upg_h}</h3>
+        {err && <p className="field-err" style={{ marginTop: 12 }}>{err}</p>}
 
-            {/* A blocked state explains itself here, not in a toast. */}
-            {blocked ? (
-              <>
-                <p className="lead" style={{ marginTop: 0 }}><b>{t.upg_blocked_h}</b></p>
-                <p className="hint">{blocked}</p>
-              </>
-            ) : (
-              <>
-                {dashBehind && (
-                  <p className="hint">{fmt(t.upg_dash_behind, version, d.dashboards_version || "?")}</p>
-                )}
-                {targets.length > 0 && (
-                  <Field label={t.upg_target} htmlFor="upg-target">
-                    <select id="upg-target" className="input" value={target} disabled={advanced}
-                      onChange={e => setTarget(e.target.value)}>
-                      {targets.map(o => (
-                        <option key={o.version} value={o.version}>
-                          {o.version} · {t[`upg_note_${o.note}`] || o.note}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                )}
-
-                {/* Blast radius before the action, not after. */}
-                <h4 className="section-title" style={{ marginTop: 18 }}>{t.upg_blast_h}</h4>
-                <p className="hint">{t.upg_blast_p}</p>
-                <h4 className="section-title" style={{ marginTop: 14, color: "var(--danger)" }}>{t.upg_noback_h}</h4>
-                <p className="hint">{t.upg_noback_p}</p>
-                {/* Not fine print. Since ADR-049 this is conditional: a
-                    deployment with a scheduled policy has something to restore
-                    from and is told where it is; one without still gets the
-                    original warning. */}
-                <p className="hint">
-                  {d.snapshot && d.snapshot.configured
-                    ? fmt(t.upg_snapshot_ok, d.snapshot.schedule || "")
-                    : t.upg_snapshot_p}
-                </p>
-
-                <details style={{ marginTop: 12 }} open={advanced}>
-                  <summary style={{ cursor: "pointer", fontSize: 13 }}
-                    onClick={e => { e.preventDefault(); setAdvanced(a => !a); }}>{t.upg_advanced}</summary>
-                  <div style={{ marginTop: 10 }}>
-                    <Field label={t.upg_custom} hint={t.upg_custom_hint} htmlFor="upg-custom">
-                      <input id="upg-custom" className="input" value={custom} placeholder="3.8.0"
-                        onChange={e => setCustom(e.target.value)} />
-                    </Field>
-                    <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5 }}>
-                      <input type="checkbox" checked={ack} onChange={e => setAck(e.target.checked)} />
-                      <span>{t.upg_unverified}</span>
-                    </label>
-                  </div>
-                </details>
-              </>
-            )}
-
-            {err && (
-              <p style={{ color: "var(--danger)", fontSize: 12.5, marginTop: 12, fontFamily: "var(--font-mono)" }}>{err}</p>
-            )}
-
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
-              <Btn variant="outline" onClick={() => setOpen(false)} disabled={busy}>{t.cancel}</Btn>
-              <Btn variant="primary" icon="arrowR" disabled={busy || !!blocked || !chosen} onClick={submit}>
-                {t.upg_confirm}
-              </Btn>
-            </div>
-          </div>
+        <div className="dialog-actions">
+          <Btn variant="outline" onClick={() => setOpen(false)} disabled={busy}>{t.cancel}</Btn>
+          <Btn variant="primary" icon="arrowUp" disabled={busy || !!blocked || !chosen} onClick={submit}>
+            {t.upg_confirm}
+          </Btn>
         </div>
-      )}
+      </Dialog>
     </>
   );
 }
 
-// A node is "hot" when any meter crosses the same threshold the bars already
-// use for their warning tone — the row emphasis and the bar color agree.
-const HOT_PCT = 75;
-
-/* --- #47: a spent provisioning schedule says so, in place, with the way out.
- * The give-up used to be one ERROR log line while the page looked healthy
- * (the overview even said "receiving" — self-telemetry). The verdict comes
- * from the server (`d.provisioning`, ADR-052 rule 5); the SPA words it and
- * offers the same retry the route exposes. The banner rides the SSE frames,
- * so it clears itself when a re-armed wave finishes. */
+/* --- #47: a spent provisioning schedule says so, in place, with the way out. --- */
 function ProvisioningBanner({ d, lang, onToast }) {
   const t = STR[lang];
   const p = d.provisioning;
@@ -342,49 +275,54 @@ function ProvisioningBanner({ d, lang, onToast }) {
       await API.retryProvisioning(d.id);
       onToast(t.prov_retry_sent);
     } catch {
-      onToast(t.prov_retry_fail);
+      onToast(t.prov_retry_fail, false);
     } finally {
       setBusy(false);
     }
   };
   return (
-    <div className="card" data-testid="prov-banner" style={{ marginTop: 18, borderColor: "var(--warn)" }}>
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={{ color: "var(--warn)", fontWeight: 600 }}>{t.prov_failed_title}</span>
-        <span style={{ color: "var(--text-2)", flex: 1, minWidth: 220 }}>
-          {fmt(t.prov_failed_body, p.attempts)}
-        </span>
-        <Btn data-testid="prov-retry" onClick={retry} disabled={busy}>
-          {busy ? t.prov_retrying : t.prov_retry}
-        </Btn>
-      </div>
-      {/* The cluster's own words for the last failure, verbatim — the same
-       * treatment as upgrade.reason and snapshot.last_error (ADR-048/049). */}
-      {p.last_error ? (
-        <code data-testid="prov-last-error" style={{ display: "block", marginTop: 8, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{p.last_error}</code>
-      ) : null}
-    </div>
+    <Banner tone="warn" title={t.prov_failed_title} testid="prov-banner"
+      action={<Btn data-testid="prov-retry" onClick={retry} disabled={busy}>{busy ? t.prov_retrying : t.prov_retry}</Btn>}>
+      {fmt(t.prov_failed_body, p.attempts)}
+      {p.last_error ? <pre data-testid="prov-last-error">{p.last_error}</pre> : null}
+    </Banner>
   );
 }
 
-function OverviewTab({ d, lang, onToast, openUpgrade }) {
+/* --- #26: one copy per volume on a sub-3-node host cluster. Said next to the
+   thing that mitigates it (the backup), with the way to it. --- */
+function SingleCopyBanner({ d, lang, hostNodes, onTab }) {
+  const t = STR[lang];
+  if (!(hostNodes.length > 0 && hostNodes.length < 3)) return null;
+  const snap = d.snapshot || {};
+  const bak = snap.configured
+    ? (snap.schedule ? fmt(t.single_copy_bak_sched, snap.schedule) : fmt(t.single_copy_bak, t.snap_chip_on))
+    : t.single_copy_nobak;
+  return (
+    <Banner tone="warn" title={t.single_copy_h} testid="single-copy"
+      action={<Btn variant="outline" size="sm" onClick={() => onTab("backup")}>{t.single_copy_cta}</Btn>}>
+      {fmt(t.single_copy_p, hostNodes.length)} {bak}
+    </Banner>
+  );
+}
+
+/* ============================================================
+   Overview
+   ============================================================ */
+function OverviewTab({ d, lang, onToast, hostNodes, onTab }) {
   const t = STR[lang];
   const [nodes, setNodes] = useState([]);
   const [totals, setTotals] = useState({ docs: 0, dataBytes: 0, enforced: true });
+  const [win, setWin] = useState(0);
   const [points, setPoints] = useState([]);
-  // When the numbers on screen were last confirmed. Both polls used to swallow
-  // their errors, so a dead backend left stale numbers looking live.
+  const [monitorDocs, setMonitorDocs] = useState(null);
   const [lastOk, setLastOk] = useState(0);
-  const [tick, setTick] = useState(0);
+  const [, setTick] = useState(0);
   const url = d.dashboard_url;
 
-  // Cluster admin credentials live on the Security tab now, fetched only on an
-  // explicit reveal (see CredentialsPanel) — the Overview no longer pulls the
-  // password eagerly into the page.
-
-  // Live per-node stats. While the cluster is still provisioning OpenSearch
-  // isn't answering — treat any error as "no stats yet" and stay quiet, but
-  // remember WHEN the last good answer came in.
+  // Live per-node stats. While the deployment is still provisioning
+  // OpenSearch isn't answering — stay quiet, but remember WHEN the last good
+  // answer came in.
   useEffect(() => {
     let alive = true;
     const load = () => API.nodeStats(d.id)
@@ -401,55 +339,36 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
     return () => { alive = false; clearInterval(h); };
   }, [d.id]);
 
-  // The recent-window series: feeds both the ingestion tile and the trend
-  // sparklines, fetched once (see MetricsTimeSeries). Also carries the
-  // monitor-derived doc count (#47) — the only honest basis for the tile's
-  // "receiving" claim.
-  const [monitorDocs, setMonitorDocs] = useState(null);
+  // The series: feeds the chart, the doc delta and the "receiving" claim
+  // (monitor docs, #47) — fetched once per window, never twice.
   useEffect(() => {
     let alive = true;
-    const load = () => API.metricsSeries(d.id)
-      .then(s => { if (alive) { setPoints(adaptSeries(s).points); setMonitorDocs(adaptSeries(s).monitorDocs); } })
+    const [, minutes, buckets] = WINDOWS[win];
+    const load = () => API.metricsSeries(d.id, minutes, buckets)
+      .then(s => { if (alive) { const a = adaptSeries(s); setPoints(a.points); setMonitorDocs(a.monitorDocs); } })
       .catch(() => {});
     load();
     const h = setInterval(load, 10000);
     return () => { alive = false; clearInterval(h); };
-  }, [d.id]);
+  }, [d.id, win]);
 
-  // Re-render once a second so "atualizado há Xs" actually counts.
   useEffect(() => {
     const h = setInterval(() => setTick(x => x + 1), 1000);
     return () => clearInterval(h);
   }, []);
 
   const last = points.length ? points[points.length - 1] : null;
+  const first = points.length ? points[0] : null;
   const rate = last ? last.rate : 0;
-  // #47: "receiving" is a claim about MONITOR data, and it used to be derived
-  // from the self-telemetry indexing rate — a cluster with zero monitor data
-  // flows self-telemetry happily, so the tile said "receiving" over an empty
-  // cluster for a whole demo day. With no monitors installed the tile says so
-  // instead of claiming anything.
   const hasMonitors = monitorDocs !== null;
   const monitorReceiving = hasMonitors && monitorDocs > 0;
-  // Cluster-wide storage: the deployment's PVCs, not the host disks (ADR-031).
-  // #95: under a node-local provisioner (local-path…) the data path IS the
-  // node root disk and the requested capacity is never enforced — the old
-  // used/requested bar summed OS + images + everything against an advisory
-  // 5Gi and printed "164%". There the tile shows the actual OpenSearch data
-  // size against the requests, labeled as data, with no percentage; enforced
-  // provisioners (Longhorn, CSI) keep the old bar semantics exactly.
+  const integCount = (d.monitors || []).length + (d.otel_stack ? 1 : 0);
+  // One storage story for the whole tab (#95): under a node-local provisioner
+  // the requested capacity is not enforced, so no percentage anywhere.
   const enforced = totals.enforced !== false;
-  const dataGib = (totals.dataBytes || 0) / (1024 ** 3);
-  const diskUsed = nodes.reduce((s, n) => s + (n.pvcBound ? n.diskUsed : 0), 0);
-  const diskTotal = nodes.reduce((s, n) => s + (n.pvcBound ? n.diskTotal : 0), 0);
-  const diskPct = diskTotal ? (diskUsed / diskTotal) * 100 : 0;
-  // The NODES tile and the activity panel now divide the SAME pair (the server
-  // agrees `nodes_ready`/`nodes_desired` with `activity`, ADR-050 / issue
-  // #131), so the tile can no longer print a fraction the panel disagrees with.
-  // What it must ALSO stop doing is presenting "all ready" as the whole answer:
-  // for sixteen hours this tile read "3/3 — all ready" beside a roll that had
-  // not moved since the previous day. Ready is a fact about pods; converged is
-  // a fact about the deployment, and only the activity verdict knows it.
+  const reservedGib = nodes.reduce((s, n) => s + (n.pvcBound ? n.diskTotal : 0), 0);
+  const usedGib = nodes.reduce((s, n) => s + (n.pvcBound ? n.diskUsed : 0), 0);
+  const diskPct = enforced && reservedGib ? (usedGib / reservedGib) * 100 : 0;
   const act = d.activity || { kind: "idle" };
   const nodesOk = d.nodes_ready === d.node_count && d.node_count > 0;
   const nodesSub = !nodesOk
@@ -457,153 +376,166 @@ function OverviewTab({ d, lang, onToast, openUpgrade }) {
     : act.kind === "idle"
       ? t.ov_nodes_ok
       : `${t.ov_nodes_ok} · ${t[`act_badge_${act.kind}`] || ""}`;
-  const hottest = nodes.reduce((m, n) => Math.max(m, n.cpu, heapPct(n), nodeDiskPct(n)), 0);
   const staleSecs = lastOk ? Math.floor((Date.now() - lastOk) / 1000) : null;
   const stale = staleSecs !== null && staleSecs > 30;
-  const snap = d.snapshot || { configured: false };
+  const docsDelta = first && last ? last.docs - first.docs : 0;
+
+  const chartPts = useMemo(() => points.map(p => ({ ts: p.ts, v: p.rate })), [points]);
 
   return (
     <div className="view-enter">
-      {/* Context line: what this deployment IS. Deliberately quiet — the loud
-          things are the numbers below it. */}
-      <div className="meta" style={{ marginBottom: 14 }}>
-        <span className={`badge ${d.health === "green" ? "green" : ""}`}><span className="dot" />{d.health}</span>
-        {/* The version actually RUNNING (`status.version` from the operator,
-            not the spec) — ADR-048. */}
-        {d.version && (
-          <span className="badge" style={{ textTransform: "none" }}>
-            <Icon name="layers" size={12} />OpenSearch {d.version}
-          </span>
-        )}
-        {/* Backup state (ADR-049). Absent is a valid state, so an unconfigured
-            deployment says so plainly instead of showing nothing — this is the
-            one place someone notices they have no backup. */}
-        <span className={`badge${snap.configured && snap.policy_state !== "ERROR" ? " green" : ""}`}
-          style={{ textTransform: "none" }} data-testid="backup-chip">
-          <Icon name="db" size={12} />
-          {!snap.configured ? t.snap_chip_off
-            : snap.policy_state === "ERROR" ? t.snap_chip_err
-              : snap.policy_state === "PENDING" ? t.snap_chip_pending
-                : `${t.snap_chip_on}${snap.schedule ? ` ${snap.schedule}` : ""}`}
-        </span>
-        <span>{sizeMeta(d.size).label.toLowerCase()}</span>
-        <span className="sep">·</span>
-        <span>{d.mem} {t.per_node}</span>
-        <span className="sep">·</span>
-        <span>{d.disk} {t.sz_disk}</span>
-      </div>
+      <UpgradeFailure u={d.upgrade} lang={lang} />
+      {/* Creation, upgrade and restart share one panel (ADR-050). */}
+      <ActivityPanel d={d} lang={lang} />
 
-      {/* The four questions an operator actually opens this screen to answer. */}
+      {/* The four questions an operator opens this screen to answer. */}
       <div className="stat-row">
-        <StatTile label={t.documents} value={totals.docs.toLocaleString()}
-          sub={last && points.length > 1 ? perMinute(points, lang) : "—"} />
-        <StatTile label={t.ov_ingestion}
-          value={last ? `${rate.toFixed(1)}${t.mt_per_sec}` : "—"}
+        <StatTile label={t.documents} value={fmtInt(totals.docs, lang)} testid="tile-docs"
+          sub={points.length > 1 ? fmt(t.ov_docs_delta_window, docsDelta > 0 ? `+${fmtShort(docsDelta, lang)}` : t.steady) : "—"} />
+        <StatTile label={t.ov_ingestion} value={last ? fmtDec(rate, lang, 1) : "—"} unit={last ? t.ov_chart_unit : null} testid="tile-rate"
           sub={!hasMonitors ? t.ov_no_monitors
-            : (monitorReceiving ? t.ov_receiving : t.ov_no_data)}
+            : (monitorReceiving ? fmt(t.ov_receiving_from, integCount || 1) : t.ov_no_data)}
           tone={hasMonitors ? (monitorReceiving ? "ok" : "warn") : ""} />
-        <StatTile label={t.ov_storage}
-          value={diskTotal
-            ? (enforced ? `${gib(diskUsed)} / ${gib(diskTotal)}`
-                        : `${gib(dataGib)} / ${gib(diskTotal)}`)
-            : "—"}
-          sub={!diskTotal ? t.ov_awaiting
-            : enforced ? `${diskPct.toFixed(0)}%`
+        <StatTile label={t.ov_data_stored} value={nodes.length ? fmtBytes(totals.dataBytes, lang) : "—"} testid="tile-storage"
+          sub={!nodes.length ? t.ov_awaiting
+            : enforced && reservedGib ? `${fmtInt(diskPct, lang)}% ${fmt(t.ov_data_of, fmtGib(reservedGib, lang))}`
             : t.ov_storage_not_enforced}
-          tone={diskTotal && enforced && diskPct >= 85 ? "warn" : ""} />
-        <StatTile label={t.nodes} value={`${d.nodes_ready}/${d.node_count}`}
+          tone={enforced && diskPct >= 85 ? "warn" : ""} />
+        <StatTile label={t.nodes_h} value={`${d.nodes_ready}/${d.node_count}`} testid="tile-nodes"
           sub={nodesSub}
           tone={nodesOk && act.kind === "idle" ? "ok" : "warn"} />
       </div>
 
-      {/* Where this deployment lives. Two addresses, both named: the UI and the
-          API are different audiences and used to be one unlabelled button. */}
-      {(url || d.opensearch_url) && (
-        <div className="card pad" style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-            <Icon name="plug" size={14} />{t.ov_endpoints_h}
+      <div className="ov-grid">
+        <div className="card">
+          <div className="card-head">
+            <h3>{t.ov_chart_h}</h3>
+            <span className="sub">{t.ov_chart_unit}</span>
+            <div className="right">
+              <span className="hint" style={{ color: stale ? "var(--warn-text)" : undefined, fontSize: 12 }}>
+                {staleSecs === null ? t.ov_connecting : fmt(t.ov_updated, `${staleSecs}s`)}
+              </span>
+              <div className="seg" role="group" aria-label={t.ov_window}>
+                {WINDOWS.map(([label], i) => (
+                  <button key={label} type="button" aria-pressed={win === i} onClick={() => setWin(i)}>{label}</button>
+                ))}
+              </div>
+            </div>
           </div>
-          <div style={{ display: "grid", gap: 6 }}>
-            <EndpointRow t={t} label={t.otel_ep_dashboards} value={url}
-              href={url} onCopy={onToast} />
-            <EndpointRow t={t} label={t.otel_ep_opensearch} value={d.opensearch_url}
-              href={d.opensearch_url} onCopy={onToast} />
+          <div className="chart" data-testid="ingestion-chart">
+            <LineChart points={chartPts} lang={lang} fmtY={v => fmtDec(v, lang, v >= 10 ? 0 : 1)} />
           </div>
         </div>
-      )}
 
-      {/* Actions, always in the same place, whatever the cluster's state. */}
-      <div className="action-bar">
-        {!url && d.dashboard_portforward && (
-          <>
-            <span style={{ color: "var(--text-2)", fontSize: 13, fontFamily: "var(--font-mono)" }}>{t.portfwd_access}</span>
-            <Copyable text={d.dashboard_portforward} t={t} onCopy={onToast} />
-          </>
-        )}
-        <UpgradeControl d={d} lang={lang} onToast={onToast} openUpgrade={openUpgrade} />
-        <span className="spacer" />
-        {/* Freshness, and honesty when it is not fresh. */}
-        <span className="hint" style={{ margin: 0, color: stale ? "var(--warn)" : undefined }}>
-          {staleSecs === null ? t.ov_connecting : fmt(t.ov_updated, `${staleSecs}s`)}
-        </span>
+        <div className="card">
+          <div className="card-head"><h3><Icon name="plug" size={14} /> {t.ov_endpoints_h}</h3></div>
+          <div className="ep-list">
+            {url && (
+              <div className="ep-row">
+                <span className="lbl">{t.otel_ep_dashboards}</span>
+                <span className="val">
+                  <Copyable text={url} t={t} onCopy={onToast} />
+                  <a href={url} target="_blank" rel="noreferrer" className="btn-link" style={{ fontSize: 12.5 }}>{t.open}<Icon name="ext" size={12} /></a>
+                </span>
+              </div>
+            )}
+            {d.opensearch_url && (
+              <div className="ep-row">
+                <span className="lbl">{t.otel_ep_opensearch}</span>
+                <span className="val"><Copyable text={d.opensearch_url} t={t} onCopy={onToast} /></span>
+              </div>
+            )}
+            {!url && d.dashboard_portforward && (
+              <div className="ep-row">
+                <span className="lbl">{t.portfwd_access}</span>
+                <span className="val"><Copyable text={d.dashboard_portforward} t={t} onCopy={onToast} /></span>
+              </div>
+            )}
+            <div className="ep-row">
+              <span className="lbl">{t.ov_credentials}</span>
+              <span className="val"><button type="button" className="btn-link" onClick={() => onTab("access")}>{t.ov_see_access} <Icon name="chevR" size={12} /></button></span>
+            </div>
+          </div>
+        </div>
       </div>
 
-      {/* One panel for creation, upgrade and node-restarting operations —
-          they are the same question asked at different times (ADR-050). It
-          hides on the server's `settled`, not on `health === "green"`, which
-          goes green mid-roll between two node restarts. It does not REPLACE
-          the page: a cluster with 2 of 3 nodes up still has nodes worth
-          looking at, and its dashboard link still works. */}
-      <UpgradeFailure u={d.upgrade} lang={lang} />
-      <ActivityPanel d={d} lang={lang} />
-
-      <>
-        <details open>
-          <summary className="section-title" style={{ marginTop: 26, cursor: "pointer", listStyle: "revert" }}>
-            {t.nodes_h}
-            {nodes.length > 0 && (
-              <span className="hint" style={{ margin: 0, marginLeft: 8, fontWeight: 400 }}>
-                {nodes.length} · {fmt(t.ov_peak, hottest.toFixed(0))}
-              </span>
-            )}
-          </summary>
-          {nodes.length === 0 ? (
-            <p className="hint">{t.ov_gathering}</p>
-          ) : (
-            <div className="node-rows" style={{ marginTop: 10 }}>
+      {/* One row per node: three meters side by side read as a comparison. A
+          cell is emphasised only past the bar's own threshold — never the
+          whole row, and never because of a number that means nothing here. */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-head">
+          <h3>{t.nodes_h}</h3>
+          <span className="sub">{fmt(t.ov_nodes_ready_of, d.nodes_ready, d.node_count)}</span>
+        </div>
+        {nodes.length === 0 ? (
+          <p className="hint" style={{ padding: "14px 16px" }}>{t.ov_gathering}</p>
+        ) : (
+          <table className="dtable node-table" data-testid="node-table">
+            <thead>
+              <tr><th>{t.cap_node}</th><th>{t.cpu}</th><th>{t.heap}</th><th>{enforced ? t.ov_node_data : t.ov_node_docs}</th><th>{t.ov_node_status}</th></tr>
+            </thead>
+            <tbody>
               {nodes.map(n => {
                 const hp = heapPct(n);
                 const dp = nodeDiskPct(n);
-                const hot = Math.max(n.cpu, hp, dp) >= HOT_PCT;
                 return (
-                  <div className={`node-row ${hot ? "hot" : ""}`} key={n.name}>
-                    <div className="nname">
-                      <span className={`statusdot ${d.health === "green" ? "green" : ""}`} />
-                      <span title={n.name}>{n.name}</span>
-                    </div>
-                    <MiniMeter label={t.cpu} value={`${n.cpu}%`} pct={n.cpu} />
-                    <MiniMeter label={t.heap} value={`${hp.toFixed(0)}%`} pct={hp} />
-                    {n.pvcBound
-                      ? <MiniMeter label={t.sz_disk} value={`${dp.toFixed(0)}%`} pct={dp} />
-                      : <MiniMeter label={t.sz_disk} value={n.pvcPhase || "Pending"} pct={0} />}
-                  </div>
+                  <tr key={n.name}>
+                    <td className="nm" data-label={t.cap_node} title={n.name}>{n.name}</td>
+                    <td data-label={t.cpu}><MiniMeter label="" value={`${fmtInt(n.cpu, lang)}%`} pct={n.cpu} /></td>
+                    <td data-label={t.heap}><MiniMeter label="" value={`${fmtInt(hp, lang)}%`} pct={hp} /></td>
+                    <td data-label={enforced ? t.ov_node_data : t.ov_node_docs}>
+                      {enforced
+                        ? (n.pvcBound
+                          ? <MiniMeter label="" value={`${fmtGib(n.diskUsed, lang)} / ${fmtGib(n.diskTotal, lang)}`} pct={dp} />
+                          : <MiniMeter label="" value={n.pvcPhase || t.ov_node_pending} pct={null} />)
+                        : <span className="num">{fmtInt(n.docs, lang)}</span>}
+                    </td>
+                    <td data-label={t.ov_node_status}>
+                      <span className={`pill sm ${n.pvcBound && d.health !== "red" ? "green" : "yellow"}`}>
+                        <span className="dot" />{n.pvcBound ? t.ov_node_ready : (n.pvcPhase || t.ov_node_pending)}
+                      </span>
+                    </td>
+                  </tr>
                 );
               })}
-            </div>
-          )}
-        </details>
+            </tbody>
+          </table>
+        )}
+      </div>
 
-        {/* Same metrics as the rows above, over time — placed last because a
-            trend is the follow-up question, never the first one. */}
-        <MetricsTimeSeries points={points} lang={lang} />
-      </>
+      {/* Trends: the follow-up question, never the first one. */}
+      <h3 className="section-title" style={{ marginTop: 22 }}>{t.mt_h} <span style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>· {WINDOWS[win][0]}</span></h3>
+      {points.length < 2 ? (
+        <p className="hint" data-testid="metrics-timeseries">{t.mt_empty}</p>
+      ) : (
+        <div className="spark-grid" data-testid="metrics-timeseries">
+          {[
+            { label: t.cpu, val: `${fmtInt(last.cpu, lang)}%`, values: points.map(p => p.cpu), max: 100 },
+            { label: t.heap, val: `${fmtInt(last.heap, lang)}%`, values: points.map(p => p.heap), max: 100 },
+            enforced
+              ? { label: t.mt_disk, val: fmtGib(last.diskUsed, lang), values: points.map(p => p.diskUsed) }
+              : { label: t.documents, val: fmtShort(last.docs, lang), values: points.map(p => p.docs) },
+            { label: t.mt_indexing, val: `${fmtDec(last.rate, lang, 1)} ${t.ov_chart_unit}`, values: points.map(p => p.rate) },
+          ].map(c => (
+            <div className="card spark-card" key={c.label}>
+              <div className="metric-head">
+                <span className="lbl">{c.label}</span>
+                <span className="val tnum">{c.val}</span>
+              </div>
+              <Spark values={c.values} max={c.max} />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
+/* ============================================================
+   Configuration
+   ============================================================ */
 // Retention (ADR-062): what this deployment keeps, and whether its user has
-// customized the policy inside OpenSearch — in which case velox leaves it
-// alone until someone asks for the default back.
+// customized the policy inside OpenSearch.
 function RetentionPanel({ d, lang, locked }) {
   const t = STR[lang];
   const [st, setSt] = useState(null);
@@ -631,8 +563,6 @@ function RetentionPanel({ d, lang, locked }) {
   const days = n => t.ret_days_value.replaceAll("{0}", String(n));
   return (
     <div data-testid="retention-panel">
-      <div className="hr" />
-      <h3 className="section-title" style={{ marginTop: 0 }}>{t.ret_label}</h3>
       {!st && !err && <p className="hint">{t.ret_loading}</p>}
       {st && (
         <>
@@ -641,14 +571,14 @@ function RetentionPanel({ d, lang, locked }) {
           </div>
           {st.state !== "none" && (
             <div className="kvrow"><span className="k">{t.ret_state}</span>
-              <span className="v" data-testid="retention-state" title={st.detail || undefined}>
+              <span className="v sans" data-testid="retention-state" title={st.detail || undefined}>
                 {t["ret_state_" + st.state] || st.state}
               </span>
             </div>
           )}
           {st.source && (
             <div className="kvrow"><span className="k">{t.ret_source}</span>
-              <span className="v" data-testid="retention-source">{t["ret_source_" + st.source] || st.source}</span>
+              <span className="v sans" data-testid="retention-source">{t["ret_source_" + st.source] || st.source}</span>
             </div>
           )}
           {(st.otel || []).length > 0 && (
@@ -656,8 +586,8 @@ function RetentionPanel({ d, lang, locked }) {
               <div className="kvrow"><span className="k">{t.ret_otel_h}</span><span className="v" /></div>
               {st.otel.map(o => (
                 <div className="kvrow" key={o.policy_id}>
-                  <span className="k" style={{ fontFamily: "var(--font-mono)" }}>{o.policy_id}</span>
-                  <span className="v" title={o.detail || undefined}>
+                  <span className="k mono">{o.policy_id}</span>
+                  <span className="v sans" title={o.detail || undefined}>
                     {t["ret_state_" + o.state] || o.state}{o.days ? ` · ${days(o.days)}` : ""}
                   </span>
                 </div>
@@ -665,10 +595,10 @@ function RetentionPanel({ d, lang, locked }) {
             </div>
           )}
           {(st.state === "customized" || (st.otel || []).some(o => o.state === "customized")) &&
-            <p className="hint">{t.ret_customized_p}</p>}
-          {st.days && <p className="hint" data-testid="retention-when">{t.ret_when_p}</p>}
+            <p className="hint" style={{ marginTop: 10 }}>{t.ret_customized_p}</p>}
+          {st.days && <p className="hint" style={{ marginTop: 8 }} data-testid="retention-when">{t.ret_when_p}</p>}
           {st.default_days && (
-            <Btn variant="outline" disabled={busy || !!locked} style={{ marginTop: 10 }}
+            <Btn variant="outline" disabled={busy || !!locked} style={{ marginTop: 12 }}
               data-testid="retention-reset" onClick={() => setConfirm(true)}>
               {busy ? t.saving : `${t.ret_reset} · ${days(st.default_days)}`}
             </Btn>
@@ -684,178 +614,218 @@ function RetentionPanel({ d, lang, locked }) {
   );
 }
 
-function EditTab({ d, lang, onSave, locked }) {
+// The next-generation Dashboards UI: a deployment-level choice (ADR-053).
+function NextUiPanel({ d, lang, onToast, locked }) {
   const t = STR[lang];
-  const preset = sizeMeta(d.size);
-  const [size, setSize] = useState(SIZES[d.size] ? d.size : "small");
-  const [mem, setMem] = useState(d.mem || preset.mem);
-  const [disk, setDisk] = useState(d.disk || preset.disk);
-  const [nodeCount, setNodeCount] = useState(String(d.node_count || preset.nodes));
-  // Seeded with what the deployment ACTUALLY runs. This field used to start
-  // empty: saving then sent an empty additionalConfig, and because the CR is
-  // applied server-side by one field manager, omitting the key PRUNED it — any
-  // custom opensearch.yml was silently erased by an unrelated edit. Round-trip
-  // it instead, so clearing the box stays an explicit act.
-  const [extra, setExtra] = useState(d.extra_config || "");
-  const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
-  const sz = sizeMeta(size);
-  // The JVM heap is operator-managed (#55/ADR-035): the OpenSearch operator
-  // derives it as half the node memory. Resolve the displayed value from the
-  // backend (like the wizard's Advanced step) so the UI never computes or
-  // hardcodes the rule; seed with the deployment's current heap.
-  const [jvmHeap, setJvmHeap] = useState(d.heap || sz.heap);
-  useEffect(() => {
-    let live = true;
-    API.customSizing(mem, "")
-      .then((p) => { if (live && p && p.heap) setJvmHeap(p.heap); })
-      .catch(() => { /* offline: keep the last resolved value, no console noise */ });
-    return () => { live = false; };
-  }, [mem]);
+  const [err, setErr] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const on = !!d.next_ui;
+  const heldByStack = on && !!d.otel_stack;
 
-  // Picking a preset refreshes the derived fields; the user can still override.
-  function pickSize(k) {
-    setSize(k);
-    const m = sizeMeta(k);
-    setMem(m.mem);
-    setDisk(m.disk);
-    setNodeCount(String(m.nodes));
-  }
-
-  // Resize guard (#16): disk can only grow — Kubernetes/CSI can't shrink a PVC.
-  // Compared against the deployment's current disk; the backend enforces the
-  // same rule (plus the StorageClass-expansion check) as the source of truth.
-  const curBytes = parseDisk(d.disk);
-  const newBytes = parseDisk(disk);
-  const diskShrink = curBytes != null && newBytes != null && newBytes < curBytes;
-
-  // Nothing to save, nothing to discard — and no confirmation to ask for.
-  const dirty = size !== (SIZES[d.size] ? d.size : "small")
-    || mem !== (d.mem || preset.mem)
-    || disk !== (d.disk || preset.disk)
-    || extra !== (d.extra_config || "");
-
-  function reset() {
-    setSize(SIZES[d.size] ? d.size : "small");
-    setMem(d.mem || preset.mem);
-    setDisk(d.disk || preset.disk);
-    setNodeCount(String(d.node_count || preset.nodes));
-    setExtra(d.extra_config || "");
-  }
-
-  async function save() {
-    if (diskShrink) return; // belt-and-suspenders; the button is disabled too
+  async function apply() {
+    setConfirm(false);
     setBusy(true);
+    setErr("");
     try {
-      await onSave({
-        name: d.id,
-        size,
-        purpose: d.purpose,
-        nodes: nodeCount,
-        memory: mem,
-        disk,
-        config: extra,
-        monitors: (d.monitors || []).join(","),
-      });
+      await API.setNextUi(d.id, !on);
+      onToast(!on ? t.nextui_on_done : t.nextui_off_done);
+    } catch (e) {
+      setErr(e.message || String(e));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="view-enter" style={{ maxWidth: 520 }}>
-      <LockNotice reason={locked} />
-      <p className="lead">{t.edit_lead}</p>
-      <Field label={t.size}>
-        <select className="select" value={size} onChange={e => pickSize(e.target.value)}>
-          {Object.entries(SIZES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-        </select>
-      </Field>
-      {/* Always 3 nodes (ADR-016) — the wizard has said so from the start; this
-          form used to accept any number, so the two screens disagreed. */}
-      <Field label={t.node_count} hint={t.node_count_fixed}>
-        <input className="input" value={nodeCount} disabled />
-      </Field>
-      <Field label={t.node_mem} tip={t.node_mem_hint}><input className="input" value={mem} onChange={e => setMem(e.target.value)} /></Field>
-      <Field label={t.jvm} tip={t.jvm_hint}><input className="input" value={jvmHeap} disabled /></Field>
-      <Field label={t.disk} hint={t.disk_hint}>
-        <input className={`input${diskShrink ? " invalid" : ""}`} value={disk} onChange={e => setDisk(e.target.value)} />
-        {diskShrink && <div className="field-err">{t.disk_shrink_err.replace(/\{cur\}/g, d.disk)}</div>}
-      </Field>
-      <Field label={t.extra} hint={t.extra_hint}><textarea className="textarea" value={extra} onChange={e => setExtra(e.target.value)} /></Field>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Btn variant="primary" icon="check" disabled={busy || diskShrink || !dirty || !!locked}
-          data-testid="edit-save" onClick={() => setConfirm(true)}>{busy ? t.saving : t.save}</Btn>
-        {dirty && <Btn variant="outline" disabled={busy} onClick={reset}>{t.discard}</Btn>}
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+        <span className={`badge ${on ? "green" : ""}`}>{on ? t.nextui_state_on : t.nextui_state_off}</span>
+        <span className="hint">{on ? t.nextui_scope_ws : t.nextui_scope_tenant}</span>
       </div>
+      {heldByStack && <p className="hint" style={{ marginBottom: 8 }}>{t.nextui_held}</p>}
+      <Btn icon={on ? "chevL" : "check"} variant={on ? "outline" : "primary"}
+        disabled={busy || !!locked || heldByStack}
+        onClick={() => setConfirm(true)}>
+        {busy ? t.saving : (on ? t.nextui_disable : t.nextui_enable)}
+      </Btn>
+      {err && <div className="field-err">{err}</div>}
+      <Confirm open={confirm} title={on ? t.nextui_disable : t.nextui_enable}
+        confirmLabel={on ? t.nextui_disable : t.nextui_enable}
+        cancelLabel={t.cancel} icon="layers" variant={on ? "danger" : "primary"}
+        onCancel={() => setConfirm(false)} onConfirm={apply}>
+        <p className="hint">{on ? t.nextui_confirm_off : t.nextui_confirm_on}</p>
+        <p className="hint">{t.nextui_confirm_roll}</p>
+      </Confirm>
+    </div>
+  );
+}
 
-      {/* A save restarts the nodes. The upgrade flow states its blast radius
-          before acting; an edit that reboots the same nodes must too. */}
+function ConfigTab({ d, lang, onSave, onToast, locked, onDeleteRequest }) {
+  const t = STR[lang];
+  const preset = sizeMeta(d.size);
+  const [size, setSize] = useState(["small", "medium", "large"].includes(d.size) ? d.size : "small");
+  const [mem, setMem] = useState(d.mem || preset.mem);
+  const [disk, setDisk] = useState(d.disk || preset.disk);
+  const [extra, setExtra] = useState(d.extra_config || "");
+  const [showAdv, setShowAdv] = useState(!!(d.extra_config || "").trim());
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // The JVM heap is operator-managed (#55/ADR-035): resolved from the backend
+  // so the UI never computes the rule.
+  const [jvmHeap, setJvmHeap] = useState(d.heap || sizeMeta(size).heap);
+  useEffect(() => {
+    let live = true;
+    API.customSizing(mem, "")
+      .then((p) => { if (live && p && p.heap) setJvmHeap(p.heap); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [mem]);
+
+  function pickSize(k) {
+    setSize(k);
+    const m = sizeMeta(k);
+    setMem(m.mem);
+    setDisk(m.disk);
+  }
+
+  // Resize guard (#16): disk can only grow — the backend enforces the same.
+  const curBytes = parseDisk(d.disk);
+  const newBytes = parseDisk(disk);
+  const diskShrink = curBytes != null && newBytes != null && newBytes < curBytes;
+
+  const base = ["small", "medium", "large"].includes(d.size) ? d.size : "small";
+  const dirty = size !== base
+    || mem !== (d.mem || preset.mem)
+    || disk !== (d.disk || preset.disk)
+    || extra !== (d.extra_config || "");
+
+  function reset() {
+    setSize(base);
+    setMem(d.mem || preset.mem);
+    setDisk(d.disk || preset.disk);
+    setExtra(d.extra_config || "");
+  }
+
+  async function save() {
+    if (diskShrink) return;
+    setBusy(true);
+    try {
+      await onSave({
+        name: d.id, size, purpose: d.purpose,
+        nodes: String(d.node_count || preset.nodes),
+        memory: mem, disk, config: extra,
+        monitors: (d.monitors || []).join(","),
+      });
+    } catch (e) { /* the shell toasted it */ }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="view-enter">
+      <LockNotice reason={locked} />
+
+      <FormSection title={t.cfg_h_size} desc={t.cfg_d_size} testid="cfg-size"
+        actions={<>
+          <Btn variant="primary" icon="check" disabled={busy || diskShrink || !dirty || !!locked}
+            data-testid="edit-save" onClick={() => setConfirm(true)}>{busy ? t.saving : t.save}</Btn>
+          {dirty && <Btn variant="outline" disabled={busy} onClick={reset}>{t.discard}</Btn>}
+          {dirty && <span className="hint">{t.cfg_unsaved}</span>}
+        </>}>
+        <Field label={t.size} htmlFor="cfg-size">
+          <select id="cfg-size" className="select" value={size} onChange={e => pickSize(e.target.value)}>
+            {["small", "medium", "large"].map(k => <option key={k} value={k}>{sizeLabel(k, t)} · {fmtQty(sizeMeta(k).mem, lang)} · {fmtQty(sizeMeta(k).disk, lang)}</option>)}
+          </select>
+        </Field>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14 }}>
+          <Field label={t.node_mem} tip={t.node_mem_hint} htmlFor="cfg-mem">
+            <input id="cfg-mem" className="input mono" value={mem} onChange={e => setMem(e.target.value)} />
+          </Field>
+          <Field label={t.disk} hint={t.disk_hint} htmlFor="cfg-disk" error={diskShrink ? t.disk_shrink_err.replace(/\{cur\}/g, d.disk) : ""}>
+            <input id="cfg-disk" className={`input mono${diskShrink ? " invalid" : ""}`} value={disk} onChange={e => setDisk(e.target.value)} />
+          </Field>
+        </div>
+        {/* Facts, not disabled inputs: a disabled field says "you could change
+            this"; a fact says you cannot, and why. */}
+        <FactField label={t.node_count} value={<span data-testid="edit-nodes">{fmt(t.cfg_nodes_fact, d.node_count || preset.nodes)}</span>} />
+        <FactField label={t.jvm} value={<span data-testid="edit-heap"><b>{fmtQty(jvmHeap, lang)}</b> <span className="hint" style={{ display: "inline" }}>{t.cfg_heap_fact.replace("{0}", "")}</span></span>} />
+      </FormSection>
+
+      <FormSection title={t.cfg_h_adv} desc={t.cfg_d_adv} testid="cfg-advanced">
+        {!showAdv ? (
+          <button type="button" className="btn-link" onClick={() => setShowAdv(true)}><Icon name="chevR" size={13} />{t.cfg_show_adv}</button>
+        ) : (
+          <>
+            <Field label={t.extra} hint={t.extra_hint} htmlFor="cfg-extra">
+              <textarea id="cfg-extra" className="textarea mono" value={extra} onChange={e => setExtra(e.target.value)}
+                placeholder={"indices.query.bool.max_clause_count: 2048"} />
+            </Field>
+            {!extra.trim() && <button type="button" className="btn-link" onClick={() => setShowAdv(false)}><Icon name="chevD" size={13} />{t.cfg_hide_adv}</button>}
+          </>
+        )}
+      </FormSection>
+
+      <FormSection title={t.cfg_h_ret} desc={t.cfg_d_ret} testid="cfg-retention">
+        <RetentionPanel d={d} lang={lang} locked={locked} />
+      </FormSection>
+
+      <FormSection title={t.cfg_h_ui} desc={t.cfg_d_ui} testid="cfg-ui">
+        <NextUiPanel d={d} lang={lang} onToast={onToast} locked={locked} />
+      </FormSection>
+
+      {/* Never locked, by decision (ADR-050 invariant 4): a provision that
+          never finishes is exactly when the user most needs to remove it. */}
+      <FormSection title={<span style={{ color: "var(--danger-text)" }}>{t.cfg_h_danger}</span>} desc={t.cfg_d_danger} testid="cfg-danger">
+        <Btn variant="danger" icon="trash" data-testid="delete-deployment" onClick={onDeleteRequest}>{t.delete_dep}</Btn>
+        {locked && <p className="hint" style={{ marginTop: 8 }}>{t.act_delete_ok}</p>}
+      </FormSection>
+
+      {/* A save restarts the nodes: state the blast radius before acting. */}
       <Confirm open={confirm} title={t.edit_confirm_h} body={t.edit_confirm_p}
         confirmLabel={t.save} cancelLabel={t.cancel} icon="check" variant="primary"
         onCancel={() => setConfirm(false)}
         onConfirm={() => { setConfirm(false); save(); }} />
-
-      <RetentionPanel d={d} lang={lang} locked={locked} />
     </div>
   );
 }
 
-// One doc-count refresh per this many ms. Each installed integration costs one query
-// against the customer's OpenSearch, so the old 5s cadence meant 12 enabled
-// integrations = 144 requests/minute for numbers nobody watches that closely.
+/* ============================================================
+   Data & integrations
+   ============================================================ */
 const INTEG_POLL_MS = 15000;
 
-// Integration id → an icon that already exists in ui.jsx. The catalog is
-// RUNTIME data (#76): anything unlisted falls back to the generic glyph, so a
-// newly published registry package renders with no frontend change at all.
-const INTEG_ICON = {
+// Integration id → catalog category. The catalog is RUNTIME data (#76); an
+// unknown id lands in "other" rather than hiding.
+const INTEG_CAT = {
+  kubernetes: "k8s", "k8s-events": "k8s",
   postgres: "db", mysql: "db", mongo: "db", redis: "db",
-  nginx: "layers", traefik: "layers", kubernetes: "layers",
-  "k8s-events": "activity", kafka: "activity", rabbitmq: "activity",
-  "k8s-audit": "shield", ssh: "shield",
+  kafka: "mq", rabbitmq: "mq",
+  nginx: "web", traefik: "web",
+  ssh: "sec", "k8s-audit": "sec",
 };
-
-// One labelled block of addresses. The stack publishes eight of them across
-// three purposes (send / look / alerts), and an undifferentiated list of
-// <Copyable>s is how the first version of this panel managed to show a user
-// five green components and still leave them asking where to point an exporter.
-function EndpointGroup({ title, desc, icon, children }) {
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "var(--text-1)" }}>
-        <Icon name={icon} size={14} />{title}
-      </div>
-      {desc && <div style={{ fontSize: 12, color: "var(--text-3)", margin: "3px 0 8px" }}>{desc}</div>}
-      <div style={{ display: "grid", gap: 6 }}>{children}</div>
-    </div>
-  );
+const CATS = ["all", "k8s", "db", "mq", "web", "sec", "other"];
+function monogram(id, title) {
+  const base = (title || id || "?").replace(/[^A-Za-z0-9 ]/g, " ").trim();
+  const parts = base.split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return base.slice(0, 2);
 }
 
-// One address: what it is, whether it is reachable from outside, the value, and
-// a way to open it when a browser can.
-function EndpointRow({ t, label, value, href, tag, onCopy }) {
+function EndpointRow({ t, label, value, href, onCopy }) {
   if (!value) return null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12.5 }}>
-      <span style={{ color: "var(--text-2)", minWidth: 132 }}>{label}</span>
-      {tag && (
-        <span className="badge" style={{ padding: "1px 6px", fontSize: 10.5 }}>{tag}</span>
-      )}
-      <Copyable text={value} t={t} onCopy={onCopy} />
-      {href && (
-        <a href={href} target="_blank" rel="noreferrer" className="btn-link" style={{ fontSize: 12 }}>
-          {t.open}<Icon name="arrowR" size={12} />
-        </a>
-      )}
+    <div className="ep-row">
+      <span className="lbl">{label}</span>
+      <span className="val">
+        <Copyable text={value} t={t} onCopy={onCopy} />
+        {href && <a href={href} target="_blank" rel="noreferrer" className="btn-link" style={{ fontSize: 12.5 }}>{t.open}<Icon name="ext" size={12} /></a>}
+      </span>
     </div>
   );
 }
 
-// The credential both published endpoints check. Behind a reveal, and fetched
-// only when asked — same contract as the cluster admin credentials, for the
-// same reason: a secret on a 15-second poll ends up in every log between here
-// and the browser.
+// The credential the published OTLP endpoints check. Behind a reveal, fetched
+// only when asked.
 function OtelCredentials({ d, t, user, onToast, locked }) {
   const [creds, setCreds] = useState(null);
   const [show, setShow] = useState(false);
@@ -890,42 +860,30 @@ function OtelCredentials({ d, t, user, onToast, locked }) {
     }
   }
 
-  const row = { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12.5 };
-  const label = { color: "var(--text-2)", minWidth: 90 };
   return (
-    <div>
-      <div style={row}>
-        <span style={label}>{t.cred_user}</span>
-        <Copyable text={(creds && creds.username) || user} t={t} onCopy={onToast} />
+    <div style={{ display: "grid", gap: 8 }}>
+      <div className="ep-row">
+        <span className="lbl">{t.cred_user}</span>
+        <span className="val"><Copyable text={(creds && creds.username) || user} t={t} onCopy={onToast} /></span>
       </div>
-      <div style={{ ...row, marginTop: 6 }}>
-        <span style={label}>{t.cred_pass}</span>
-        {creds && show
-          ? <Copyable text={creds.password} t={t} onCopy={onToast} />
-          : <span className="copyfield"><code>{"•".repeat(12)}</code></span>}
-        <Btn variant="outline" icon={show ? "eyeOff" : "eye"} disabled={busy} onClick={reveal}
-          style={{ padding: "5px 10px" }}>
-          {busy ? t.cred_loading : creds ? (show ? t.hide : t.show) : t.cred_reveal}
-        </Btn>
-        <Btn variant="outline" icon="shield" disabled={busy || !!locked}
-          onClick={() => setConfirming(true)} style={{ padding: "5px 10px" }}>
-          {t.otel_cred_reset}
-        </Btn>
+      <div className="ep-row">
+        <span className="lbl">{t.cred_pass}</span>
+        <span className="val">
+          {creds && show
+            ? <Copyable text={creds.password} t={t} onCopy={onToast} />
+            : <span className="copyfield"><code>{"•".repeat(12)}</code></span>}
+          <Btn variant="outline" size="sm" icon={show ? "eyeOff" : "eye"} disabled={busy} onClick={reveal}>
+            {busy ? t.cred_loading : creds ? (show ? t.hide : t.show) : t.cred_reveal}
+          </Btn>
+          <Btn variant="outline" size="sm" icon="shield" disabled={busy || !!locked} onClick={() => setConfirming(true)}>
+            {t.otel_cred_reset}
+          </Btn>
+        </span>
       </div>
-      {err && <div style={{ marginTop: 6, color: "var(--danger)", fontSize: 12 }}>{err}</div>}
-
-      {/* The consequence is not obvious from the button, so it is spelled out:
-          the collector holds exactly one credential and has no grace period. */}
-      <Confirm
-        open={confirming}
-        icon="shield"
-        title={t.otel_cred_reset_h}
-        body={t.otel_cred_reset_p}
-        confirmLabel={t.otel_cred_reset}
-        cancelLabel={t.cancel}
-        onCancel={() => setConfirming(false)}
-        onConfirm={reset}
-      >
+      {err && <div className="field-err">{err}</div>}
+      <Confirm open={confirming} icon="shield" title={t.otel_cred_reset_h} body={t.otel_cred_reset_p}
+        confirmLabel={t.otel_cred_reset} cancelLabel={t.cancel}
+        onCancel={() => setConfirming(false)} onConfirm={reset}>
         <ul style={{ margin: "4px 0 10px 18px", fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.7 }}>
           <li>{t.otel_cred_reset_b1}</li>
           <li>{t.otel_cred_reset_b2}</li>
@@ -936,16 +894,10 @@ function OtelCredentials({ d, t, user, onToast, locked }) {
   );
 }
 
-// The OTel observability stack (ADR-053) — the SECOND collection option, shown
-// above the recipe grid because both answer the same question ("how does data
-// get in here"), one with logs and one with traces + metrics.
-//
-// `locked` is the verdict `DeploymentView` computed once (ADR-048 invariant 3):
-// this panel never re-derives readiness from `health`, it only obeys.
+/* --- The OTel observability stack (ADR-053): a compact card with the value
+   and the cost; the component list and the addresses open on demand. --- */
 function ObservabilityStackPanel({ d, lang, locked, onToggle, onToast }) {
   const t = STR[lang];
-  // Browser-reachable Dashboards origin, or null in port-forward mode — the
-  // workspace deep link only makes sense when there is one.
   const dashUrl = d.dashboard_url || "";
   const [info, setInfo] = useState(null);
   const [st, setSt] = useState(null);
@@ -953,18 +905,15 @@ function ObservabilityStackPanel({ d, lang, locked, onToggle, onToast }) {
   const [err, setErr] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [dropData, setDropData] = useState(false);
+  const [details, setDetails] = useState(false);
   const installed = !!d.otel_stack;
 
-  // Static description (components + cost): fetched once, never hardcoded here.
   useEffect(() => {
     let alive = true;
     API.otelStackInfo().then(i => alive && setInfo(i)).catch(() => {});
     return () => { alive = false; };
   }, []);
 
-  // Live component readiness, on the SAME cadence as the recipe cards and with
-  // the same hidden-tab guard — and only while installed, so a deployment
-  // without the stack costs zero requests.
   useEffect(() => {
     if (!installed) { setSt(null); return; }
     let alive = true;
@@ -982,20 +931,15 @@ function ObservabilityStackPanel({ d, lang, locked, onToggle, onToast }) {
 
   async function act(install, deleteIndices = false) {
     setBusy(true); setErr("");
-    try {
-      await onToggle(d.id, install, deleteIndices);
-    } catch (e) {
-      // Pinned here rather than left to a toast that disappears in 3s.
-      setErr(e.message || String(e));
-    } finally {
-      setBusy(false);
-    }
+    try { await onToggle(d.id, install, deleteIndices); }
+    catch (e) { setErr(e.message || String(e)); }
+    finally { setBusy(false); }
   }
 
   const cost = info
     ? t.otel_cost
-        .replace("{0}", (info.cpu_millis / 1000).toFixed(1))
-        .replace("{1}", (info.mem_mib / 1024).toFixed(1) + " GiB")
+        .replace("{0}", fmtDec(info.cpu_millis / 1000, lang, 1))
+        .replace("{1}", fmtDec(info.mem_mib / 1024, lang, 1) + " GiB")
         .replace("{2}", info.disk_gib)
     : "";
   const compLabel = {
@@ -1007,149 +951,112 @@ function ObservabilityStackPanel({ d, lang, locked, onToggle, onToast }) {
   };
 
   return (
-    <div className="recipe" style={{ display: "block", marginBottom: 20 }}>
-      <div className="rh" style={{ marginBottom: 6 }}>
-        <span style={{ color: installed ? "var(--accent)" : "var(--text-3)" }}>
-          <Icon name="activity" size={16} />
-        </span>
-        <span className="rt">{t.otel_h}</span>
-        <span className={`badge ${installed ? "green" : ""}`} style={{ padding: "2px 8px", marginLeft: 8 }}>
-          {installed ? t.otel_installed : t.otel_not_installed}
-        </span>
+    <div className={`card${installed ? " on" : ""}`} data-testid="otel-stack" data-installed={installed ? "true" : "false"} style={{ marginBottom: 18 }}>
+      <div className="otel-card">
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <b style={{ fontWeight: 600 }}>{t.otel_h}</b>
+            <span className={`badge ${installed ? "green" : ""}`}>{installed ? t.otel_installed : t.otel_not_installed}</span>
+            {!installed && <span className="badge blue">{t.otel_recommended}</span>}
+          </div>
+          <div style={{ color: "var(--text-2)", marginTop: 4, fontSize: 13.5 }}>{t.otel_lead}</div>
+          {!installed && info && <div className="cost">{t.otel_cost_h}: {cost}</div>}
+          {installed && st && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              {(st.components || []).map(c => (
+                <span key={c.name} className={`badge ${c.ready >= 1 ? "green" : ""}`}>
+                  <Icon name={c.ready >= 1 ? "check" : "clock"} size={11} />{(compLabel[c.name] || c.name).split(" — ")[0]}
+                </span>
+              ))}
+              <span className={`badge ${st.span_docs > 0 ? "green" : ""}`}>
+                {st.span_docs > 0 ? `${fmtInt(st.span_docs, lang)} ${t.otel_spans}` : t.integ_waiting}
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="acts">
+          <Btn variant="outline" size="sm" icon={details ? "chevD" : "chevR"} onClick={() => setDetails(x => !x)} data-testid="otel-details">
+            {details ? t.otel_hide_details : t.otel_details}
+          </Btn>
+          {installed ? (
+            <Btn variant="danger" size="sm" icon="trash" disabled={busy || !!locked} onClick={() => setConfirming(true)} data-testid="otel-uninstall">
+              {t.otel_uninstall}
+            </Btn>
+          ) : (
+            <Btn variant="primary" size="sm" icon="plus" disabled={busy || !!locked} onClick={() => act(true)} data-testid="otel-install">
+              {busy ? t.otel_installing : t.otel_install}
+            </Btn>
+          )}
+        </div>
       </div>
-      <div className="rd" style={{ marginBottom: 12 }}>{t.otel_lead}</div>
 
-      {!installed && (
-        <>
-          <div style={{ fontSize: 12.5, color: "var(--text-2)", marginBottom: 4 }}>{t.otel_adds}</div>
-          <ul style={{ margin: "0 0 14px 18px", fontSize: 13, color: "var(--text-2)" }}>
-            <li>{t.otel_add_traces}</li>
-            <li>{t.otel_add_agents}</li>
-            <li>{t.otel_add_metrics}</li>
-            <li>{t.otel_add_alerts}</li>
-          </ul>
-          {info && (
+      {err && <div className="field-err" style={{ padding: "0 16px 12px" }}>{err}</div>}
+
+      {details && (
+        <div style={{ borderTop: "1px solid var(--border)", padding: "14px 16px", display: "grid", gap: 18 }}>
+          {!installed && (
             <>
-              <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>{t.otel_comp_h}</div>
-              <ul style={{ margin: "0 0 14px 18px", fontSize: 12.5, color: "var(--text-3)" }}>
-                {info.components.map(c => (
-                  <li key={c.key}>
-                    {compLabel[c.key] || c.key}{" "}
-                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 11.5 }}>{c.image}</span>
-                  </li>
-                ))}
-              </ul>
-              {/* Stated before the click, not after: this is a real bill. */}
-              <div style={{ fontSize: 12.5, color: "var(--text-2)", marginBottom: 14 }}>
-                {t.otel_cost_h}: <strong>{cost}</strong>
+              <div>
+                <div className="section-title">{t.otel_adds}</div>
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "var(--text-2)", display: "grid", gap: 3 }}>
+                  <li>{t.otel_add_traces}</li><li>{t.otel_add_agents}</li><li>{t.otel_add_metrics}</li><li>{t.otel_add_alerts}</li>
+                </ul>
+              </div>
+              {info && (
+                <div>
+                  <div className="section-title">{t.otel_comp_h}</div>
+                  <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: "var(--text-3)", display: "grid", gap: 3 }}>
+                    {info.components.map(c => (
+                      <li key={c.key}>{compLabel[c.key] || c.key} <span className="mono" style={{ fontSize: 11.5 }}>{c.image}</span></li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+          {installed && st && (
+            <>
+              <div>
+                <div className="section-title">{t.otel_send_h}</div>
+                <p className="hint" style={{ marginBottom: 10 }}>{t.otel_send_p}</p>
+                <div style={{ display: "grid", gap: 8 }}>
+                  <EndpointRow t={t} label={t.otel_ep_otlp_logs} value={st.otlp_logs_url} onCopy={onToast} />
+                  <EndpointRow t={t} label={t.otel_ep_otlp_metrics} value={st.otlp_metrics_url} onCopy={onToast} />
+                  <EndpointRow t={t} label={t.otel_ep_otlp_http} value={st.otlp_traces_url} onCopy={onToast} />
+                </div>
+                <p className="hint" style={{ marginTop: 8 }}>{t.otel_send_how}</p>
+              </div>
+              <div>
+                <div className="section-title">{t.otel_cred_h}</div>
+                <p className="hint" style={{ marginBottom: 10 }}>{t.otel_cred_p}</p>
+                <OtelCredentials d={d} t={t} user={st.otlp_user} onToast={onToast} locked={locked} />
+              </div>
+              <div>
+                <div className="section-title">{t.otel_screens_h}</div>
+                <p className="hint" style={{ marginBottom: 10 }}>{t.otel_screens_p}</p>
+                {dashUrl && st.workspace_path && (
+                  <EndpointRow t={t} label={t.otel_ep_workspace} value={dashUrl + st.workspace_path} href={dashUrl + st.workspace_path} onCopy={onToast} />
+                )}
+                <ul style={{ margin: "10px 0 0 18px", fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.7 }}>
+                  <li>{t.otel_screen_traces}</li><li>{t.otel_screen_agent}</li><li>{t.otel_screen_metrics}</li>
+                  <li>{t.otel_screen_alerts}</li><li>{t.otel_screen_boards}</li>
+                </ul>
               </div>
             </>
           )}
-        </>
-      )}
-
-      {installed && st && (
-        <div style={{ display: "grid", gap: 20, marginBottom: 18 }}>
-          {/* 1. Is it running. One row, because everything below is an address
-              and the health of what serves them comes first. */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-            {(st.components || []).map(c => (
-              <span key={c.name} className={`badge ${c.ready >= 1 ? "green" : ""}`} style={{ padding: "2px 8px" }}>
-                <Icon name={c.ready >= 1 ? "check" : "clock"} size={11} />
-                {compLabel[c.name] || c.name}
-              </span>
-            ))}
-            <span className={`badge ${st.datasource ? "green" : ""}`} style={{ padding: "2px 8px" }}>
-              <Icon name={st.datasource ? "check" : "clock"} size={11} />
-              {st.datasource ? t.otel_ds_ok : t.otel_ds_pending}
-            </span>
-            <span className={`badge ${st.boards > 0 ? "green" : ""}`} style={{ padding: "2px 8px" }}>
-              <Icon name={st.boards > 0 ? "check" : "clock"} size={11} />
-              {st.boards > 0 ? fmt(t.otel_boards_ok, st.boards) : t.otel_boards_pending}
-            </span>
-          </div>
-          <div className={`rstat ${st.span_docs > 0 ? "live" : "idle"}`}>
-            {st.span_docs > 0
-              ? <><Icon name="spark" size={14} />{st.span_docs.toLocaleString()} {t.otel_spans}</>
-              : <><Icon name="clock" size={14} />{t.integ_waiting}</>}
-          </div>
-
-          {/* 2. Where to send. The question this panel exists to answer, so it
-              gets the top slot, and only the three signal endpoints appear —
-              the OpenSearch API and the Dashboards URL live on the Overview,
-              where they belong to the deployment rather than to this feature. */}
-          <EndpointGroup t={t} title={t.otel_send_h} desc={t.otel_send_p} icon="plug">
-            <EndpointRow t={t} label={t.otel_ep_otlp_logs} value={st.otlp_logs_url} onCopy={onToast} />
-            <EndpointRow t={t} label={t.otel_ep_otlp_metrics} value={st.otlp_metrics_url} onCopy={onToast} />
-            <EndpointRow t={t} label={t.otel_ep_otlp_http} value={st.otlp_traces_url} onCopy={onToast} />
-            <p className="hint" style={{ margin: "8px 0 0" }}>{t.otel_send_how}</p>
-          </EndpointGroup>
-
-          {/* 3. Who may send. Its own block: the credential is shared by the
-              three endpoints and rotating it is a decision with consequences. */}
-          <EndpointGroup t={t} title={t.otel_cred_h} desc={t.otel_cred_p} icon="shield">
-            <OtelCredentials d={d} t={t} user={st.otlp_user} onToast={onToast} locked={locked} />
-          </EndpointGroup>
-
-          {/* 4. Where the data shows up. */}
-          <EndpointGroup t={t} title={t.otel_screens_h} desc={t.otel_screens_p} icon="activity">
-            {dashUrl && st.workspace_path && (
-              <EndpointRow t={t} label={t.otel_ep_workspace} value={dashUrl + st.workspace_path}
-                href={dashUrl + st.workspace_path} onCopy={onToast} />
-            )}
-            <ul style={{ margin: "10px 0 0 18px", fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.7 }}>
-              <li>{t.otel_screen_traces}</li>
-              <li>{t.otel_screen_agent}</li>
-              <li>{t.otel_screen_metrics}</li>
-              <li>{t.otel_screen_alerts}</li>
-              <li>{t.otel_screen_boards}</li>
-            </ul>
-          </EndpointGroup>
         </div>
       )}
 
-      <div className="ractions">
-        {installed ? (
-          <Btn variant="danger" icon="trash" disabled={busy || !!locked}
-            onClick={() => setConfirming(true)} style={{ padding: "7px 13px" }}>
-            {t.otel_uninstall}
-          </Btn>
-        ) : (
-          <Btn variant="primary" size="" icon="plus" disabled={busy || !!locked}
-            onClick={() => act(true)} style={{ padding: "7px 13px" }}>
-            {busy ? t.otel_installing : t.otel_install}
-          </Btn>
-        )}
-      </div>
-
-      {err && (
-        <div style={{ marginTop: 8, color: "var(--danger)", fontSize: 12.5, fontFamily: "var(--font-mono)" }}>
-          {err}
-        </div>
-      )}
-
-      {/* Type-to-confirm, like delete: this removes 17 objects and a volume. */}
-      {/* Type-to-confirm, and the destructive OPTION is inside the dialog
-          rather than a toggle on the page: the choice only exists at the moment
-          of the decision, and the copy says what "recoverable" means here. */}
-      <Confirm
-        open={confirming}
-        title={t.otel_uninstall_h}
-        body={t.otel_uninstall_p}
-        confirmLabel={t.otel_uninstall}
-        cancelLabel={t.cancel}
-        requireText={d.id}
-        requireLabel={fmt(t.otel_uninstall_type, d.id)}
+      <Confirm open={confirming} title={t.otel_uninstall_h} body={t.otel_uninstall_p}
+        confirmLabel={t.otel_uninstall} cancelLabel={t.cancel}
+        requireText={d.id} requireLabel={fmt(t.otel_uninstall_type, d.id)}
         onCancel={() => { setConfirming(false); setDropData(false); }}
-        onConfirm={() => { setConfirming(false); act(false, dropData); setDropData(false); }}
-      >
-        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", margin: "4px 0 12px",
-                        fontSize: 13, color: "var(--text-2)", cursor: "pointer" }}>
-          <input type="checkbox" checked={dropData} style={{ marginTop: 3 }}
-            onChange={e => setDropData(e.target.checked)} />
+        onConfirm={() => { setConfirming(false); act(false, dropData); setDropData(false); }}>
+        <label className="check-row" style={{ alignItems: "flex-start", margin: "4px 0 12px", color: "var(--text-2)" }}>
+          <input type="checkbox" checked={dropData} style={{ marginTop: 3 }} onChange={e => setDropData(e.target.checked)} />
           <span>
             {t.otel_uninstall_drop}
-            <span style={{ display: "block", color: dropData ? "var(--danger)" : "var(--text-3)", fontSize: 12, marginTop: 3 }}>
+            <span style={{ display: "block", color: dropData ? "var(--danger-text)" : "var(--text-3)", fontSize: 12, marginTop: 3 }}>
               {dropData ? t.otel_uninstall_drop_on : t.otel_uninstall_drop_off}
             </span>
           </span>
@@ -1159,16 +1066,11 @@ function ObservabilityStackPanel({ d, lang, locked, onToggle, onToast }) {
   );
 }
 
-// The catalog publishes title/summary as locale → text (en/es/pt today). Fall
-// back through en to `alt` so a package shipping one locale still renders
-// instead of showing "undefined".
 function loc(map, lang, alt) {
   if (!map) return alt;
   return map[lang] || map.en || Object.values(map)[0] || alt;
 }
 
-// age_seconds → a short human string. Only ever decorative (it qualifies the
-// catalog's freshness); never parsed.
 function fmtAge(sec, t) {
   if (sec == null) return "—";
   if (sec < 5) return t.integ_age_now;
@@ -1177,23 +1079,18 @@ function fmtAge(sec, t) {
   return t.integ_age_h.replace("{n}", String(Math.round(sec / 3600)));
 }
 
-// The runtime catalog (ADR-039 / ADR-047, #76). Everything on screen comes from
-// POST /api/catalog — no compiled-in integration list — so publishing a package
-// to the registry is the whole release. Three per-row states: installed (with
-// the recorded version), available, and update-available (the catalog offers a
-// newer version than the one recorded on the deployment).
-//
-// The degraded-registry states are RENDERED, not hidden: source "cache" shows a
-// stale banner with the registry's own error text, source "bootstrap" explains
-// that only the built-in floor is reachable. The tab is never empty or broken
-// because the registry is down.
-function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
+// The runtime catalog (ADR-039 / ADR-047, #76). Installed first, then the
+// catalog in a grid with search and categories. The degraded-registry states
+// are RENDERED, not hidden.
+function DataTab({ d, lang, onToggleStack, onToast, locked }) {
   const t = STR[lang];
-  const [view, setView] = useState(null);   // CatalogView, null until loaded
+  const [view, setView] = useState(null);
   const [loadErr, setLoadErr] = useState("");
-  const [status, setStatus] = useState({}); // id → MonitoringStatus
-  const [busy, setBusy] = useState({});     // id → "install" | "uninstall"
+  const [status, setStatus] = useState({});
+  const [busy, setBusy] = useState({});
   const [itemErr, setItemErr] = useState({});
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState("all");
 
   const reload = useCallback(async () => {
     try {
@@ -1201,8 +1098,6 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
       setView(v);
       setLoadErr("");
     } catch (e) {
-      // Only a transport/auth failure lands here: a down REGISTRY is a 200
-      // with source=cache|bootstrap, which renders as a banner below.
       setLoadErr(e.message);
     }
   }, [d.id]);
@@ -1210,14 +1105,10 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
   useEffect(() => { reload(); }, [reload]);
 
   const items = view ? view.integrations || [] : [];
-  // Installed = a recorded package version, OR the monitor annotation alone —
-  // deployments provisioned before versions were recorded (#75) still have a
-  // running agent, and must read "installed", not "available".
   const monitors = d.monitors || [];
   const isInstalled = (it) => it.installed_version != null || monitors.includes(it.id);
   const installedSig = items.filter(isInstalled).map(it => it.id).join(",");
 
-  // Keep the live ingestion-status polling for what's installed.
   useEffect(() => {
     if (!installedSig) return undefined;
     let alive = true;
@@ -1239,7 +1130,6 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
     return () => { alive = false; clearInterval(h); };
   }, [d.id, installedSig]);
 
-  // One busy/error lane per row: a failing install must not freeze the tab.
   async function act(id, kind, version) {
     setBusy(b => ({ ...b, [id]: kind }));
     setItemErr(e => ({ ...e, [id]: "" }));
@@ -1249,12 +1139,6 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
       onToast(kind === "uninstall" ? t.integ_uninstalled_toast : t.integ_installed_toast);
       await reload();
     } catch (e) {
-      // #80: install/uninstall resolve the deployment before mutating, and an
-      // unknown OR unowned name is one deliberate 404 carrying the same
-      // anti-enumeration text either way. Reaching it from a tab we opened off
-      // the (already scope-filtered) deployment list means the deployment went
-      // away underneath us — say that, rather than echoing "deployment not
-      // found" into a row about an integration.
       setItemErr(er => ({ ...er, [id]: e.status === 404 ? t.integ_dep_gone : e.message }));
     } finally {
       setBusy(b => ({ ...b, [id]: null }));
@@ -1264,22 +1148,18 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
   if (loadErr) {
     return (
       <div className="view-enter" data-testid="integrations-tab">
-        <p className="lead">{t.integ_lead}</p>
-        <div className="card pad" data-testid="catalog-error">
-          <h3 className="section-title" style={{ marginTop: 0, color: "var(--danger)" }}>
-            <Icon name="bolt" size={15} /> {t.integ_load_err}
-          </h3>
-          <p className="hint" style={{ fontFamily: "var(--font-mono)" }}>{loadErr}</p>
-          <Btn variant="outline" icon="clock" onClick={reload} style={{ marginTop: 12 }}>{t.integ_retry}</Btn>
-        </div>
+        <p className="lead" style={{ marginBottom: 16 }}>{t.integ_lead}</p>
+        <Banner tone="danger" title={t.integ_load_err} testid="catalog-error"
+          action={<Btn variant="outline" size="sm" icon="clock" onClick={reload}>{t.integ_retry}</Btn>}>
+          <span className="mono">{loadErr}</span>
+        </Banner>
       </div>
     );
   }
-
   if (!view) {
     return (
       <div className="view-enter" data-testid="integrations-tab">
-        <p className="lead">{t.integ_lead}</p>
+        <p className="lead" style={{ marginBottom: 16 }}>{t.integ_lead}</p>
         <p className="hint" data-testid="catalog-loading">{t.integ_loading}</p>
       </div>
     );
@@ -1287,163 +1167,163 @@ function IntegrationsTab({ d, lang, onToggleStack, onToast, locked }) {
 
   const age = fmtAge(view.age_seconds, t);
   const dashUrl = d.dashboard_url;
+  const installedItems = items.filter(isInstalled);
+  const needle = q.trim().toLowerCase();
+  const catOf = (it) => INTEG_CAT[it.id] || "other";
+  const counts = CATS.reduce((m, c) => { m[c] = items.filter(it => !isInstalled(it) && (c === "all" || catOf(it) === c)).length; return m; }, {});
+  const available = items.filter(it => !isInstalled(it)
+    && (cat === "all" || catOf(it) === cat)
+    && (!needle || loc(it.title, lang, it.id).toLowerCase().includes(needle) || it.id.includes(needle) || loc(it.summary, lang, "").toLowerCase().includes(needle)));
+
+  const rowStatus = (it) => {
+    const st = status[it.id];
+    const count = st ? st.doc_count : 0;
+    const lastMs = st && st.last_doc_at ? Date.parse(st.last_doc_at) : NaN;
+    const lastAge = Number.isFinite(lastMs) ? Math.max(0, Math.round((Date.now() - lastMs) / 1000)) : null;
+    if (st && st.receiving) return { live: true, text: `${t.receiving} · ${fmtInt(count, lang)} ${t.docs}` };
+    if (!st || count === 0) return { live: false, text: t.no_data };
+    if (st.state === "untimed") return { live: false, text: `${fmtInt(count, lang)} ${t.docs} — ${t.integ_recency_unknown}` };
+    return { live: false, text: `${t.integ_no_recent}${lastAge != null ? ` — ${t.integ_last_data.replace("{age}", fmtAge(lastAge, t))}` : ""} · ${fmtInt(count, lang)} ${t.docs}` };
+  };
 
   return (
     <div className="view-enter" data-testid="integrations-tab">
       <LockNotice reason={locked} />
-      {/* Both surfaces answer "how does data get in here" — traces and metrics
-          in the stack panel, logs in the recipe grid — so they belong on one
-          screen, not two (ADR-053). The lead introduces both, so it comes
-          first rather than sitting between them. */}
-      <p className="lead">{t.integ_lead}</p>
+      <p className="lead" style={{ marginBottom: 18 }}>{t.integ_lead}</p>
 
-      <ObservabilityStackPanel d={d} lang={lang} locked={locked} onToggle={onToggleStack} onToast={onToast} />
-      {view.source === "registry" ? (
-        <p className="hint" data-testid="catalog-source" data-source="registry"
-          style={{ marginTop: -6, marginBottom: 16, fontFamily: "var(--font-mono)", fontSize: 12.5 }}>
-          {t.integ_src_registry.replace("{age}", age)}
-        </p>
+      {/* 1. what is already sending data */}
+      <div className="section-title">{t.integ_installed_h} <span className="tab-count">{installedItems.length}</span></div>
+      {installedItems.length === 0 ? (
+        <p className="hint" style={{ marginBottom: 18 }} data-testid="integ-none-installed">{t.integ_none_installed}</p>
       ) : (
-        <div className="card pad" data-testid="catalog-degraded" data-source={view.source}
-          style={{ marginBottom: 18, borderColor: "var(--warn-soft)" }}>
-          <h3 className="section-title" style={{ marginTop: 0, color: "var(--warn)" }}>
-            <Icon name="bolt" size={15} />{" "}
-            {view.source === "cache" ? t.integ_stale_h : t.integ_bootstrap_h}
-          </h3>
-          <p className="hint">
-            {view.source === "cache"
-              ? t.integ_stale_p.replace("{age}", age)
-              : t.integ_bootstrap_p}
-          </p>
-          {/* The registry's own words, verbatim — the operator needs the reason,
-              not a paraphrase of it (ADR-047). */}
-          {view.error && (
-            <p data-testid="catalog-error-reason"
-              style={{ marginTop: 10, fontFamily: "var(--font-mono)", fontSize: 12.5, color: "var(--text-3)", wordBreak: "break-word" }}>
-              {view.error}
-            </p>
-          )}
-        </div>
-      )}
-
-      {items.length === 0 ? (
-        <p className="hint" data-testid="catalog-empty">{t.integ_empty}</p>
-      ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {items.map(it => {
-            const installed = isInstalled(it);
-            const state = !installed ? "available" : it.update_available ? "update" : "installed";
-            const st = installed ? status[it.id] : undefined;
-            const count = st ? st.doc_count : 0;
-            // #165: "receiving" means documents arrived recently, not "the
-            // index was ever written to" — a dead collector with history reads
-            // as no recent data, with when the last document landed.
-            const lastMs = st && st.last_doc_at ? Date.parse(st.last_doc_at) : NaN;
-            const lastAge = Number.isFinite(lastMs)
-              ? Math.max(0, Math.round((Date.now() - lastMs) / 1000))
-              : null;
+        <div style={{ display: "grid", gap: 8, marginBottom: 18 }}>
+          {installedItems.map(it => {
+            const state = it.update_available ? "update" : "installed";
+            const rs = rowStatus(it);
             const working = busy[it.id];
             const err = itemErr[it.id];
             return (
-              <div className={`recipe ${installed ? "on" : ""}`} key={it.id}
-                data-testid={`integration-${it.id}`} data-state={state}>
-                <div className="rh">
-                  <span style={{ color: installed ? "var(--accent)" : "var(--text-3)" }}>
-                    <Icon name={INTEG_ICON[it.id] || "server"} size={16} />
-                  </span>
-                  <span className="rt">{loc(it.title, lang, it.id)}</span>
-                  <span className="badge" style={{ padding: "2px 8px" }}>
-                    {t.integ_version} {it.version}
-                  </span>
-                  {it.builtin && <span className="badge" style={{ padding: "2px 8px" }}>{t.integ_builtin}</span>}
-                </div>
-                <div className="rd">{loc(it.summary, lang, "")}</div>
-
-                <div className={`rstat ${st && st.receiving ? "live" : "idle"}`}>
-                  {st && st.receiving
-                    ? <><Icon name="spark" size={14} />{t.receiving} — {count.toLocaleString()} {t.docs}</>
-                    : !st || count === 0
-                      ? <>{t.no_data}</>
-                      : st.state === "untimed"
-                        ? <>{count.toLocaleString()} {t.docs} — {t.integ_recency_unknown}</>
-                        : <>{t.integ_no_recent}{lastAge != null && <> — {t.integ_last_data.replace("{age}", fmtAge(lastAge, t))}</>} · {count.toLocaleString()} {t.docs}</>}
-                </div>
-
-                <div className="ractions">
-                  {installed && (
-                    <span className="badge green" style={{ padding: "2px 8px" }} data-testid={`installed-${it.id}`}>
-                      <Icon name="check" size={11} />
-                      {t.integ_installed} {it.installed_version || `(${t.integ_version_unknown})`}
+              <div className="card installed-row" key={it.id} data-testid={`integration-${it.id}`} data-state={state}>
+                <span className="integ-mono on">{monogram(it.id, loc(it.title, lang, it.id))}</span>
+                <div style={{ minWidth: 0 }}>
+                  <div className="ttl">
+                    <b>{loc(it.title, lang, it.id)}</b>
+                    <span className="badge green mono" data-testid={`installed-${it.id}`}>
+                      <Icon name="check" size={11} />{t.integ_installed} {it.installed_version || `(${t.integ_version_unknown})`}
                     </span>
-                  )}
+                    {state === "update" && <span className="badge yellow" data-testid={`update-badge-${it.id}`}>{t.integ_update_badge} · {it.version}</span>}
+                    {it.builtin && <span className="badge">{t.integ_builtin}</span>}
+                  </div>
+                  <div className="d">{loc(it.summary, lang, "")}</div>
+                  <div className={rs.live ? "live" : "idle"} style={{ marginTop: 4 }}>{rs.live && <Icon name="spark" size={12} style={{ verticalAlign: -2, marginRight: 4 }} />}{rs.text}</div>
+                  {err && <div className="field-err" data-testid={`error-${it.id}`}>{err}</div>}
+                </div>
+                <div className="acts">
                   {state === "update" && (
-                    <span className="badge yellow" style={{ padding: "2px 8px" }} data-testid={`update-badge-${it.id}`}>
-                      {t.integ_update_badge}
-                    </span>
-                  )}
-                  {state === "update" && (
-                    <Btn variant="primary" icon="arrowR" disabled={!!working || !!locked}
-                      data-testid={`update-${it.id}`} style={{ padding: "7px 13px" }}
-                      onClick={() => act(it.id, "install", it.version)}>
+                    <Btn variant="primary" size="sm" icon="arrowUp" disabled={!!working || !!locked}
+                      data-testid={`update-${it.id}`} onClick={() => act(it.id, "install", it.version)}>
                       {working === "install" ? t.integ_installing : t.integ_update}
                     </Btn>
                   )}
-                  {!installed && (
-                    <Btn variant="primary" icon="plus" disabled={!!working || !!locked || !it.compatible}
-                      data-testid={`install-${it.id}`} style={{ padding: "7px 13px" }}
-                      onClick={() => act(it.id, "install", it.version)}>
-                      {working === "install" ? t.integ_installing : t.integ_install}
-                    </Btn>
-                  )}
-                  {installed && (
-                    <button className="btn-link" style={{ color: "var(--text-3)" }} disabled={!!working || !!locked}
-                      data-testid={`uninstall-${it.id}`} onClick={() => act(it.id, "uninstall")}>
-                      {working === "uninstall" ? t.integ_uninstalling : t.integ_uninstall}
-                    </button>
-                  )}
-                  {installed && dashUrl &&
-                    <a href={`${dashUrl}/app/dashboards`} target="_blank" rel="noreferrer" className="btn-link">{t.open_dashboard}</a>}
+                  {dashUrl && <a href={`${dashUrl}/app/dashboards`} target="_blank" rel="noreferrer" className="btn btn-outline btn-sm">{t.open_dashboard}<Icon name="ext" size={12} /></a>}
+                  <Menu label={t.more_actions} items={[
+                    { label: t.integ_uninstall, icon: "trash", danger: true, disabled: !!working || !!locked, testid: `uninstall-${it.id}`, onClick: () => act(it.id, "uninstall") },
+                  ]} />
                 </div>
-
-                {!it.compatible && (
-                  <p style={{ marginTop: 10, marginBottom: 0, fontSize: 12.5, color: "var(--warn)", fontFamily: "var(--font-mono)" }}
-                    data-testid={`incompatible-${it.id}`}>
-                    {t.integ_incompatible.replace("{v}", it.min_core_version || "?")}
-                  </p>
-                )}
-                {err && (
-                  <p style={{ marginTop: 10, marginBottom: 0, fontSize: 12.5, color: "var(--danger)", fontFamily: "var(--font-mono)", wordBreak: "break-word" }}
-                    data-testid={`error-${it.id}`}>
-                    {err}
-                  </p>
-                )}
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* 2. the second collection option (ADR-053) */}
+      <ObservabilityStackPanel d={d} lang={lang} locked={locked} onToggle={onToggleStack} onToast={onToast} />
+
+      {/* 3. the catalog */}
+      <div className="section-title" style={{ justifyContent: "space-between" }}>
+        <span>{t.integ_catalog_h}</span>
+        {view.source === "registry"
+          ? <span data-testid="catalog-source" data-source="registry" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>{t.integ_src_registry.replace("{age}", age)}</span>
+          : null}
+      </div>
+      {view.source !== "registry" && (
+        <Banner tone="warn" testid="catalog-degraded" title={view.source === "cache" ? t.integ_stale_h : t.integ_bootstrap_h}
+          className="catalog-degraded">
+          <span data-source={view.source}>{view.source === "cache" ? t.integ_stale_p.replace("{age}", age) : t.integ_bootstrap_p}</span>
+          {view.error && <pre data-testid="catalog-error-reason">{view.error}</pre>}
+        </Banner>
+      )}
+      {items.length === 0 ? (
+        <p className="hint" data-testid="catalog-empty">{t.integ_empty}</p>
+      ) : (
+        <div className="integ-layout">
+          <div>
+            <label className="search" style={{ position: "relative", display: "flex", alignItems: "center", marginBottom: 10 }}>
+              <Icon name="search" size={14} style={{ position: "absolute", left: 10, color: "var(--text-3)", pointerEvents: "none" }} />
+              <input className="input" style={{ paddingLeft: 32 }} value={q} onChange={e => setQ(e.target.value)}
+                placeholder={t.integ_search_ph} aria-label={t.integ_search_ph} data-testid="integ-search" />
+            </label>
+            <nav className="catnav" aria-label={t.integ_catalog_h}>
+              {CATS.filter(c => c === "all" || counts[c] > 0).map(c => (
+                <button type="button" key={c} aria-pressed={cat === c} onClick={() => setCat(c)}>
+                  <span>{t[`integ_cat_${c}`]}</span><i>{counts[c]}</i>
+                </button>
+              ))}
+            </nav>
+          </div>
+          <div>
+            {available.length === 0 ? (
+              <p className="hint" data-testid="integ-no-match">{counts.all === 0 ? t.integ_all_installed : t.integ_no_match}</p>
+            ) : (
+              <div className="integ-grid">
+                {available.map(it => {
+                  const working = busy[it.id];
+                  const err = itemErr[it.id];
+                  return (
+                    <div className="card integ-card" key={it.id} data-testid={`integration-${it.id}`} data-state="available">
+                      <div className="top">
+                        <span className="integ-mono">{monogram(it.id, loc(it.title, lang, it.id))}</span>
+                        <b title={loc(it.title, lang, it.id)}>{loc(it.title, lang, it.id)}</b>
+                      </div>
+                      <div className="d">{loc(it.summary, lang, "")}</div>
+                      {!it.compatible && (
+                        <p className="hint" style={{ color: "var(--warn-text)" }} data-testid={`incompatible-${it.id}`}>
+                          {t.integ_incompatible.replace("{v}", it.min_core_version || "?")}
+                        </p>
+                      )}
+                      {err && <div className="field-err" data-testid={`error-${it.id}`}>{err}</div>}
+                      <div className="ft">
+                        <Btn variant="outline" size="sm" icon="plus" disabled={!!working || !!locked || !it.compatible}
+                          data-testid={`install-${it.id}`} onClick={() => act(it.id, "install", it.version)}>
+                          {working === "install" ? t.integ_installing : t.integ_install}
+                        </Btn>
+                        <span className="badge mono" title={`${t.integ_version} ${it.version}`}>{it.version}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-// The per-cluster OpenSearch admin credentials (read from the
-// `<cluster>-admin-credentials` Secret on the backend). Since MR !55 each
-// cluster's password is CSPRNG-generated, so this reveal is the only way users
-// recover it. The password is fetched ONLY on an explicit reveal click — never
-// eagerly into the page — and masked again on hide.
-// Reading the admin credential and replacing it are the same subject, so they
-// are one box: splitting them put "here is your password" and "here is how to
-// change it" in separate cards a scroll apart.
+/* ============================================================
+   Access
+   ============================================================ */
+// The per-deployment OpenSearch admin credentials. The password is fetched
+// ONLY on an explicit reveal click — never eagerly into the page.
 function CredentialsPanel({ d, lang, onToast, onReset, locked }) {
   const t = STR[lang];
-  const [creds, setCreds] = useState(null); // { username, password }
+  const [creds, setCreds] = useState(null);
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [resetting, setResetting] = useState(false);
-  // The generated value, shown once right after a reset — the one moment it is
-  // visible without going through the reveal flow.
   const [fresh, setFresh] = useState(null);
 
   async function doReset() {
@@ -1456,7 +1336,7 @@ function CredentialsPanel({ d, lang, onToast, onReset, locked }) {
   }
 
   async function reveal() {
-    if (creds) { setShow(s => !s); return; } // already fetched — just toggle
+    if (creds) { setShow(s => !s); return; }
     setBusy(true);
     setErr(false);
     try {
@@ -1470,9 +1350,6 @@ function CredentialsPanel({ d, lang, onToast, onReset, locked }) {
     }
   }
 
-  // The freshly generated password is shown once, so its dialog closes only
-  // once the copy really happened; on a failure it stays open with the value
-  // on screen for a manual copy (#141).
   async function copyFresh() {
     const ok = await copyText(fresh.password);
     onToast(ok ? t.copied : t.copy_failed, ok);
@@ -1482,65 +1359,45 @@ function CredentialsPanel({ d, lang, onToast, onReset, locked }) {
   const label = busy ? t.cred_loading : creds ? (show ? t.hide : t.show) : t.cred_reveal;
 
   return (
-    <div className="card pad" style={{ marginBottom: 20 }} data-testid="cluster-credentials">
-      <h3 className="section-title" style={{ marginTop: 0 }}><Icon name="shield" size={15} /> {t.cred_h}</h3>
-      <p className="hint" style={{ marginTop: 4 }}>{t.cred_desc}</p>
+    <div className="card pad" style={{ marginBottom: 16 }} data-testid="cluster-credentials">
+      <h3 className="section-title"><Icon name="shield" size={14} /> {t.cred_h}</h3>
+      <p className="hint" style={{ marginBottom: 12 }}>{t.cred_desc}</p>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14, flexWrap: "wrap", fontSize: 13 }}>
-        <span style={{ color: "var(--text-2)", fontFamily: "var(--font-mono)", minWidth: 72 }}>{t.cred_user}</span>
-        {creds
-          ? <Copyable text={creds.username} t={t} onCopy={onToast} />
-          : <code style={{ color: "var(--text-3)" }}>—</code>}
+      <div style={{ display: "grid", gap: 8 }}>
+        <div className="ep-row">
+          <span className="lbl">{t.cred_user}</span>
+          <span className="val">
+            {creds ? <Copyable text={creds.username} t={t} onCopy={onToast} /> : <span className="hint">{t.cred_user_hidden}</span>}
+          </span>
+        </div>
+        <div className="ep-row">
+          <span className="lbl">{t.cred_pass}</span>
+          <span className="val">
+            {creds && show
+              ? <Copyable text={creds.password} t={t} onCopy={onToast} />
+              : <span className="copyfield"><code>{"•".repeat(12)}</code></span>}
+            <Btn variant="outline" size="sm" icon={show ? "eyeOff" : "eye"} disabled={busy} onClick={reveal}
+              data-testid="reveal-credentials">{label}</Btn>
+          </span>
+        </div>
       </div>
+      {err && <p className="field-err">{t.cred_error}</p>}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap", fontSize: 13 }}>
-        <span style={{ color: "var(--text-2)", fontFamily: "var(--font-mono)", minWidth: 72 }}>{t.cred_pass}</span>
-        {creds && show
-          ? <Copyable text={creds.password} t={t} onCopy={onToast} />
-          : <span className="copyfield"><code>{"•".repeat(12)}</code></span>}
-        <Btn variant="outline" icon={show ? "eyeOff" : "eye"} disabled={busy} onClick={reveal}
-          data-testid="reveal-credentials" style={{ padding: "6px 12px" }}>{label}</Btn>
-      </div>
-
-      {err && <p style={{ color: "var(--danger)", fontSize: 12.5, marginTop: 12, fontFamily: "var(--font-mono)" }}>{t.cred_error}</p>}
-
-      <div className="hr" style={{ margin: "18px 0 14px" }} />
-
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{t.sec_reset_h}</div>
-      <p className="hint" style={{ marginTop: 0 }}>{t.sec_reset_desc}</p>
-      <ul style={{ margin: "8px 0 14px 18px", fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.7 }}>
-        <li>{t.sec_reset_b1}</li>
-        <li>{t.sec_reset_b2}</li>
-        <li>{t.sec_reset_b3}</li>
-      </ul>
+      <div className="hr" style={{ margin: "16px 0 12px" }} />
+      <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 4 }}>{t.sec_reset_h}</div>
+      <p className="hint" style={{ marginBottom: 10 }}>{t.sec_reset_desc}</p>
       <Btn variant="danger" icon="shield" data-testid="reset-pass"
         disabled={resetting || !!locked} onClick={() => setConfirming(true)}>
         {resetting ? t.sec_reset_running : t.reset_pass}
       </Btn>
-      <LockNotice reason={locked} />
 
-      <Confirm
-        open={confirming}
-        icon="shield"
-        title={t.sec_reset_confirm_h}
-        body={t.sec_reset_confirm_p}
-        confirmLabel={t.reset_pass}
-        cancelLabel={t.cancel}
-        onConfirm={doReset}
-        onCancel={() => setConfirming(false)}
-      />
+      <Confirm open={confirming} icon="shield" title={t.sec_reset_confirm_h} body={t.sec_reset_confirm_p}
+        confirmLabel={t.reset_pass} cancelLabel={t.cancel}
+        onConfirm={doReset} onCancel={() => setConfirming(false)} />
 
-      <Confirm
-        open={!!fresh}
-        icon="shield"
-        variant="primary"
-        title={t.sec_new_pass_h}
-        body={t.sec_new_pass_p}
-        confirmLabel={t.copy}
-        cancelLabel={t.close}
-        onConfirm={copyFresh}
-        onCancel={() => setFresh(null)}
-      >
+      <Confirm open={!!fresh} icon="shield" variant="primary" title={t.sec_new_pass_h} body={t.sec_new_pass_p}
+        confirmLabel={t.copy} cancelLabel={t.close}
+        onConfirm={copyFresh} onCancel={() => setFresh(null)}>
         <div style={{ margin: "10px 0" }}>
           <Copyable text={fresh ? fresh.password : ""} t={t} onCopy={onToast} />
         </div>
@@ -1549,10 +1406,7 @@ function CredentialsPanel({ d, lang, onToast, onReset, locked }) {
   );
 }
 
-// Optional network restriction on this deployment's PUBLIC routes (OpenSearch
-// API, Dashboards, OTLP). Default is open — a customer opts in to restriction,
-// never out of it by accident — so an empty list is a valid, expected state and
-// the copy says so rather than nagging.
+// Optional network restriction on this deployment's PUBLIC routes.
 function IpAllowListPanel({ d, lang, onToast, locked }) {
   const t = STR[lang];
   const [text, setText] = useState((d.ip_allow_list || []).join("\n"));
@@ -1576,172 +1430,146 @@ function IpAllowListPanel({ d, lang, onToast, locked }) {
 
   const open = (d.ip_allow_list || []).length === 0;
   return (
-    <div className="card pad" style={{ marginBottom: 20 }}>
-      <h3 className="section-title" style={{ marginTop: 0 }}>
-        <Icon name="shield" size={15} /> {t.ipallow_h}
-      </h3>
-      <p className="hint" style={{ marginTop: 4 }}>{t.ipallow_desc}</p>
-      <div style={{ margin: "10px 0" }}>
-        <span className={`badge ${open ? "" : "green"}`} style={{ padding: "2px 8px" }}>
-          {open ? t.ipallow_state_open : fmt(t.ipallow_state_limited, (d.ip_allow_list || []).length)}
-        </span>
+    <div className="card pad" style={{ marginBottom: 16 }}>
+      <h3 className="section-title"><Icon name="globe" size={14} /> {t.ipallow_h}</h3>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <span className={`badge ${open ? "" : "green"}`}>{open ? t.ipallow_state_open : fmt(t.ipallow_state_limited, (d.ip_allow_list || []).length)}</span>
+        <span className="hint">{t.ipallow_desc}</span>
       </div>
-      <Field label={t.ipallow_field}>
-        <textarea className="input" rows={4} value={text} spellCheck={false}
+      <Field label={t.ipallow_field} hint={t.ipallow_hint} htmlFor="ip-allow">
+        <textarea id="ip-allow" className="textarea mono" rows={4} value={text} spellCheck={false}
           placeholder={"203.0.113.0/24\n198.51.100.7"}
-          style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}
           onChange={e => setText(e.target.value)} />
       </Field>
-      <p className="hint" style={{ marginTop: -6 }}>{t.ipallow_hint}</p>
       <Btn variant="primary" icon="check" disabled={busy || !dirty || !!locked} onClick={save}>
         {busy ? t.saving : t.save}
       </Btn>
-      {err && <div style={{ marginTop: 8, color: "var(--danger)", fontSize: 12.5, fontFamily: "var(--font-mono)" }}>{err}</div>}
+      {err && <div className="field-err">{err}</div>}
     </div>
   );
 }
 
-// The next-generation Dashboards UI: workspaces plus the new navigation.
-//
-// Deployment-level, and deliberately NOT part of the observability stack's
-// panel. The stack requires it and turns it on, but a user can want the new UI
-// without ever installing the stack — and one who chose it keeps it when the
-// stack is uninstalled. `next_ui_chosen` is what says which of those a
-// deployment is, and the button copy changes accordingly rather than hiding it.
-function NextUiPanel({ d, lang, onToast, locked }) {
+// Who can get in and from where — one tab. Credentials and the network rule
+// are short; the SSO form is long and sits last with its own heading.
+function AccessTab({ d, lang, onReset, onToast, locked }) {
   const t = STR[lang];
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [confirm, setConfirm] = useState(false);
-  const on = !!d.next_ui;
-  // Turning it off under a running stack would take the Observability screens
-  // with it — they only render inside a workspace.
-  const heldByStack = on && !!d.otel_stack;
-
-  async function apply() {
-    setBusy(true); setErr(""); setConfirm(false);
-    try {
-      await API.setNextUi(d.id, !on);
-      onToast(!on ? t.nextui_on_done : t.nextui_off_done);
-    } catch (e) {
-      setErr(e.message || String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
-    <div className="card pad" style={{ marginBottom: 20 }}>
-      <h3 className="section-title" style={{ marginTop: 0 }}>
-        <Icon name="layers" size={15} /> {t.nextui_h}
-      </h3>
-      <p className="hint" style={{ marginTop: 4 }}>{t.nextui_desc}</p>
-      <div style={{ margin: "10px 0" }}>
-        <span className={`badge ${on ? "green" : ""}`} style={{ padding: "2px 8px" }}>
-          {on ? t.nextui_state_on : t.nextui_state_off}
-        </span>
-      </div>
-      <p className="hint">{on ? t.nextui_scope_ws : t.nextui_scope_tenant}</p>
-      {heldByStack && <p className="hint">{t.nextui_held}</p>}
-      <Btn icon={on ? "chevL" : "check"} variant={on ? "" : "primary"}
-        disabled={busy || !!locked || heldByStack}
-        onClick={() => setConfirm(true)}>
-        {busy ? t.saving : (on ? t.nextui_disable : t.nextui_enable)}
-      </Btn>
-      {err && <div style={{ marginTop: 8, color: "var(--danger)", fontSize: 12.5, fontFamily: "var(--font-mono)" }}>{err}</div>}
-      <Confirm open={confirm} title={on ? t.nextui_disable : t.nextui_enable}
-        confirmLabel={on ? t.nextui_disable : t.nextui_enable}
-        cancelLabel={t.cancel} icon="layers" variant={on ? "danger" : "primary"}
-        onCancel={() => setConfirm(false)} onConfirm={apply}>
-        <p className="hint">{on ? t.nextui_confirm_off : t.nextui_confirm_on}</p>
-        <p className="hint">{t.nextui_confirm_roll}</p>
-      </Confirm>
-    </div>
-  );
-}
-
-// One column, full width: each box owns a row. The tab holds two subjects —
-// who can log in, and who can reach the deployment over the network — and both
-// have content (a credential pair, a CIDR list) that reads badly in a narrow
-// column.
-function SecurityTab({ d, lang, onReset, onToast, locked }) {
-  return (
-    <div className="view-enter" style={{ maxWidth: 760 }}>
+    <div className="view-enter" style={{ maxWidth: 820 }}>
       <CredentialsPanel d={d} lang={lang} onToast={onToast} onReset={onReset} locked={locked} />
-      <NextUiPanel d={d} lang={lang} onToast={onToast} locked={locked} />
       <IpAllowListPanel d={d} lang={lang} onToast={onToast} locked={locked} />
+      <div className="card pad" data-testid="sso-panel">
+        <h3 className="section-title"><Icon name="user" size={14} /> {t.access_h_sso}</h3>
+        <AuthProviderTab d={d} lang={lang} onToast={onToast} locked={locked} />
+      </div>
     </div>
   );
 }
 
+/* ============================================================
+   Activity
+   ============================================================ */
+function ActivityTab({ d, lang, onToast }) {
+  const t = STR[lang];
+  const a = d.activity || { kind: "idle" };
+  return (
+    <div className="view-enter">
+      <p className="lead" style={{ marginBottom: 16 }}>{t.act_tab_lead}</p>
+      {a.kind === "idle" && <Banner tone="ok" icon="check" testid="activity-idle">{t.ov_no_activity}</Banner>}
+      <ActivityPanel d={d} lang={lang} />
+      <UpgradeFailure u={d.upgrade} lang={lang} />
+      <div className="card pad">
+        <h3 className="section-title">{t.act_log_h}</h3>
+        <p className="hint" style={{ marginBottom: 6 }}>{t.act_log_p}</p>
+        <ActivityDetails id={d.id} lang={lang} defaultOpen />
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   The view
+   ============================================================ */
 function DeploymentView({ d, lang, hostNodes = [], tab, onTab, onToggleStack, onSaveEdit, onResetPass, onToast, onDelete, openUpgrade }) {
   const t = STR[lang];
   const [confirm, setConfirm] = useState(false);
-  // Computed once, here, from the server's verdict — the tabs receive the
-  // answer and none of them re-derives readiness from `health` (ADR-050
-  // invariant 3). Note it locks THIS deployment only: the list, the nav and
-  // every other deployment stay usable while this one comes up.
+  // Computed once from the server's verdict (ADR-050 invariant 3).
   const locked = lockReason(d, t);
+  const act = d.activity || { kind: "idle" };
+  const busy = act.kind !== "idle";
   const tabs = [
-    { key: "overview", label: t.tab_overview, icon: "activity" },
-    { key: "edit", label: t.tab_edit, icon: "sliders" },
-    { key: "integrations", label: t.tab_integ, icon: "plug" },
-    { key: "snapshot", label: t.tab_snapshot, icon: "layers" },
-    { key: "security", label: t.tab_sec, icon: "shield" },
-    { key: "auth", label: t.tab_auth, icon: "db" },
+    { key: "overview", label: t.tab_overview },
+    { key: "data", label: t.tab_data, count: (d.monitors || []).length + (d.otel_stack ? 1 : 0) || null },
+    { key: "backup", label: t.tab_snapshot },
+    { key: "access", label: t.tab_access },
+    { key: "config", label: t.tab_config },
+    { key: "activity", label: t.tab_activity },
   ];
+  const snap = d.snapshot || { configured: false };
+  const sizeMetaStr = fmt(t.dep_size_meta, sizeLabel(d.size, t), d.node_count || 3, fmtQty(d.mem, lang));
+
   return (
     <div className="view-enter">
-      <h1 className="page-title" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: "var(--text-3)" }}>{d.id}</span>
-        {/* #26: one Longhorn copy per volume on a sub-3-node host cluster —
-            said in place, next to the thing it is true about. */}
-        {hostNodes.length > 0 && hostNodes.length < 3 && (
-          <span className="badge" style={{ textTransform: "none", color: "var(--warn)" }} title={t.single_copy_p}>{t.single_copy_h}</span>
-        )}
-      </h1>
+      <PageHeader title={d.id} mono
+        pill={<StatusPill health={d.health} t={t} testid="dep-status"
+          busy={busy ? `${t[`act_badge_${act.kind}`] || t.upg_state_upgrading} · ${act.percent}%` : null} />}
+        meta={<>
+          <span>{t[`p_${d.purpose === "observability" ? "obs" : d.purpose === "security" ? "sec" : "search"}_t`]}</span>
+          <span className="sep">·</span>
+          {d.version && <><span>OpenSearch <span className="mono">{d.version}</span></span><span className="sep">·</span></>}
+          <span>{sizeMetaStr}</span>
+          <span className="sep">·</span>
+          <span className={`badge ${snap.configured && snap.policy_state !== "ERROR" ? "green" : ""}`} data-testid="backup-chip">
+            <Icon name="db" size={11} />
+            {!snap.configured ? t.snap_chip_off
+              : snap.policy_state === "ERROR" ? t.snap_chip_err
+                : snap.policy_state === "PENDING" ? t.snap_chip_pending
+                  : `${t.snap_chip_on}${snap.schedule ? ` ${snap.schedule}` : ""}`}
+          </span>
+          {d.created_at && <><span className="sep">·</span><span>{fmt(t.dep_created_ago, relAge(d.created_at, t))}</span></>}
+        </>}
+        actions={<>
+          <UpgradeControl d={d} lang={lang} onToast={onToast} openUpgrade={openUpgrade} />
+          {d.dashboard_url && (
+            <a className="btn btn-primary" href={d.dashboard_url} target="_blank" rel="noreferrer" data-testid="open-dashboards">
+              {t.dep_open_dash}<Icon name="ext" size={14} />
+            </a>
+          )}
+          <Menu label={t.more_actions} testid="dep-menu" items={[
+            { label: t.tab_config, icon: "sliders", onClick: () => onTab("config") },
+            { label: t.tab_snapshot, icon: "db", onClick: () => onTab("backup") },
+            { sep: true },
+            { label: t.delete_dep, icon: "trash", danger: true, testid: "menu-delete", onClick: () => setConfirm(true) },
+          ]} />
+        </>} />
 
-      <nav className="tabs" style={{ marginTop: 18 }}>
-        {tabs.map(tb => (
-          <button key={tb.key} aria-selected={tab === tb.key} onClick={() => onTab(tb.key)}>
-            {tb.label}
-          </button>
-        ))}
-      </nav>
-
-      {/* #47: above the tabs, on every tab — a deployment that gave up on its
-       * monitors is the first thing its operator needs to know, not a detail
-       * of one pane. */}
+      <SingleCopyBanner d={d} lang={lang} hostNodes={hostNodes} onTab={onTab} />
+      {/* #47: above the tabs, on every tab. */}
       <ProvisioningBanner d={d} lang={lang} onToast={onToast} />
 
-      {tab === "overview" && <OverviewTab d={d} lang={lang} onToast={onToast} openUpgrade={openUpgrade} />}
-      {tab === "edit" && <EditTab d={d} lang={lang} onSave={onSaveEdit} locked={locked} />}
-      {tab === "integrations" && <IntegrationsTab d={d} lang={lang} onToggleStack={onToggleStack} onToast={onToast} locked={locked} />}
-      {tab === "snapshot" && <SnapshotTab d={d} lang={lang} onToast={onToast} locked={locked} />}
-      {tab === "security" && <SecurityTab d={d} lang={lang} onReset={onResetPass} onToast={onToast} locked={locked} />}
-      {tab === "auth" && <AuthProviderTab d={d} lang={lang} onToast={onToast} locked={locked} />}
+      <Tabs items={tabs} value={tab} onChange={onTab} label={t.dep_tabs_label} testidPrefix="dep-tab" />
 
-      <div className="hr" />
-      <div>
-        <h3 className="section-title" style={{ color: "var(--danger)" }}>{t.danger_zone}</h3>
-        {/* Never locked, by decision (ADR-050 invariant 4): a provision that
-            never finishes is exactly when the user most needs to remove it, and
-            locking this would leave a zombie only kubectl can clear. */}
-        <Btn variant="danger" icon="trash" data-testid="delete-deployment" onClick={() => setConfirm(true)}>{t.delete_dep}</Btn>
-        {locked && <p className="hint" style={{ marginTop: 8 }}>{t.act_delete_ok}</p>}
-      </div>
+      {tab === "overview" && <OverviewTab d={d} lang={lang} onToast={onToast} hostNodes={hostNodes} onTab={onTab} />}
+      {tab === "data" && <DataTab d={d} lang={lang} onToggleStack={onToggleStack} onToast={onToast} locked={locked} />}
+      {tab === "backup" && <SnapshotTab d={d} lang={lang} onToast={onToast} locked={locked} />}
+      {tab === "access" && <AccessTab d={d} lang={lang} onReset={onResetPass} onToast={onToast} locked={locked} />}
+      {tab === "config" && <ConfigTab d={d} lang={lang} onSave={onSaveEdit} onToast={onToast} locked={locked} onDeleteRequest={() => setConfirm(true)} />}
+      {tab === "activity" && <ActivityTab d={d} lang={lang} onToast={onToast} />}
 
-      {/* Type-to-confirm: deleting a cluster destroys its data and cannot be
-          undone, and the deployment screens all look alike — naming the target
-          is what separates "yes, this one" from "yes, whatever was open". */}
+      {/* Type-to-confirm: naming the target is what separates "yes, this one"
+          from "yes, whatever was open". The dialog also says what the person
+          would be giving up: the backup state decides how bad this is. */}
       <Confirm open={confirm} title={t.delete_dep} body={t.delete_confirm}
         confirmLabel={t.delete} cancelLabel={t.cancel}
         requireText={d.id} requireLabel={fmt(t.delete_type_name, d.id)}
         confirmTestid="delete-confirm" cancelTestid="delete-cancel"
         onCancel={() => setConfirm(false)}
-        onConfirm={() => { setConfirm(false); onDelete(d.id); }} />
+        onConfirm={() => { setConfirm(false); onDelete(d.id); }}>
+        <p className="hint" style={{ margin: "0 0 10px", color: snap.configured ? undefined : "var(--warn-text)" }}>
+          {snap.configured ? (snap.schedule ? fmt(t.single_copy_bak_sched, snap.schedule) : t.snap_state_ok) : t.del_no_backup}
+        </p>
+      </Confirm>
     </div>
   );
 }
 
-export { DeploymentView };
+export { DeploymentView, healthTone };

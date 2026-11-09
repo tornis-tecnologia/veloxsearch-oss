@@ -8,6 +8,33 @@ are called out explicitly.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-08
+
+### Changed
+- **The console is a product shell: every screen has a URL (#182, ADR-067).**
+  `/deployments`, `/deployments/new`, `/deployments/:id/:tab`, `/capacity` and
+  `/settings`. F5 and Back keep their meaning, and an alert or a ticket can
+  link to a screen. The old tab names (`edit`, `integrations`, `snapshot`,
+  `security`, `auth`) still resolve, so existing bookmarks land.
+  - Navigation is a sidebar of places with a breadcrumb top bar, an account
+    menu (theme, language, sign-out) and a drawer on mobile.
+  - A deployment's tabs are grouped by task: Overview, Data & integrations,
+    Backup, Access, Configuration, Activity. Delete lives only in
+    Configuration and the header ⋯ menu, still type-to-confirm.
+  - The deployment list is a table with a fleet summary that filters, and the
+    create wizard says how many deployments of the chosen size fit.
+  - Errors stay on screen until dismissed and never show a check mark.
+- **An unauthenticated page request redirects to `/login?next=<path>`**, and
+  the console returns there after login. Only a plain in-app path is accepted
+  as `next`; anything else, scheme-relative `//host` included, goes to the
+  default screen.
+
+### Fixed
+- **The Overview no longer contradicts itself on a node-local volume.** The
+  node rows, the storage tile and the trend read the capacity the same way: a
+  node-local volume shows its data size and no percentage (it used to show
+  2930% disk next to a 2.0 GB tile).
+
 ## [0.13.1] - 2026-10-27
 
 ### Added

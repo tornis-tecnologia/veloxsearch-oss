@@ -15,7 +15,7 @@
 import { useState, useEffect, useRef } from "react";
 import { API } from "./api.jsx";
 import { STR } from "./i18n.jsx";
-import { Icon, Btn } from "./ui.jsx";
+import { Icon, Btn, Banner } from "./ui.jsx";
 
 function reqGlyph(s) { return s === "pass" ? "✓" : s === "warn" ? "⚠" : "✗"; }
 function reqColor(s) { return s === "pass" ? "var(--accent)" : s === "warn" ? "var(--warn)" : "var(--danger)"; }
@@ -31,17 +31,11 @@ function reqWord(s, t) { return s === "pass" ? t.boot_req_pass : s === "warn" ? 
 function OperatorDriftNotice({ status, t, style }) {
   if (!status || !status.operator_drift) return null;
   return (
-    <div className="card pad" role="status" data-testid="operator-drift"
-      style={{ borderColor: "var(--warn-soft)", ...style }}>
-      <div style={{ color: "var(--warn)", fontWeight: 600, marginBottom: 4 }}>
-        <span aria-hidden="true">⚠ </span>{t.boot_drift_title}
-      </div>
-      <div style={{ color: "var(--text-2)", fontSize: 13 }}>
-        {t.boot_drift
-          .replace("{0}", status.operator_image_running || "?")
-          .replace("{1}", status.operator_image_vendored || "?")}
-      </div>
-    </div>
+    <Banner tone="warn" title={t.boot_drift_title} testid="operator-drift" style={style}>
+      {t.boot_drift
+        .replace("{0}", status.operator_image_running || "?")
+        .replace("{1}", status.operator_image_vendored || "?")}
+    </Banner>
   );
 }
 
@@ -51,15 +45,9 @@ function TenantIsolationNotice({ status, t, style }) {
   const slugs = status?.unisolated_tenants || [];
   if (slugs.length === 0) return null;
   return (
-    <div className="card pad" role="status" data-testid="tenant-isolation"
-      style={{ borderColor: "var(--warn-soft)", ...style }}>
-      <div style={{ color: "var(--warn)", fontWeight: 600, marginBottom: 4 }}>
-        <span aria-hidden="true">⚠ </span>{t.boot_isolation_title}
-      </div>
-      <div style={{ color: "var(--text-2)", fontSize: 13 }}>
-        {t.boot_isolation.replace("{0}", slugs.join(", "))}
-      </div>
-    </div>
+    <Banner tone="warn" title={t.boot_isolation_title} testid="tenant-isolation" style={style}>
+      {t.boot_isolation.replace("{0}", slugs.join(", "))}
+    </Banner>
   );
 }
 
