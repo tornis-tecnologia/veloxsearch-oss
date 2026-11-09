@@ -58,8 +58,16 @@ second product. The team does not want it.
 
 3. **We declare a minimum version and the agent enforces it.** The minimum is
    **Fluent Bit 3.2**, because:
-   - YAML is the standard configuration format as of 3.2 and classic `.conf`
-     is deprecated at the end of 2026 — the agent writes YAML only;
+   - YAML became the standard configuration format in 3.2, which is what
+     fixes the floor here. What the agent actually writes is the **classic**
+     format, because that is what the signed integration packages ship
+     (`agent.conf.tmpl`) and what the compiler assembles; the file is
+     therefore named `fluent-bit.conf`. This matters more than it looks:
+     Fluent Bit chooses its parser from the file **extension**, so the same
+     body is accepted as `.conf` and rejected as `.yaml`. Moving the
+     packages to YAML is a registry change, and until it happens the
+     agent's staging, live and previous files all end in `.conf` so the
+     dry-run validates the file that will actually run;
    - hot reload through `POST /api/v2/reload` arrived in 2.1.0;
    - the OTLP input (`opentelemetry`) arrived in 2.0.0, `prometheus_scrape`
      and `windows_exporter_metrics` in 1.9.

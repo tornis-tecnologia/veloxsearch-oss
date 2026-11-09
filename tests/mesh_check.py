@@ -29,6 +29,9 @@ to notice:
     ordered (exactly one step live, the earlier ones done), every agent row's
     up/down agrees with its derived status, and the status reaches the screen
     as a translated word rather than a raw enum.
+  - **An off-cluster fleet can be pointed somewhere reachable.** The policy
+    composer carries the published OpenSearch endpoint, because the in-cluster
+    service name is unresolvable from a host.
   - Nothing renders an i18n key or `undefined` in any of three languages.
 
 Usage:
@@ -215,6 +218,15 @@ with sync_playwright() as p:
         page.click('[data-testid="mesh-tab-policies"]')
         page.wait_for_selector('[data-testid="mesh-policy-save"]', timeout=10000)
         check(True, "a policy can be saved when a Mesh holds it")
+        # A host agent cannot resolve `<deployment>.<namespace>.svc`, so the
+        # composer has to let the operator state the published OpenSearch
+        # address. Without this field an off-cluster fleet compiles a policy
+        # that can never reach its destination — and the only symptom is a
+        # healthy agent whose data never arrives.
+        osh = page.locator('[data-testid="mesh-policy-os-host"]')
+        check(osh.count() == 1, "the composer asks for the published OpenSearch endpoint")
+        check(osh.input_value() == "",
+              "it defaults to empty, which means the in-cluster service name")
         if page.locator('[data-testid="mesh-rollout"]').count():
             check(page.locator('[data-testid="mesh-rollout"] tr').count() > 0,
                   "the rollout is shown per policy")

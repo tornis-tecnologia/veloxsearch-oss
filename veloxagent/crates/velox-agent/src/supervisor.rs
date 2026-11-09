@@ -42,12 +42,29 @@ pub struct EngineFiles {
 }
 
 impl EngineFiles {
+    /// All three files end in `.conf`, and that is load-bearing twice over.
+    ///
+    /// **Fluent Bit picks its parser from the file extension**: `.yaml`/`.yml`
+    /// is the YAML schema, anything else is the classic format. The bodies
+    /// this agent receives are classic — the compiler emits `[SERVICE]` and
+    /// `[OUTPUT]` sections and every registry package ships an
+    /// `agent.conf.tmpl` fragment — so a `.yaml` name makes the engine reject
+    /// a configuration that is perfectly valid. Found on a real Fluent Bit
+    /// (5.2.0), where the same body passed as `.conf` and failed as `.yaml`
+    /// with `YAML error found in file ... unexpected event
+    /// 'sequence-start-event'`.
+    ///
+    /// **And the staging file must parse the same way as the live one**, or
+    /// the dry-run validates something other than what will run. A
+    /// `fluent-bit.yaml.staging` name falls back to the classic parser and
+    /// passes, which is exactly how a config that cannot start got through:
+    /// the extension has to be on the end, not in the middle.
     pub fn fluent_bit(state_dir: &Path) -> Self {
         let d = state_dir.join("fluent-bit");
         Self {
-            live: d.join("fluent-bit.yaml"),
-            staging: d.join("fluent-bit.yaml.staging"),
-            previous: d.join("fluent-bit.yaml.previous"),
+            live: d.join("fluent-bit.conf"),
+            staging: d.join("fluent-bit.staging.conf"),
+            previous: d.join("fluent-bit.previous.conf"),
         }
     }
 }
@@ -147,9 +164,26 @@ mod tests {
         let pos = |pred: fn(&Step) -> bool| plan.iter().position(pred).unwrap();
         let dry = pos(|s| matches!(s, Step::DryRun { .. }));
         let promote =
-            pos(|s| matches!(s, Step::Promote { to, .. } if to.ends_with("fluent-bit.yaml")));
+            pos(|s| matches!(s, Step::Promote { to, .. } if to.ends_with("fluent-bit.conf")));
         let reload = pos(|s| matches!(s, Step::HotReload { .. }));
         assert!(dry < promote && promote < reload);
+    }
+
+    /// The dry-run is only worth running if it parses the file the way the
+    /// engine will. Fluent Bit chooses the parser by extension, so staging,
+    /// live and previous must all carry the SAME one — and it must be the
+    /// classic one, because that is the format the compiler emits.
+    #[test]
+    fn every_file_parses_as_the_same_format() {
+        let f = EngineFiles::fluent_bit(Path::new("/s"));
+        for p in [&f.live, &f.staging, &f.previous] {
+            assert_eq!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("conf"),
+                "{} would be parsed by a different parser than the others",
+                p.display()
+            );
+        }
     }
 
     #[test]

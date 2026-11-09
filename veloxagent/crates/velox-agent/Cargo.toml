@@ -13,6 +13,11 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Just `kill(2)`: the agent has to be able to stop an engine that is no longer
+# its child (a process left behind by a previous agent run), and std has no
+# way to signal a non-child pid. libc is the smallest possible surface for
+# that — no runtime, no abstraction layer.
+libc = "0.2"
 velox-opamp = { path = "../velox-opamp" }
 # Only to name the engine the way the compiler names it: a test here asserts
 # the key the agent looks for is the one `velox_policy::Engine` serialises,

@@ -466,6 +466,13 @@ function ArtifactChips({ a, t }) {
 function PoliciesTab({ t, deployments, overview, onReload, onToast }) {
   const [target, setTarget] = useState("");
   const [name, setName] = useState("Web tier");
+  // Where an agent OUTSIDE the cluster reaches this deployment's OpenSearch.
+  // A host agent cannot resolve `<deployment>.<namespace>.svc`, so when the
+  // fleet is off-cluster the operator states the published address here and
+  // the compiler puts it in the output stanza (velox_policy::Target::os_host).
+  // Empty means the in-cluster service name, which is right for the DaemonSet
+  // path and for agents running as pods.
+  const [osHost, setOsHost] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(null);
   const [token, setToken] = useState(null);
@@ -581,6 +588,9 @@ function PoliciesTab({ t, deployments, overview, onReload, onToast }) {
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
               <input className="input" value={name} onChange={e => setName(e.target.value)}
                 aria-label={t.mesh_policy_name} data-testid="mesh-policy-name" style={{ maxWidth: 260 }} />
+              <input className="input mono" value={osHost} onChange={e => setOsHost(e.target.value)}
+                placeholder={t.mesh_os_host_ph} aria-label={t.mesh_os_host}
+                data-testid="mesh-policy-os-host" style={{ maxWidth: 260 }} />
               <Btn variant="primary" disabled={saving || picked.length === 0 || !target}
                 data-testid="mesh-policy-save"
                 onClick={async () => {
@@ -589,6 +599,9 @@ function PoliciesTab({ t, deployments, overview, onReload, onToast }) {
                     const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "policy";
                     const r = await API.meshSavePolicy({
                       id, name: name.trim() || id, deployment: target, integrations: picked,
+                      // Unset, not empty: the compiler reads `Option`, and ""
+                      // would render an output with no host at all.
+                      os_host: osHost.trim() || undefined,
                     });
                     setSaved(r.revision);
                     if (onToast) onToast(t.mesh_saved.replace("{rev}", r.revision), true);
@@ -606,6 +619,7 @@ function PoliciesTab({ t, deployments, overview, onReload, onToast }) {
                 </span>
               )}
             </div>
+            <p className="hint" style={{ margin: "8px 0 0" }}>{t.mesh_os_host_hint}</p>
             {saveErr && <Banner tone="danger" title={t.mesh_save_err} style={{ marginTop: 10 }}>{saveErr}</Banner>}
           </Step>
 

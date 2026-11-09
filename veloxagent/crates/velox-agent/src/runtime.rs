@@ -177,18 +177,110 @@ impl Engine {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
+            let _ = std::fs::remove_file(self.pid_path());
         }
+    }
+
+    /// Where the engine's own stdout and stderr go. Not `/dev/null`: when
+    /// data is not arriving, the reason is almost always a line the engine
+    /// printed — a rejected bulk request, a TLS failure, a permission denied
+    /// on a path it tails. Dropping that output leaves an operator with a
+    /// healthy-looking agent and no way to find out why nothing lands. The
+    /// file sits next to the configuration, so `velox-agent doctor` and a
+    /// support bundle find it in one place.
+    /// Where the running engine's pid is recorded, so that an agent which
+    /// starts up — after a crash, an upgrade, a `systemctl restart` — can
+    /// find the engine its predecessor left behind.
+    ///
+    /// Without this the agent spawns a SECOND Fluent Bit on the same
+    /// configuration: both tail the same files and both write to the same
+    /// index, so every line is indexed twice and nothing on screen looks
+    /// wrong. Observed on this host — two engines, one config, after a plain
+    /// agent restart. A child process cannot be re-adopted by a new parent,
+    /// so the only honest invariant is *at most one engine per state
+    /// directory*, enforced by reaping before spawning.
+    fn pid_path(&self) -> PathBuf {
+        self.files
+            .live
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("engine.pid")
+    }
+
+    /// Kill the engine recorded in the pid file, if it is still running and
+    /// still ours. The command line is checked against our configuration path
+    /// because pids are reused, and killing an unrelated process would be far
+    /// worse than leaving a stale file behind.
+    fn reap_stale(&self) {
+        let path = self.pid_path();
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(pid) = raw.trim().parse::<i32>() else {
+            let _ = std::fs::remove_file(&path);
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        {
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            let ours = cmdline.contains(&self.files.live.display().to_string());
+            if ours {
+                // SIGTERM first: Fluent Bit flushes what it has buffered on a
+                // graceful stop, and a KILL here would drop it.
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+                for _ in 0..50 {
+                    if !Path::new(&format!("/proc/{pid}")).exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                if Path::new(&format!("/proc/{pid}")).exists() {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+                eprintln!(
+                    "velox-agent: stopped the engine left behind by a previous run (pid {pid})"
+                );
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn log_path(&self) -> PathBuf {
+        self.files
+            .live
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("engine.log")
     }
 
     fn start(&mut self) -> Result<(), String> {
         self.stop();
+        // Before spawning, make sure no engine from an earlier *process* is
+        // still on this configuration.
+        self.reap_stale();
+        // Append, never truncate: a restart loop whose cause scrolled away is
+        // the one case this file exists for.
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.log_path());
+        let (out, err) = match log {
+            Ok(f) => match f.try_clone() {
+                Ok(g) => (Stdio::from(f), Stdio::from(g)),
+                Err(_) => (Stdio::from(f), Stdio::null()),
+            },
+            // A log we cannot open must not stop collection.
+            Err(_) => (Stdio::null(), Stdio::null()),
+        };
         let child = Command::new(&self.bin)
             .arg("-c")
             .arg(&self.files.live)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(out)
+            .stderr(err)
             .spawn()
             .map_err(|e| format!("cannot start {}: {e}", self.bin.display()))?;
+        let _ = std::fs::write(self.pid_path(), child.id().to_string());
         self.child = Some(child);
         // A config the engine rejects makes it exit immediately; give it a
         // moment and then ask, rather than reporting success on a spawn.
@@ -214,14 +306,19 @@ impl Engine {
                 .output()
                 .map_err(|e| e.to_string())?;
             if !out.status.success() {
-                // The engine's own words, verbatim: the operator reads them on
-                // the Mesh's screen and fixes the policy, not our paraphrase.
+                // The engine's own words, but only the ones that say what is
+                // wrong. Fluent Bit opens every run with a copyright notice
+                // and twelve lines of ASCII art, and reporting the raw output
+                // puts that art on the Mesh's screen where the reason should
+                // be — observed on 5.2.0, where the `section 'no_such_plugin'
+                // tried to instance a plugin name that doesn't exist` line was
+                // pushed out of view by the banner.
                 let msg = format!(
                     "{}{}",
                     String::from_utf8_lossy(&out.stderr),
                     String::from_utf8_lossy(&out.stdout)
                 );
-                return Err(msg.trim().to_string());
+                return Err(diagnostics(&msg));
             }
         }
 
@@ -243,6 +340,33 @@ impl Engine {
             }
         }
     }
+}
+
+/// The lines of an engine's output that diagnose a failure, with its banner
+/// dropped.
+///
+/// Fluent Bit tags what matters with a level — `[error]`, `[warn]` — so those
+/// lines are the message. When nothing is tagged (a future version, a crash
+/// before logging starts) the tail is the next best thing, because the last
+/// words before an abort are usually the reason; an empty result would be
+/// worse than noise, since the operator would see a failure with no cause at
+/// all.
+fn diagnostics(raw: &str) -> String {
+    let tagged: Vec<&str> = raw
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| l.contains("[error]") || l.contains("[warn]"))
+        .collect();
+    if !tagged.is_empty() {
+        return tagged.join("\n");
+    }
+    let tail: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let start = tail.len().saturating_sub(5);
+    tail[start..].join("\n")
 }
 
 /// Check in forever. Returns only on an unrecoverable local problem; a Mesh
@@ -443,6 +567,27 @@ async fn report_fatal(id: &Identity, message: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A failure message that an operator cannot read is a failure message
+    /// that costs a support call. Fluent Bit's banner must not survive.
+    #[test]
+    fn a_refusal_reports_the_reason_not_the_banner() {
+        let raw = "Fluent Bit v5.2.0\n* Copyright (C) 2015-2026 The Fluent Bit Authors\n\
+                   |  ___| |                | |   | ___ (_) |\n\
+                   [2026/11/09 20:16:42.444] [error] [config] section 'no_such_plugin' tried to instance a plugin name that doesn't exist\n\
+                   [2026/11/09 20:16:42.444] [error] configuration file contains errors, aborting.\n";
+        let out = diagnostics(raw);
+        assert!(out.contains("no_such_plugin"), "{out}");
+        assert!(!out.contains("Copyright"), "{out}");
+        assert!(!out.contains("___"), "{out}");
+    }
+
+    /// Output with no level tags at all still has to say something.
+    #[test]
+    fn untagged_output_falls_back_to_the_tail() {
+        let out = diagnostics("one\ntwo\nthree\n");
+        assert!(out.contains("three"), "{out}");
+    }
     use super::*;
 
     /// The credential never lands world-readable, and the identity survives a
