@@ -1,0 +1,24 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+
+[package]
+name = "velox-mesh"
+description = "Velox Mesh: the central controller for Velox Agents (enrollment, policies, seats)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+velox-license = { path = "../velox-license" }
+velox-opamp = { path = "../velox-opamp" }
+velox-policy = { path = "../velox-policy" }
+serde_json.workspace = true
+tokio.workspace = true
+axum.workspace = true
+
+[lints]
+workspace = true

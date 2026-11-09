@@ -1,0 +1,20 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+
+[package]
+name = "velox-opamp"
+description = "The OpAMP message subset Velox Mesh and Velox Agent exchange"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
