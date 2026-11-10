@@ -81,6 +81,20 @@ the closed set above:
   the author saying there is no sensible default.
 - The same declared variables apply to the optional `otel_config` asset.
 
+## Inputs (schema 1.2, ADR-073)
+
+A manifest at `schema_version: "1.2"` declares `inputs` instead of top-level
+`variables`: each input has a `signal`, a template per target
+(`templates.cluster` / `templates.host` / `templates.otel_host`), its own
+`vars` (same shape, plus `targets: [cluster|host]` to say where a variable
+applies), and optionally its own `pipeline`, `index_template` and
+`saved_objects`. The rules above hold per input: `${name}` substitutes
+exactly that input's declared names in that input's templates, nothing
+else, and a variable that does not apply to a target is neither required
+nor substituted there — a value given for it is refused by name. Every file
+an input names is an asset and is covered by the digest. The engine replaces
+each template's `[SERVICE]` section with its own, once per configuration.
+
 ## The rule
 
 1. The set above is **closed**. Adding a token is a **core change** (this doc +

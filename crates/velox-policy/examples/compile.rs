@@ -105,6 +105,7 @@ fn main() {
                 package_id: id.clone(),
                 package_version: VERSION.into(),
                 vars: vars.clone(),
+                inputs: Default::default(),
             })
             .collect(),
         outputs: vec![Output::OpenSearch {

@@ -2423,7 +2423,7 @@ mod server {
     ) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
         integration_id(&req.id)?;
-        crate::catalog::install(&dep, &req.id, req.version.as_deref())
+        crate::catalog::install(&dep, &req.id, req.version.as_deref(), req.inputs.as_ref())
             .await
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
@@ -2489,7 +2489,15 @@ mod server {
     /// operator's 400, not a 500 of ours.
     fn mesh_err(e: anyhow::Error) -> ApiError {
         let msg = format!("{e:#}");
-        if msg.contains("the Mesh answered 400") || msg.contains("the Mesh answered 404") {
+        // The Mesh's refusals, and the package contract's (`velox_integrations::
+        // Error::{Variable, Input}`: an input the package does not declare, a
+        // required value missing, a host-only variable given for the cluster)
+        // are the caller's to fix, not ours.
+        if msg.contains("the Mesh answered 400")
+            || msg.contains("the Mesh answered 404")
+            || msg.contains("variable `")
+            || msg.contains("input `")
+        {
             ApiError::bad_request(msg)
         } else {
             ApiError::internal(e)
@@ -2541,6 +2549,15 @@ mod server {
         Json(req): Json<MeshDepReq>,
     ) -> Result<Json<serde_json::Value>, ApiError> {
         mesh_forward(&scope, req, "assign_policy").await
+    }
+
+    /// The current document of one of the deployment's policies — what the
+    /// Data tab edits an activation from (ADR-073).
+    async fn mesh_policy(
+        scope: Scope,
+        Json(req): Json<MeshDepReq>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        mesh_forward(&scope, req, "policy").await
     }
 
     /// Unenrol a host from the deployment's fleet.
@@ -2612,27 +2629,111 @@ mod server {
         // must 404 here for exactly the reason it does there (#80).
         let dep = scope.require(&req.deployment).await?;
         integration_id(&req.id)?;
-        // Hosts may be writing through this integration's pipeline and
-        // template (ADR-072 §6): a policy that activates it pins them, and the
-        // teardown would leave the fleet writing unmapped documents. Refused
-        // by name so the operator knows which policy to edit first.
-        let holders = crate::mesh::policies_using(&dep, &req.id)
-            .await
-            .map_err(ApiError::internal)?;
-        if !holders.is_empty() {
-            return Err(ApiError::bad_request(format!(
-                "integration {} is activated by Velox Mesh polic{} {}; remove it from the \
-                 polic{} before uninstalling",
-                req.id,
-                if holders.len() == 1 { "y" } else { "ies" },
-                holders.join(", "),
-                if holders.len() == 1 { "y" } else { "ies" },
-            )));
-        }
+        // The collector goes; the backend half stays while a policy of this
+        // deployment still writes through it (`catalog::uninstall` decides,
+        // ADR-073 §4).
         crate::catalog::uninstall(&dep, &req.id)
             .await
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
+    }
+
+    // -- the one onboarding (ADR-073) ------------------------------------
+
+    /// Add an integration to a target — the cluster collector or one of the
+    /// deployment's Velox Mesh policies — with the inputs the operator turned
+    /// on and configured. Both targets install the same backend half; the
+    /// cluster gets a collector, a policy gets a new revision its agents pick
+    /// up on their next check-in.
+    async fn add_integration(
+        scope: Scope,
+        Json(req): Json<crate::catalog::AddIntegrationReq>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        let dep = scope.require(&req.deployment).await?;
+        integration_id(&req.id)?;
+        if req.policy == crate::catalog::CLUSTER_TARGET {
+            crate::catalog::install(&dep, &req.id, None, Some(&req.inputs))
+                .await
+                .map_err(ApiError::internal)?;
+            return Ok(Json(serde_json::json!({ "target": "cluster" })));
+        }
+        if !crate::catalog::valid_component(&req.policy) {
+            return Err(ApiError::bad_request(format!(
+                "invalid policy id: {:?}",
+                req.policy
+            )));
+        }
+        let revision =
+            crate::mesh::set_activation(&dep, &req.policy, &req.id, &req.inputs, scope.tenant_id())
+                .await
+                .map_err(mesh_err)?;
+        Ok(Json(
+            serde_json::json!({ "target": req.policy, "revision": revision }),
+        ))
+    }
+
+    /// Take an integration off one target. The backend half is torn down
+    /// only when no other target of this deployment still uses it.
+    async fn remove_integration(
+        scope: Scope,
+        Json(req): Json<crate::catalog::RemoveIntegrationReq>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        let dep = scope.require(&req.deployment).await?;
+        integration_id(&req.id)?;
+        if req.policy == crate::catalog::CLUSTER_TARGET {
+            crate::catalog::uninstall(&dep, &req.id)
+                .await
+                .map_err(ApiError::internal)?;
+            return Ok(Json(serde_json::json!({ "target": "cluster" })));
+        }
+        let revision = crate::mesh::unset_activation(&dep, &req.policy, &req.id, scope.tenant_id())
+            .await
+            .map_err(mesh_err)?;
+        let still = crate::catalog::backend_still_used(
+            &dep,
+            &req.id,
+            crate::catalog::BackendUser::Policy(&req.policy),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        if !still {
+            crate::catalog::teardown_backend(&dep, &req.id)
+                .await
+                .map_err(ApiError::internal)?;
+        }
+        Ok(Json(serde_json::json!({
+            "target": req.policy, "revision": revision, "backend_removed": !still
+        })))
+    }
+
+    #[derive(Deserialize)]
+    struct MeshCreatePolicyReq {
+        deployment: String,
+        id: String,
+        name: String,
+    }
+
+    /// Create an empty policy on the deployment (ADR-073): the thing an
+    /// integration is then added to.
+    async fn mesh_create_policy(
+        scope: Scope,
+        Json(req): Json<MeshCreatePolicyReq>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        let dep = scope.require(&req.deployment).await?;
+        if !crate::catalog::valid_component(&req.id) {
+            return Err(ApiError::bad_request(format!(
+                "invalid policy id: {:?}",
+                req.id
+            )));
+        }
+        let name = req.name.trim();
+        if name.is_empty() {
+            return Err(ApiError::bad_request("a policy needs a name"));
+        }
+        let revision = crate::mesh::create_policy(&dep, &req.id, name, scope.tenant_id())
+            .await
+            .map_err(mesh_err)?;
+        Ok(Json(serde_json::json!({ "revision": revision })))
     }
 
     /// A malformed integration id is a 400. `catalog` refuses it too, as a
@@ -3275,7 +3376,10 @@ mod server {
         RoutePolicy { path: "/monitoring_status", policy: TenantScoped, note: "doc counts are data about the deployment's contents." },
         RoutePolicy { path: "/catalog", policy: TenantScoped, note: "package list is installation-wide; the installed overlay is per deployment, and an unowned name reads as no-deployment." },
         RoutePolicy { path: "/catalog_install", policy: TenantScoped, note: "applies a package to a deployment; resolve-before-mutate." },
-        RoutePolicy { path: "/catalog_uninstall", policy: TenantScoped, note: "DELETES the package's teardown set from the deployment's OpenSearch; resolve-before-mutate, same surface as catalog_install." },
+        RoutePolicy { path: "/catalog_uninstall", policy: TenantScoped, note: "removes the cluster collector and, when no policy still uses the integration, DELETES the package's teardown set from the deployment's OpenSearch; resolve-before-mutate, same surface as catalog_install." },
+        RoutePolicy { path: "/add_integration", policy: TenantScoped, note: "the one onboarding (ADR-073): adds an integration with its inputs to the cluster collector or to one of the deployment's Mesh policies; resolve-before-mutate on both." },
+        RoutePolicy { path: "/remove_integration", policy: TenantScoped, note: "takes an integration off one target; the backend half goes only when no other target of the deployment uses it." },
+        RoutePolicy { path: "/mesh_create_policy", policy: TenantScoped, note: "creates an empty policy on the deployment (ADR-073); resolve-before-mutate." },
         RoutePolicy { path: "/integration_artifacts", policy: TenantScoped, note: "what a package brings (pipeline/template/index patterns/dashboards), read off the VERIFIED package; installation-wide metadata like /catalog, no deployment named, no write." },
         RoutePolicy { path: "/mesh_status", policy: TenantScoped, note: "whether a Velox Mesh is configured for this installation and reachable (ADR-068) — the two facts a tenant needs to see its deployment's Mesh tab; the URL and the probe error are stripped for a tenant (ADR-072 §7)." },
         RoutePolicy { path: "/mesh_overview", policy: TenantScoped, note: "the DEPLOYMENT's fleet (ADR-072): onboarding step, its policies, its agents' derived status, rollout per policy. Resolve-before-read; the Mesh partitions on the pair the resolved Deployment carries." },
@@ -3283,6 +3387,7 @@ mod server {
         RoutePolicy { path: "/mesh_enrollment_token", policy: TenantScoped, note: "mints a token that enrols a HOST into one of the deployment's policies; the Mesh refuses a policy of another deployment (ADR-072 §3)." },
         RoutePolicy { path: "/mesh_assign_policy", policy: TenantScoped, note: "moves one of the deployment's hosts between its policies; another deployment's policy is refused — re-enrol instead (ADR-072 §3)." },
         RoutePolicy { path: "/mesh_unenrol", policy: TenantScoped, note: "unenrols one of the deployment's hosts; the agent is refused on its next check-in." },
+        RoutePolicy { path: "/mesh_policy", policy: TenantScoped, note: "the current document of one of the deployment's policies (its activations and their inputs, ADR-073); resolve-before-read." },
         RoutePolicy { path: "/mesh_settings", policy: TenantScoped, note: "the deployment's Mesh settings (published OpenSearch endpoint), off its CR (ADR-072 §5)." },
         RoutePolicy { path: "/mesh_save_settings", policy: TenantScoped, note: "writes them — a merge patch on the CR's metadata; resolve-before-mutate." },
         RoutePolicy { path: "/node_stats", policy: TenantScoped, note: "live cluster stats; unowned degrades to the empty snapshot." },
@@ -3377,6 +3482,9 @@ mod server {
             .route(p("/catalog_install"), post(catalog_install))
             // -- integrations tab support (#76)
             .route(p("/catalog_uninstall"), post(catalog_uninstall))
+            .route(p("/add_integration"), post(add_integration))
+            .route(p("/remove_integration"), post(remove_integration))
+            .route(p("/mesh_create_policy"), post(mesh_create_policy))
             .route(p("/integration_artifacts"), post(integration_artifacts))
             .route(p("/mesh_status"), get(mesh_status))
             .route(p("/mesh_overview"), post(mesh_overview))
@@ -3384,6 +3492,7 @@ mod server {
             .route(p("/mesh_enrollment_token"), post(mesh_enrollment_token))
             .route(p("/mesh_assign_policy"), post(mesh_assign_policy))
             .route(p("/mesh_unenrol"), post(mesh_unenrol))
+            .route(p("/mesh_policy"), post(mesh_policy))
             .route(p("/mesh_settings"), post(mesh_settings))
             .route(p("/mesh_save_settings"), post(mesh_save_settings))
             .route(p("/node_stats"), post(node_stats))

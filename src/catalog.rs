@@ -163,6 +163,11 @@ pub struct CatalogItem {
     pub installed_version: Option<String>,
     /// Installed, but the catalog offers a newer version.
     pub update_available: bool,
+    /// What the operator turned on for this cluster (ADR-073), when the
+    /// install recorded it; `None` for an install from before inputs
+    /// existed (= the package's defaults).
+    #[serde(default)]
+    pub installed_inputs: Option<velox_integrations::InputSelection>,
 }
 
 /// The embedded bootstrap catalog (ADR-047). Kept as data here rather than
@@ -423,6 +428,12 @@ impl FetchedPackage {
             .as_deref()
             .map(text)
             .transpose()?;
+        // Schema 1.2: every file an input names (ADR-073), fetched under the
+        // same digest as the rest — `asset_filenames` enumerated them.
+        let mut extra = BTreeMap::new();
+        for name in velox_integrations::input_asset_names(&manifest) {
+            extra.insert(name.clone(), text(&name)?);
+        }
         Ok(crate::integrations::Package {
             manifest,
             pipeline,
@@ -430,6 +441,7 @@ impl FetchedPackage {
             saved_objects,
             agent_config,
             otel_config,
+            extra,
         })
     }
 }
@@ -466,6 +478,10 @@ pub struct IntegrationArtifacts {
     pub otel_config: bool,
     /// Schema-1.1 variables a policy may set: `(name, type, default, required)`.
     pub variables: Vec<ArtifactVariable>,
+    /// The inputs an operator turns on and configures when they add the
+    /// integration (ADR-073) — one implicit `logs` input for a 1.0/1.1
+    /// package. What the console's onboarding form is generated from.
+    pub inputs: Vec<ArtifactInput>,
 }
 
 /// One schema-1.1 variable, flattened for the console.
@@ -475,6 +491,46 @@ pub struct ArtifactVariable {
     pub kind: String,
     pub default: Option<String>,
     pub required: bool,
+    /// Locale → label.
+    #[serde(default)]
+    pub description: BTreeMap<String, String>,
+    /// The targets it applies to (`cluster`/`host`); empty = both.
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+/// One input, for the console (ADR-073).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactInput {
+    pub id: String,
+    pub signal: String,
+    /// The index this input writes to, under this path's name.
+    pub index: String,
+    pub title: BTreeMap<String, String>,
+    pub description: BTreeMap<String, String>,
+    /// Pre-selected in the form.
+    pub enabled: bool,
+    /// Where it can be collected: `cluster`, `host`.
+    pub targets: Vec<String>,
+    pub vars: Vec<ArtifactVariable>,
+    pub ingest_pipeline: bool,
+    pub index_template: bool,
+}
+
+fn artifact_variable(v: &velox_integrations::Variable) -> ArtifactVariable {
+    ArtifactVariable {
+        name: v.name.clone(),
+        kind: format!("{:?}", v.kind).to_lowercase(),
+        default: v.default.as_ref().and_then(|d| match d {
+            serde_yaml::Value::String(s) => Some(s.clone()),
+            serde_yaml::Value::Number(n) => Some(n.to_string()),
+            serde_yaml::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }),
+        required: v.required,
+        description: v.description.clone(),
+        targets: v.targets.iter().map(|t| t.name().to_string()).collect(),
+    }
 }
 
 /// Fetch, **verify** and enumerate what a package brings. Verification is the
@@ -518,7 +574,7 @@ pub async fn artifacts(id: &str) -> Result<IntegrationArtifacts> {
     dashboards.sort();
     Ok(IntegrationArtifacts {
         id: pkg.manifest.id.clone(),
-        version,
+        version: version.clone(),
         index: renaming.name.clone(),
         // One name for the index, the template and the pipeline — they live in
         // different namespaces in OpenSearch, so the single string cannot
@@ -544,16 +600,22 @@ pub async fn artifacts(id: &str) -> Result<IntegrationArtifacts> {
             .manifest
             .variables
             .iter()
-            .map(|v| ArtifactVariable {
-                name: v.name.clone(),
-                kind: format!("{:?}", v.kind).to_lowercase(),
-                default: v.default.as_ref().and_then(|d| match d {
-                    serde_yaml::Value::String(s) => Some(s.clone()),
-                    serde_yaml::Value::Number(n) => Some(n.to_string()),
-                    serde_yaml::Value::Bool(b) => Some(b.to_string()),
-                    _ => None,
-                }),
-                required: v.required,
+            .map(artifact_variable)
+            .collect(),
+        inputs: pkg
+            .inputs()
+            .iter()
+            .map(|i| ArtifactInput {
+                id: i.id.clone(),
+                signal: i.signal.clone(),
+                index: velox_integrations::input_artifact_name(&pkg, i, &version),
+                title: i.title.clone(),
+                description: i.description.clone(),
+                enabled: i.enabled,
+                targets: i.targets().iter().map(|t| t.name().to_string()).collect(),
+                vars: i.vars.iter().map(artifact_variable).collect(),
+                ingest_pipeline: i.pipeline.is_some(),
+                index_template: i.index_template.is_some(),
             })
             .collect(),
     })
@@ -590,12 +652,33 @@ fn asset_filenames(manifest_yaml: &str) -> Result<Vec<String>> {
         .and_then(|a| a.as_mapping())
         .context("manifest.yaml has no assets block")?;
     let mut out = Vec::new();
-    for (_role, v) in assets {
-        let name = v.as_str().context("assets values must be filenames")?;
+    let mut push = |v: &serde_yaml::Value| -> Result<()> {
+        let name = v.as_str().context("asset values must be filenames")?;
         if !valid_component(name) {
             bail!("manifest names an unsafe asset filename: {name:?}");
         }
         out.push(name.to_string());
+        Ok(())
+    };
+    for (_role, v) in assets {
+        push(v)?;
+    }
+    // Schema 1.2 (ADR-073): the files each input names. Walked off the raw
+    // document, like `assets`, because this runs BEFORE verification and must
+    // enumerate exactly what the digest will cover.
+    if let Some(inputs) = doc.get("inputs").and_then(|i| i.as_sequence()) {
+        for input in inputs {
+            for key in ["pipeline", "index_template", "saved_objects"] {
+                if let Some(v) = input.get(key) {
+                    push(v)?;
+                }
+            }
+            if let Some(t) = input.get("templates").and_then(|t| t.as_mapping()) {
+                for (_target, v) in t {
+                    push(v)?;
+                }
+            }
+        }
     }
     out.sort();
     out.dedup();
@@ -943,7 +1026,11 @@ fn version_ge(left: &str, right: &str) -> bool {
 /// Merge the fetched catalog with the bootstrap floor (a reachable registry
 /// always wins for an id it publishes) and enrich each row with what this
 /// deployment has installed.
-fn build_view(state: CatalogState, installed: &BTreeMap<String, String>) -> CatalogView {
+fn build_view(
+    state: CatalogState,
+    installed: &BTreeMap<String, String>,
+    inputs: &BTreeMap<String, velox_integrations::InputSelection>,
+) -> CatalogView {
     let CatalogState {
         catalog,
         source,
@@ -971,6 +1058,7 @@ fn build_view(state: CatalogState, installed: &BTreeMap<String, String>) -> Cata
             CatalogItem {
                 compatible: e.min_core_version.is_empty() || version_ge(core, &e.min_core_version),
                 builtin: BOOTSTRAP_IDS.contains(&e.id.as_str()),
+                installed_inputs: inputs.get(&e.id).cloned(),
                 installed_version,
                 update_available,
                 id: e.id,
@@ -997,13 +1085,16 @@ fn build_view(state: CatalogState, installed: &BTreeMap<String, String>) -> Cata
 /// "nothing installed" rather than failing the whole request.
 pub async fn view(deployment: Option<&Deployment>) -> CatalogView {
     let state = CACHE.load(&Registry::from_env(), DEFAULT_TTL).await;
-    let installed = match deployment {
-        Some(d) => crate::k8s::integration_versions(d)
-            .await
-            .unwrap_or_default(),
-        None => BTreeMap::new(),
+    let (installed, inputs) = match deployment {
+        Some(d) => (
+            crate::k8s::integration_versions(d)
+                .await
+                .unwrap_or_default(),
+            crate::k8s::integration_inputs(d).await.unwrap_or_default(),
+        ),
+        None => (BTreeMap::new(), BTreeMap::new()),
     };
-    build_view(state, &installed)
+    build_view(state, &installed, &inputs)
 }
 
 // ---------------------------------------------------------------------------
@@ -1022,10 +1113,26 @@ pub async fn view(deployment: Option<&Deployment>) -> CatalogView {
 /// in the [`BOOTSTRAP_IDS`] floor, the in-binary recipe — byte-equivalent to
 /// that package by the `registry_golden` gates — is applied instead, so a
 /// first, egress-less install still works. Any other id is a clear error.
-pub async fn install(deployment: &Deployment, id: &str, version: Option<&str>) -> Result<()> {
+pub async fn install(
+    deployment: &Deployment,
+    id: &str,
+    version: Option<&str>,
+    selection: Option<&velox_integrations::InputSelection>,
+) -> Result<()> {
     if !valid_component(id) {
         bail!("invalid integration id: {id:?}");
     }
+    // What to collect on this cluster (ADR-073): the operator's choice when
+    // given, else what was recorded at the last install — a migration or a
+    // re-apply keeps the choices — else the package's defaults.
+    let selection = match selection {
+        Some(s) => s.clone(),
+        None => crate::k8s::integration_inputs(deployment)
+            .await
+            .ok()
+            .and_then(|m| m.get(id).cloned())
+            .unwrap_or_default(),
+    };
     let reg = Registry::from_env();
     let state = CACHE.load(&reg, DEFAULT_TTL).await;
     let degraded = state.source != CatalogSource::Registry;
@@ -1073,7 +1180,7 @@ pub async fn install(deployment: &Deployment, id: &str, version: Option<&str>) -
                     pkg.manifest.id
                 );
             }
-            crate::integrations::apply_package(deployment, &pkg, &resolved).await?;
+            crate::integrations::apply_package(deployment, &pkg, &resolved, &selection).await?;
         }
         Err(e) if BOOTSTRAP_IDS.contains(&id) => {
             tracing::warn!(
@@ -1092,10 +1199,72 @@ pub async fn install(deployment: &Deployment, id: &str, version: Option<&str>) -
     }
 
     // Record the install exactly as the recipe path does, plus the version, so
-    // installed / available / update-available is computable (ADR-039).
+    // installed / available / update-available is computable (ADR-039), plus
+    // the selection, so an edit opens on what was chosen.
     crate::k8s::set_monitor(deployment, id, true).await?;
     crate::k8s::set_integration_version(deployment, id, Some(&resolved)).await?;
+    crate::k8s::set_integration_inputs(deployment, id, Some(&selection)).await?;
     Ok(())
+}
+
+/// Is this integration's backend half (pipeline, templates, dashboards)
+/// still needed on the deployment by a target other than `except`? The
+/// cluster counts when it has the integration recorded; a Velox Mesh policy
+/// counts when it activates the integration (ADR-073 §4).
+pub async fn backend_still_used(
+    deployment: &Deployment,
+    id: &str,
+    except: BackendUser<'_>,
+) -> Result<bool> {
+    if !matches!(except, BackendUser::Cluster) {
+        let on_cluster = crate::k8s::integration_versions(deployment)
+            .await
+            .map(|m| m.contains_key(id))
+            .unwrap_or(false);
+        if on_cluster {
+            return Ok(true);
+        }
+    }
+    let policies = crate::mesh::policies_using(deployment, id).await?;
+    Ok(policies.iter().any(|p| match except {
+        BackendUser::Policy(pid) => p != pid,
+        BackendUser::Cluster => true,
+    }))
+}
+
+/// Who is giving an integration up, so [`backend_still_used`] does not count
+/// them as still using it.
+#[derive(Debug, Clone, Copy)]
+pub enum BackendUser<'a> {
+    Cluster,
+    Policy(&'a str),
+}
+
+/// Delete an integration's backend half from the deployment — the last
+/// target just gave it up. Fetched and verified like an uninstall, torn down
+/// at the version the cluster recorded if it ever had one, else the
+/// registry's; the in-binary recipe when the registry is unreachable.
+pub async fn teardown_backend(deployment: &Deployment, id: &str) -> Result<()> {
+    if !valid_component(id) {
+        bail!("invalid integration id: {id:?}");
+    }
+    match Registry::from_env().fetch_package(id).await {
+        Ok(fetched) => {
+            verify_package(&fetched.manifest_yaml, &fetched.assets)
+                .with_context(|| format!("refusing to tear down integration {id}"))?;
+            let version = manifest_field(&fetched.manifest_yaml, "version").unwrap_or_default();
+            let pkg = fetched.into_package()?;
+            crate::integrations::teardown_backend(deployment, &pkg, &version).await
+        }
+        Err(e) if crate::recipes::RECIPES.contains(&id) => {
+            tracing::warn!(
+                "registry unreachable ({e:#}); tearing down {id} from the in-binary recipe"
+            );
+            let pkg = crate::recipes::bootstrap_package(id)?;
+            crate::integrations::teardown_backend(deployment, &pkg, BOOTSTRAP_VERSION).await
+        }
+        Err(e) => Err(e).with_context(|| format!("downloading integration {id}")),
+    }
 }
 
 /// Uninstall an integration from a deployment (#76), the mirror of [`install`]:
@@ -1116,6 +1285,12 @@ pub async fn uninstall(deployment: &Deployment, id: &str) -> Result<()> {
     if !valid_component(id) {
         bail!("invalid integration id: {id:?}");
     }
+    // The collector always goes; the backend half only when no policy of
+    // this deployment still writes through it (ADR-073 §4). A Mesh that is
+    // configured but unreachable is an error here, not "nobody uses it": the
+    // alternative is deleting the pipeline under a fleet that is still
+    // flushing.
+    let backend = !backend_still_used(deployment, id, BackendUser::Cluster).await?;
     let reg = Registry::from_env();
     match reg.fetch_package(id).await {
         Ok(fetched) => {
@@ -1136,14 +1311,18 @@ pub async fn uninstall(deployment: &Deployment, id: &str) -> Result<()> {
                 .and_then(|m| m.get(id).cloned())
                 .unwrap_or(fetched_version);
             let pkg = fetched.into_package()?;
-            crate::integrations::uninstall_package(deployment, &pkg, &installed).await?;
+            crate::integrations::uninstall_package(deployment, &pkg, &installed, backend).await?;
         }
         Err(e) if crate::recipes::RECIPES.contains(&id) => {
             tracing::warn!(
                 "registry unreachable ({e:#}); tearing down integration {id} from the in-binary \
                  recipe"
             );
-            crate::recipes::disable(deployment, id).await?;
+            if backend {
+                crate::recipes::disable(deployment, id).await?;
+            } else {
+                let _ = crate::agents::remove_agent(deployment, id).await;
+            }
         }
         Err(e) => return Err(e).with_context(|| format!("downloading integration {id}")),
     }
@@ -1165,14 +1344,42 @@ pub struct CatalogReq {
     pub deployment: Option<String>,
 }
 
-/// `POST /api/catalog_install`.
+/// `POST /api/catalog_install` — the cluster target of
+/// [`AddIntegrationReq`], kept for the wizard and the older console.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CatalogInstallReq {
     pub deployment: String,
     pub id: String,
     #[serde(default)]
     pub version: Option<String>,
+    /// The inputs to collect on this cluster; absent = recorded or defaults.
+    #[serde(default)]
+    pub inputs: Option<velox_integrations::InputSelection>,
 }
+
+/// `POST /api/add_integration` (ADR-073): the one onboarding, for any
+/// target. `policy` is `"cluster"` for the in-cluster collector or the id of
+/// one of the deployment's Velox Mesh policies.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddIntegrationReq {
+    pub deployment: String,
+    pub id: String,
+    pub policy: String,
+    #[serde(default)]
+    pub inputs: velox_integrations::InputSelection,
+}
+
+/// `POST /api/remove_integration` (ADR-073): take an integration off one
+/// target. The backend half stays while any other target still uses it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoveIntegrationReq {
+    pub deployment: String,
+    pub id: String,
+    pub policy: String,
+}
+
+/// The target word the cluster collector goes by in `policy` fields.
+pub const CLUSTER_TARGET: &str = "cluster";
 
 /// Ask what one integration brings. No deployment: the answer is the
 /// package's own inventory, identical for every deployment, and the console
@@ -1301,7 +1508,7 @@ mod tests {
     #[test]
     fn tampered_asset_is_rejected() {
         let Some(root) = checkout() else { return };
-        let mut pkg = FetchedPackage::load_from_dir(&root.join("integrations/nginx")).unwrap();
+        let mut pkg = FetchedPackage::load_from_dir(&root.join("integrations/postgres")).unwrap();
         let name = pkg.assets.keys().next().unwrap().clone();
         pkg.assets.get_mut(&name).unwrap().push(b' ');
         let err = verify_package(&pkg.manifest_yaml, &pkg.assets).unwrap_err();
@@ -1313,10 +1520,10 @@ mod tests {
     #[test]
     fn tampered_manifest_is_rejected() {
         let Some(root) = checkout() else { return };
-        let pkg = FetchedPackage::load_from_dir(&root.join("integrations/nginx")).unwrap();
+        let pkg = FetchedPackage::load_from_dir(&root.join("integrations/postgres")).unwrap();
         let edited = pkg
             .manifest_yaml
-            .replace("index: nginx-logs", "index: evil-logs");
+            .replace("index: postgres-logs", "index: evil-logs");
         assert_ne!(edited, pkg.manifest_yaml, "the replace must have applied");
         let err = verify_package(&edited, &pkg.assets).unwrap_err();
         assert!(err.to_string().contains("TAMPERED"), "unhelpful: {err:#}");
@@ -1359,7 +1566,7 @@ mod tests {
     #[test]
     fn unknown_key_id_is_rejected() {
         let Some(root) = checkout() else { return };
-        let pkg = FetchedPackage::load_from_dir(&root.join("integrations/nginx")).unwrap();
+        let pkg = FetchedPackage::load_from_dir(&root.join("integrations/postgres")).unwrap();
         let edited = pkg
             .manifest_yaml
             .replace("key_id: velox-registry-2026-10", "key_id: attacker-2026");
@@ -1599,12 +1806,12 @@ mod tests {
         let Some(root) = checkout() else { return };
         let reg = Registry::new(format!("file://{}", root.display()), None);
         let pkg = rt()
-            .block_on(reg.fetch_package("nginx"))
-            .expect("fetch nginx");
-        assert_eq!(pkg.id, "nginx");
+            .block_on(reg.fetch_package("postgres"))
+            .expect("fetch postgres");
+        assert_eq!(pkg.id, "postgres");
         verify_package(&pkg.manifest_yaml, &pkg.assets).expect("fetched package verifies");
         let engine_pkg = pkg.into_package().expect("into engine package");
-        assert_eq!(engine_pkg.manifest.index, "nginx-logs");
+        assert_eq!(engine_pkg.manifest.index, "postgres-logs");
         assert!(engine_pkg.pipeline.is_some());
     }
 
@@ -1636,7 +1843,7 @@ mod tests {
         assert_eq!(state.source, CatalogSource::Bootstrap);
         assert!(state.error.is_some(), "the reason must be reported");
 
-        let view = build_view(state, &BTreeMap::new());
+        let view = build_view(state, &BTreeMap::new(), &BTreeMap::new());
         assert!(view.stale);
         assert_eq!(view.integrations.len(), BOOTSTRAP_IDS.len());
         assert_eq!(view.integrations[0].id, "kubernetes");
@@ -1727,6 +1934,7 @@ mod tests {
                 error: None,
             },
             &installed,
+            &BTreeMap::new(),
         );
         let by_id = |id: &str| {
             view.integrations
@@ -1777,6 +1985,7 @@ mod tests {
                 age_seconds: Some(0),
                 error: None,
             },
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert_eq!(view.integrations.len(), 1);

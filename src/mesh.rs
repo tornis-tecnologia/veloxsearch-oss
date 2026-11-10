@@ -111,9 +111,112 @@ pub struct PolicyDraft {
     pub deployment: String,
     /// Integration ids, in the order the operator added them.
     pub integrations: Vec<String>,
-    /// Per-integration variables (schema 1.1), keyed by integration id.
+    /// Per-integration variables (schema 1.1), keyed by integration id. An
+    /// older console's field; `inputs` is what the onboarding sends.
     #[serde(default)]
     pub vars: BTreeMap<String, BTreeMap<String, String>>,
+    /// Per-integration input selection (ADR-073), keyed by integration id.
+    /// An integration listed without one gets the package's defaults.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, velox_integrations::InputSelection>,
+}
+
+impl PolicyDraft {
+    /// The draft a stored policy document edits as: its integrations in
+    /// order, each with the selection its activation carries.
+    fn from_policy(deployment: &str, p: &velox_policy::Policy) -> PolicyDraft {
+        PolicyDraft {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            deployment: deployment.to_string(),
+            integrations: p.activations.iter().map(|a| a.package_id.clone()).collect(),
+            vars: BTreeMap::new(),
+            inputs: p
+                .activations
+                .iter()
+                .map(|a| (a.package_id.clone(), a.selection()))
+                .collect(),
+        }
+    }
+}
+
+/// The current document of one of the deployment's policies.
+pub async fn policy_doc(
+    dep: &crate::scope::Deployment,
+    policy_id: &str,
+) -> anyhow::Result<velox_policy::Policy> {
+    use anyhow::Context as _;
+    let out: serde_json::Value =
+        call_for(dep, "policy", serde_json::json!({ "policy_id": policy_id })).await?;
+    let body = out
+        .get("body")
+        .cloned()
+        .context("the Mesh answered with no policy body")?;
+    serde_json::from_value(body).context("the stored policy does not parse")
+}
+
+/// Create an empty policy (ADR-073): a name the operator can then add
+/// integrations to from the Data tab. Refused when it exists — a second
+/// create is not an edit.
+pub async fn create_policy(
+    dep: &crate::scope::Deployment,
+    id: &str,
+    name: &str,
+    tenant_id: Option<&str>,
+) -> anyhow::Result<u64> {
+    if policy_doc(dep, id).await.is_ok() {
+        anyhow::bail!("policy {id} already exists on {}", dep.name());
+    }
+    let draft = PolicyDraft {
+        id: id.to_string(),
+        name: name.to_string(),
+        deployment: dep.name().to_string(),
+        integrations: vec![],
+        vars: BTreeMap::new(),
+        inputs: BTreeMap::new(),
+    };
+    save_policy(&draft, dep, tenant_id).await
+}
+
+/// Add or reconfigure one integration on one of the deployment's policies
+/// (ADR-073): the stored document with this activation set, saved as the next
+/// revision. The backend half is installed by `save_policy` as always.
+pub async fn set_activation(
+    dep: &crate::scope::Deployment,
+    policy_id: &str,
+    package_id: &str,
+    selection: &velox_integrations::InputSelection,
+    tenant_id: Option<&str>,
+) -> anyhow::Result<u64> {
+    let doc = policy_doc(dep, policy_id).await?;
+    let mut draft = PolicyDraft::from_policy(dep.name(), &doc);
+    if !draft.integrations.iter().any(|i| i == package_id) {
+        draft.integrations.push(package_id.to_string());
+    }
+    draft
+        .inputs
+        .insert(package_id.to_string(), selection.clone());
+    save_policy(&draft, dep, tenant_id).await
+}
+
+/// Take one integration off one of the deployment's policies: the next
+/// revision without it. Agents stop collecting it on their next check-in.
+/// Whether the backend half goes too is the caller's call
+/// (`catalog::backend_still_used`).
+pub async fn unset_activation(
+    dep: &crate::scope::Deployment,
+    policy_id: &str,
+    package_id: &str,
+    tenant_id: Option<&str>,
+) -> anyhow::Result<u64> {
+    let doc = policy_doc(dep, policy_id).await?;
+    let mut draft = PolicyDraft::from_policy(dep.name(), &doc);
+    if !draft.integrations.iter().any(|i| i == package_id) {
+        anyhow::bail!("policy {policy_id} does not activate {package_id}");
+    }
+    draft.integrations.retain(|i| i != package_id);
+    draft.inputs.remove(package_id);
+    save_policy(&draft, dep, tenant_id).await
 }
 
 /// The deployment's Mesh settings (ADR-072 §5): facts about how hosts reach
@@ -252,6 +355,11 @@ pub async fn save_policy(
             package_id: id.clone(),
             package_version: artifacts.version,
             vars: draft.vars.get(id).cloned().unwrap_or_default(),
+            inputs: draft
+                .inputs
+                .get(id)
+                .map(|s| s.inputs.clone())
+                .unwrap_or_default(),
         });
     }
 
@@ -310,7 +418,13 @@ pub async fn save_policy(
     //
     // No collector is deployed here — that is the policy's job, on the host.
     for ((id, version), pkg) in &packages {
-        crate::integrations::apply_package_for_agent(dep, pkg, version)
+        let selection = policy
+            .activations
+            .iter()
+            .find(|a| &a.package_id == id)
+            .map(|a| a.selection())
+            .unwrap_or_default();
+        crate::integrations::apply_package_for_agent(dep, pkg, version, &selection)
             .await
             .with_context(|| {
                 format!(

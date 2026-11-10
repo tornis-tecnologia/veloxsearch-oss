@@ -845,7 +845,9 @@ async fn reconcile_creds_inner(dep: &Deployment) -> Result<usize> {
             .unwrap_or_default();
         for a in &migrate {
             let version = recorded.get(&a.id).map(String::as_str);
-            match crate::catalog::install(dep, &a.id, version).await {
+            // `None` keeps the inputs the operator recorded: a migration moves
+            // the login and the names, never the choices.
+            match crate::catalog::install(dep, &a.id, version, None).await {
                 Ok(()) => {
                     tracing::info!("collector {} of {dep} moved to {user}", a.id);
                     n += 1;

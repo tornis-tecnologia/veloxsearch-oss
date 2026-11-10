@@ -94,14 +94,15 @@ to the tenant namespace.
 of a deployment (`/deployments/:id/mesh/:sub`, ADR-072; the old `/mesh` must
 redirect): the journey, the per-target install guide (whose tab set mirrors
 the Fluent Bit project's own downloads index, ADR-069) and the policy
-composer, where turning on an integration must show both halves it brings and
-the destination is the deployment itself — no picker. It also checks that the
-Data tab hands an integration to the composer (`?integration=`). When a Velox
-Mesh is configured it also checks the fleet: the guided first run is ordered,
-each agent row's up/down agrees with its derived status, a policy can be
-saved, and an integration a policy activates is marked on the Data tab with
-its uninstall disabled. Without one those are skipped, because the screens
-are then the install guide and there is nothing to assert. It needs Playwright
+policies tab, which creates a policy by name and never composes (ADR-073).
+It then drives the one integration onboarding on the Data tab: *Add* opens a
+dialog that asks where (this cluster, a policy — preselected when the Mesh
+tab sent the operator over with `?policy=` — or a new one) and what (the
+package's inputs and variables), and the row then shows every target the
+integration is on, removable per target. When a Velox Mesh is configured it
+also checks the fleet: the guided first run is ordered and each agent row's
+up/down agrees with its derived status. Without one, the dialog's only target
+is the cluster and the fleet assertions are skipped. It needs Playwright
 and an authenticated install; it touches no cluster state, so it is safe
 against a live one.
 

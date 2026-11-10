@@ -157,13 +157,27 @@ const API = {
   catalogInstall: (deployment, id, version) =>
     call("catalog_install", { deployment, id, version: version || null }),
   catalogUninstall: (deployment, id) => call("catalog_uninstall", { deployment, id }),
+  // The one onboarding (ADR-073): add an integration, with the inputs the
+  // operator turned on and configured, to a target — "cluster" (the in-cluster
+  // collector) or the id of one of the deployment's Velox Mesh policies.
+  // `inputs` is { inputs: { <input id>: { vars: {name: value} } } }; an absent
+  // input is OFF. -> { target, revision? }
+  addIntegration: (deployment, id, policy, inputs) =>
+    call("add_integration", { deployment, id, policy, inputs }),
+  // Take it off one target. The backend half (pipeline, template, dashboards)
+  // goes only when no other target of the deployment still uses it.
+  // -> { target, revision?, backend_removed? }
+  removeIntegration: (deployment, id, policy) =>
+    call("remove_integration", { deployment, id, policy }),
   // What ONE integration brings, read off the verified package: the ingest
-  // pipeline, the index template, the index patterns, the dashboards and any
-  // schema-1.1 variables. No deployment: the inventory is the package's, the
-  // same for every deployment, and the Velox Mesh policy screen shows it
-  // BEFORE anything is installed.
+  // pipeline, the index template, the index patterns, the dashboards and —
+  // the part the onboarding form is generated from — its inputs, each with a
+  // signal, the targets it can be collected on and its variables. No
+  // deployment: the inventory is the package's, the same for every deployment.
   // -> { id, version, index, ingest_pipeline, index_template, index_patterns,
-  //      dashboards, otel_config, variables: [{name, kind, default, required}] }
+  //      dashboards, otel_config, variables, inputs: [{id, signal, index,
+  //      title, description, enabled, targets, vars: [{name, kind, default,
+  //      required, description, targets}], ingest_pipeline, index_template}] }
   integrationArtifacts: (id) => call("integration_artifacts", { id }),
   // ── Velox Mesh (ADR-068) ─────────────────────────────────────
   // Is a fleet controller configured for this installation, and can we reach
@@ -197,6 +211,13 @@ const API = {
     call("mesh_assign_policy", { deployment, instance_uid, policy_id }),
   meshUnenrol: (deployment, instance_uid) =>
     call("mesh_unenrol", { deployment, instance_uid }),
+  // An empty policy (ADR-073): the thing integrations are then added to from
+  // the Data tab. -> { revision }
+  meshCreatePolicy: (deployment, id, name) =>
+    call("mesh_create_policy", { deployment, id, name }),
+  // The stored document of one policy: its activations and their inputs.
+  // -> { revision, body: { activations: [{package_id, package_version, inputs}], ... } }
+  meshPolicy: (deployment, policy_id) => call("mesh_policy", { deployment, policy_id }),
   // The deployment's Mesh settings, off its CR. -> { os_host }
   meshSettings: (deployment) => call("mesh_settings", { deployment }),
   // `os_host` null clears it (= the in-cluster service name).

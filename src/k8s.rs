@@ -2007,6 +2007,13 @@ pub async fn set_monitor(dep: &Deployment, recipe: &str, enabled: bool) -> Resul
                     render_integration_versions(&versions),
                 );
             }
+            let mut inputs = parse_integration_inputs(obj);
+            if inputs.remove(recipe).is_some() {
+                annotations.insert(
+                    LABEL_INTEGRATION_INPUTS.to_string(),
+                    render_integration_inputs(&inputs),
+                );
+            }
         }
         annotations
     })
@@ -2139,6 +2146,75 @@ pub async fn set_integration_version(
         annotations.insert(
             LABEL_INTEGRATION_VERSIONS.to_string(),
             render_integration_versions(&versions),
+        );
+        annotations
+    })
+    .await
+}
+
+/// What the operator chose when they added each integration to THIS cluster
+/// (ADR-073): the inputs turned on and their variable values, as JSON
+/// `{ "<id>": { "inputs": { ... } } }`. A sibling of `integration-versions`
+/// rather than a rewrite of it, for the same reason that one sits beside
+/// `monitors`: every reader of the older annotation keeps parsing what it
+/// always did. An integration recorded there but absent here was installed
+/// before inputs existed and means "the package's defaults".
+const LABEL_INTEGRATION_INPUTS: &str = "veloxsearch.ai/integration-inputs";
+
+fn parse_integration_inputs(
+    obj: &DynamicObject,
+) -> BTreeMap<String, velox_integrations::InputSelection> {
+    obj.metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(LABEL_INTEGRATION_INPUTS))
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+fn render_integration_inputs(
+    inputs: &BTreeMap<String, velox_integrations::InputSelection>,
+) -> serde_json::Value {
+    if inputs.is_empty() {
+        return serde_json::Value::Null;
+    }
+    serde_json::Value::String(serde_json::to_string(inputs).unwrap_or_default())
+}
+
+/// The recorded input selection of every integration on this cluster.
+pub async fn integration_inputs(
+    dep: &Deployment,
+) -> Result<BTreeMap<String, velox_integrations::InputSelection>> {
+    let name = dep.name();
+    validate_name(name)?;
+    let client = client().await?;
+    let obj = os_api(&client, dep)
+        .get(name)
+        .await
+        .context("fetching cluster for integration inputs")?;
+    Ok(parse_integration_inputs(&obj))
+}
+
+/// Record (or clear) one integration's input selection on this cluster.
+pub async fn set_integration_inputs(
+    dep: &Deployment,
+    id: &str,
+    selection: Option<&velox_integrations::InputSelection>,
+) -> Result<()> {
+    let name = dep.name();
+    validate_name(name)?;
+    let client = client().await?;
+    let api = os_api(&client, dep);
+    update_annotations(&api, name, "integration-inputs", |obj| {
+        let mut all = parse_integration_inputs(obj);
+        match selection {
+            Some(s) => all.insert(id.to_string(), s.clone()),
+            None => all.remove(id),
+        };
+        let mut annotations = serde_json::Map::new();
+        annotations.insert(
+            LABEL_INTEGRATION_INPUTS.to_string(),
+            render_integration_inputs(&all),
         );
         annotations
     })
@@ -5860,7 +5936,7 @@ async fn run_deferred_provisioning(dep: Deployment, mut snapshot: Option<Snapsho
                     if crate::recipes::RECIPES.contains(&id.as_str()) {
                         crate::recipes::apply(&dep, id).await
                     } else {
-                        crate::catalog::install(&dep, id, None).await
+                        crate::catalog::install(&dep, id, None, None).await
                     }
                 }
                 // Applied once and recorded, never re-asserted — that is what

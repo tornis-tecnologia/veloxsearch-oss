@@ -58,6 +58,9 @@ pub enum Error {
     /// A schema 1.1 variable the package or the policy got wrong.
     #[error("variable `{name}`: {reason}")]
     Variable { name: String, reason: String },
+    /// A schema 1.2 input the package or the activation got wrong.
+    #[error("input `{input}`: {reason}")]
+    Input { input: String, reason: String },
     #[error("{what}: {source}")]
     Io {
         what: String,
@@ -81,7 +84,8 @@ pub struct Manifest {
     /// Package id — also the ingest-pipeline id PUT and the `{recipe_id}` value.
     pub id: String,
     /// The OpenSearch index the package writes to — the `{index}` value and the
-    /// index-template / index-pattern id.
+    /// index-template / index-pattern id. For a schema 1.2 package this is the
+    /// index of its **first** input; the others name their own.
     pub index: String,
     /// Saved-object id of the out-of-the-box dashboard (informational here).
     pub dashboard: String,
@@ -89,9 +93,101 @@ pub struct Manifest {
     pub assets: Assets,
     /// The explicit inventory uninstall removes.
     pub teardown: Teardown,
-    /// Schema 1.1 parameters; empty for every 1.0 package.
+    /// Schema 1.1 parameters; empty for every 1.0 package. A 1.2 package
+    /// declares its variables per input instead (`inputs[].vars`), and this
+    /// list must be empty.
     #[serde(default)]
     pub variables: Vec<Variable>,
+    /// Schema 1.2 (ADR-073): the package's inputs — what an operator turns on
+    /// and configures when they add the integration, each with its own
+    /// signal, index and per-target template. Empty for 1.0/1.1 packages,
+    /// which [`Package::inputs`] exposes as one implicit `logs` input.
+    #[serde(default)]
+    pub inputs: Vec<InputDecl>,
+}
+
+/// Where a rendered collector configuration runs. The two halves of the
+/// product collect the same integration from different places, and a package
+/// may ship a different template for each (a container log is found under
+/// `/var/log/containers/*` with Kubernetes metadata; the same server on a
+/// host writes `/var/log/nginx/access.log` and has none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetKind {
+    /// The in-cluster DaemonSet/Deployment the core deploys.
+    Cluster,
+    /// Velox Agent on a host outside the cluster (ADR-068).
+    Host,
+}
+
+impl TargetKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            TargetKind::Cluster => "cluster",
+            TargetKind::Host => "host",
+        }
+    }
+}
+
+/// Template filenames of one input, by target. An input with no template for
+/// a target cannot be collected there, and the console does not offer it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct InputTemplates {
+    #[serde(default)]
+    pub cluster: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    /// OpenTelemetry Collector template for the host engine, when the input
+    /// is collected by `otelcol` rather than Fluent Bit (schema 1.1's
+    /// `assets.otel_config`, now per input).
+    #[serde(default)]
+    pub otel_host: Option<String>,
+}
+
+/// One input of a schema 1.2 package (ADR-073) — the unit an operator turns
+/// on: "access logs", "status metrics". Mirrors what Elastic calls a policy
+/// template's input, reduced to what a signed data package can carry: a
+/// signal (which decides the index name, ADR-071), a template per target, the
+/// variables the templates reference, and the backend assets the signal's
+/// index needs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InputDecl {
+    /// `[a-z][a-z0-9_]*`, unique within the package.
+    pub id: String,
+    /// One of [`SIGNALS`]; the index is `veloxagent-<package>-<signal>-v<major>`.
+    pub signal: String,
+    /// The index this input declares (the DaemonSet-era name the teardown
+    /// lists). Defaults to the manifest's `index` for the first input and to
+    /// `<package>-<signal>` for the others.
+    #[serde(default)]
+    pub index: Option<String>,
+    /// Locale → title, for the console's toggle.
+    #[serde(default)]
+    pub title: BTreeMap<String, String>,
+    #[serde(default)]
+    pub description: BTreeMap<String, String>,
+    /// Whether the console pre-selects it. A metrics input that needs a
+    /// status endpoint the server may not expose ships `false`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub templates: InputTemplates,
+    #[serde(default)]
+    pub vars: Vec<Variable>,
+    /// Ingest pipeline for this input's index, when it has one of its own.
+    #[serde(default)]
+    pub pipeline: Option<String>,
+    /// Index template for this input's index, when it has one of its own.
+    #[serde(default)]
+    pub index_template: Option<String>,
+    /// Saved objects of this input's own (its index pattern, a dashboard),
+    /// beside the package-level ones. ndjson, like `assets.saved_objects`.
+    #[serde(default)]
+    pub saved_objects: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Asset filenames shipped in the package directory. `pipeline`/`index_template`
@@ -121,8 +217,7 @@ pub enum VarType {
 
 /// One package parameter (schema 1.1). Referenced in the templates as
 /// `${name}`; **not** an interpolation token (`docs/integrations/
-/// interpolation.md`, "Package variables are not tokens"). `description` is
-/// for the UI and is not modeled here.
+/// interpolation.md`, "Package variables are not tokens").
 #[derive(Debug, Clone, Deserialize)]
 pub struct Variable {
     pub name: String,
@@ -132,6 +227,22 @@ pub struct Variable {
     pub default: Option<serde_yaml::Value>,
     #[serde(default)]
     pub required: bool,
+    /// Locale → label, for the console's form.
+    #[serde(default)]
+    pub description: BTreeMap<String, String>,
+    /// Schema 1.2: the targets this variable applies to. Empty = both. A log
+    /// path means nothing to the DaemonSet (its template tails the container
+    /// log directory), so a host-only variable is not asked for when the
+    /// integration is added to the cluster.
+    #[serde(default)]
+    pub targets: Vec<TargetKind>,
+}
+
+impl Variable {
+    /// Does this variable apply to a target?
+    pub fn applies_to(&self, target: TargetKind) -> bool {
+        self.targets.is_empty() || self.targets.contains(&target)
+    }
 }
 
 /// Everything a package creates in the customer's OpenSearch, so uninstall
@@ -146,6 +257,12 @@ pub struct Teardown {
     /// Index-template id to DELETE. Present iff `assets.index_template` is.
     #[serde(default)]
     pub index_template: Option<String>,
+    /// Schema 1.2: the pipelines and templates of the package's other inputs
+    /// (the first input's are the two fields above).
+    #[serde(default)]
+    pub ingest_pipelines: Vec<String>,
+    #[serde(default)]
+    pub index_templates: Vec<String>,
     /// Index-pattern saved-object id to DELETE (equals `index` today).
     pub index_pattern: String,
     /// Dashboard + visualization saved-object ids to DELETE.
@@ -179,11 +296,136 @@ pub struct Package {
     pub agent_config: String,
     /// Raw `otel.yaml.tmpl` (schema 1.1; None when the package ships none).
     pub otel_config: Option<String>,
+    /// Schema 1.2: every other asset an input names, by filename. Templates,
+    /// per-input pipelines and index templates are looked up here.
+    pub extra: BTreeMap<String, String>,
 }
 
-/// Parse a `manifest.yaml` into the fields the engine reads.
+/// Parse a `manifest.yaml` into the fields the engine reads, and check what
+/// the schema validator cannot: that a 1.2 package's inputs are consistent
+/// with each other and with the rest of the manifest.
 pub fn parse_manifest(yaml: &str) -> Result<Manifest> {
-    serde_yaml::from_str(yaml).map_err(Error::Manifest)
+    let m: Manifest = serde_yaml::from_str(yaml).map_err(Error::Manifest)?;
+    check_inputs(&m)?;
+    Ok(m)
+}
+
+/// The invariants of `inputs` (schema 1.2): unique ids, a signal from the
+/// closed list, at least one template, and no package-level `variables`
+/// beside them — two places to declare a variable is one place too many.
+fn check_inputs(m: &Manifest) -> Result<()> {
+    let bad = |input: &str, reason: &str| Error::Input {
+        input: input.to_string(),
+        reason: reason.to_string(),
+    };
+    if m.inputs.is_empty() {
+        return Ok(());
+    }
+    if !m.variables.is_empty() {
+        return Err(bad(
+            "(package)",
+            "a package with `inputs` declares its variables on each input, not at the top level",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut indices = BTreeSet::new();
+    for (n, i) in m.inputs.iter().enumerate() {
+        if i.id.is_empty()
+            || !i.id.starts_with(|c: char| c.is_ascii_lowercase())
+            || !i
+                .id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            return Err(bad(&i.id, "id must match [a-z][a-z0-9_]*"));
+        }
+        if !seen.insert(i.id.as_str()) {
+            return Err(bad(&i.id, "duplicate input id"));
+        }
+        if !SIGNALS.contains(&i.signal.as_str()) {
+            return Err(bad(
+                &i.id,
+                &format!("signal must be one of {}", SIGNALS.join(", ")),
+            ));
+        }
+        if i.templates.cluster.is_none()
+            && i.templates.host.is_none()
+            && i.templates.otel_host.is_none()
+        {
+            return Err(bad(&i.id, "no template for any target"));
+        }
+        let index = input_index(m, n);
+        if !indices.insert(index.clone()) {
+            return Err(bad(
+                &i.id,
+                &format!("index {index} is used by another input"),
+            ));
+        }
+        let mut names = BTreeSet::new();
+        for v in &i.vars {
+            if !names.insert(v.name.as_str()) {
+                return Err(bad(&i.id, &format!("duplicate variable {}", v.name)));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The declared index of input `n`: its own, or the manifest's for the first
+/// input, or `<package>-<signal>` for a later one that names none.
+fn input_index(m: &Manifest, n: usize) -> String {
+    let i = &m.inputs[n];
+    match (&i.index, n) {
+        (Some(idx), _) => idx.clone(),
+        (None, 0) => m.index.clone(),
+        (None, _) => format!("{}-{}", m.id, i.signal),
+    }
+}
+
+/// One input as the engine sees it, whatever schema the package was written
+/// against: a 1.0/1.1 package is one `logs` input whose cluster and host
+/// templates are both `agent.conf.tmpl`, whose variables are the package's,
+/// and whose backend assets are the package's.
+#[derive(Debug, Clone)]
+pub struct Input<'a> {
+    pub id: String,
+    pub signal: String,
+    /// The declared (pre-rename) index.
+    pub index: String,
+    pub title: BTreeMap<String, String>,
+    pub description: BTreeMap<String, String>,
+    pub enabled: bool,
+    pub vars: &'a [Variable],
+    pub cluster_template: Option<&'a str>,
+    pub host_template: Option<&'a str>,
+    pub otel_host_template: Option<&'a str>,
+    pub pipeline: Option<&'a str>,
+    pub index_template: Option<&'a str>,
+    /// This input's own saved objects (ndjson); the package-level ones are
+    /// `Package::saved_objects` and belong to the first input.
+    pub saved_objects: Option<&'a str>,
+}
+
+impl Input<'_> {
+    /// The Fluent Bit template for a target, if the input is collectable there.
+    pub fn template(&self, target: TargetKind) -> Option<&str> {
+        match target {
+            TargetKind::Cluster => self.cluster_template,
+            TargetKind::Host => self.host_template,
+        }
+    }
+
+    /// The targets this input can be collected on, in display order.
+    pub fn targets(&self) -> Vec<TargetKind> {
+        let mut out = Vec::new();
+        if self.cluster_template.is_some() {
+            out.push(TargetKind::Cluster);
+        }
+        if self.host_template.is_some() || self.otel_host_template.is_some() {
+            out.push(TargetKind::Host);
+        }
+        out
+    }
 }
 
 impl Package {
@@ -214,6 +456,10 @@ impl Package {
             Some(f) => Some(asset(f)?),
             None => None,
         };
+        let mut extra = BTreeMap::new();
+        for name in input_asset_names(&manifest) {
+            extra.insert(name.clone(), asset(&name)?);
+        }
         Ok(Package {
             manifest,
             pipeline,
@@ -221,8 +467,102 @@ impl Package {
             saved_objects,
             agent_config,
             otel_config,
+            extra,
         })
     }
+
+    /// The package's inputs, uniformly: declared ones for a 1.2 package, one
+    /// implicit `logs` input otherwise. Everything that renders or accounts
+    /// goes through here, so a 1.0 package and a 1.2 package with one input
+    /// are the same thing to the engine.
+    pub fn inputs(&self) -> Vec<Input<'_>> {
+        let m = &self.manifest;
+        if m.inputs.is_empty() {
+            return vec![Input {
+                id: "logs".into(),
+                signal: signal_of(&m.index).to_string(),
+                index: m.index.clone(),
+                title: BTreeMap::new(),
+                description: BTreeMap::new(),
+                enabled: true,
+                vars: &m.variables,
+                cluster_template: Some(self.agent_config.as_str()),
+                host_template: Some(self.agent_config.as_str()),
+                otel_host_template: self.otel_config.as_deref(),
+                pipeline: self.pipeline.as_deref(),
+                index_template: self.index_template.as_deref(),
+                saved_objects: None,
+            }];
+        }
+        // An input may name the package-level assets (the 1.0 files a 1.2
+        // package keeps for its first input); those were loaded into their
+        // own fields, so look there before `extra`.
+        let file = |name: &Option<String>| -> Option<&str> {
+            let f = name.as_deref()?;
+            let a = &m.assets;
+            if Some(f) == Some(a.agent_config.as_str()) {
+                return Some(self.agent_config.as_str());
+            }
+            if a.pipeline.as_deref() == Some(f) {
+                return self.pipeline.as_deref();
+            }
+            if a.index_template.as_deref() == Some(f) {
+                return self.index_template.as_deref();
+            }
+            if a.otel_config.as_deref() == Some(f) {
+                return self.otel_config.as_deref();
+            }
+            self.extra.get(f).map(String::as_str)
+        };
+        m.inputs
+            .iter()
+            .enumerate()
+            .map(|(n, i)| Input {
+                id: i.id.clone(),
+                signal: i.signal.clone(),
+                index: input_index(m, n),
+                title: i.title.clone(),
+                description: i.description.clone(),
+                enabled: i.enabled,
+                vars: &i.vars,
+                cluster_template: file(&i.templates.cluster),
+                host_template: file(&i.templates.host),
+                otel_host_template: file(&i.templates.otel_host),
+                pipeline: file(&i.pipeline),
+                index_template: file(&i.index_template),
+                saved_objects: file(&i.saved_objects),
+            })
+            .collect()
+    }
+
+    /// One input by id.
+    pub fn input(&self, id: &str) -> Option<Input<'_>> {
+        self.inputs().into_iter().find(|i| i.id == id)
+    }
+}
+
+/// Every asset filename the inputs of a manifest name, beyond `assets`.
+/// The registry fetch and the signer enumerate assets off the manifest, so a
+/// template an input names must be reachable from here or it is never
+/// downloaded (and never covered by the digest the fetch checks).
+pub fn input_asset_names(m: &Manifest) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for i in &m.inputs {
+        for f in [
+            &i.templates.cluster,
+            &i.templates.host,
+            &i.templates.otel_host,
+            &i.pipeline,
+            &i.index_template,
+            &i.saved_objects,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            out.insert(f.clone());
+        }
+    }
+    out.into_iter().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -240,19 +580,51 @@ pub fn resolve_variables(
     manifest: &Manifest,
     given: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>> {
-    let declared: BTreeMap<&str, &Variable> = manifest
-        .variables
-        .iter()
-        .map(|v| (v.name.as_str(), v))
-        .collect();
+    resolve_declared(&manifest.variables, given, None)
+}
+
+/// [`resolve_variables`] over one input's declaration, for one target: a
+/// variable that does not apply to the target is neither required nor
+/// substituted there (its `${name}` cannot appear in that target's template,
+/// which the package author is responsible for), and a value given for it is
+/// refused by name so a host-only path does not silently vanish.
+pub fn resolve_input_variables(
+    input: &Input<'_>,
+    given: &BTreeMap<String, String>,
+    target: TargetKind,
+) -> Result<BTreeMap<String, String>> {
+    resolve_declared(input.vars, given, Some(target))
+}
+
+fn resolve_declared(
+    variables: &[Variable],
+    given: &BTreeMap<String, String>,
+    target: Option<TargetKind>,
+) -> Result<BTreeMap<String, String>> {
+    let declared: BTreeMap<&str, &Variable> =
+        variables.iter().map(|v| (v.name.as_str(), v)).collect();
     if let Some(name) = given.keys().find(|k| !declared.contains_key(k.as_str())) {
         return Err(Error::Variable {
             name: name.clone(),
             reason: "not declared by the package manifest".into(),
         });
     }
+    if let Some(t) = target {
+        if let Some(name) = given
+            .keys()
+            .find(|k| declared.get(k.as_str()).is_some_and(|v| !v.applies_to(t)))
+        {
+            return Err(Error::Variable {
+                name: name.clone(),
+                reason: format!("does not apply to the {} target", t.name()),
+            });
+        }
+    }
     let mut out = BTreeMap::new();
-    for v in &manifest.variables {
+    for v in variables {
+        if target.is_some_and(|t| !v.applies_to(t)) {
+            continue;
+        }
         if CLOSED_TOKENS.contains(&v.name.as_str()) {
             return Err(Error::Variable {
                 name: v.name.clone(),
@@ -273,6 +645,187 @@ pub fn resolve_variables(
         out.insert(v.name.clone(), value);
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Activations (schema 1.2) — which inputs, with which values
+// ---------------------------------------------------------------------------
+
+/// What an operator chose when they added an integration somewhere: the
+/// inputs turned on, each with the variable values they set. One shape for
+/// both targets — the cluster's record on the CR and a Mesh policy's
+/// activation carry exactly this — so the Data tab and the policy editor
+/// edit the same thing (ADR-073).
+///
+/// Absent inputs are OFF. An empty map is "every default-enabled input with
+/// default values", which is what a 1.0 package installed by the old
+/// `catalog_install` route means, so those records keep working unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct InputSelection {
+    #[serde(default)]
+    pub inputs: BTreeMap<String, InputValues>,
+}
+
+/// The values of one enabled input.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct InputValues {
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
+}
+
+impl InputSelection {
+    /// Every default-enabled input of the package, with no values set.
+    pub fn defaults(pkg: &Package) -> InputSelection {
+        InputSelection {
+            inputs: pkg
+                .inputs()
+                .into_iter()
+                .filter(|i| i.enabled)
+                .map(|i| (i.id, InputValues::default()))
+                .collect(),
+        }
+    }
+
+    /// The selection as rendered: an empty one means the defaults.
+    fn effective(&self, pkg: &Package) -> InputSelection {
+        if self.inputs.is_empty() {
+            InputSelection::defaults(pkg)
+        } else {
+            self.clone()
+        }
+    }
+
+    /// The inputs this selection turns on, in package order, with their
+    /// values — refusing an input the package does not declare.
+    pub fn enabled<'p>(
+        &self,
+        pkg: &'p Package,
+    ) -> Result<Vec<(Input<'p>, BTreeMap<String, String>)>> {
+        let sel = self.effective(pkg);
+        let declared = pkg.inputs();
+        if let Some(unknown) = sel
+            .inputs
+            .keys()
+            .find(|k| !declared.iter().any(|i| &i.id == *k))
+        {
+            return Err(Error::Input {
+                input: unknown.clone(),
+                reason: "not declared by the package manifest".into(),
+            });
+        }
+        Ok(declared
+            .into_iter()
+            .filter_map(|i| sel.inputs.get(&i.id).map(|v| (i, v.vars.clone())))
+            .collect())
+    }
+}
+
+/// One rendered template of one input, for one engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedInput {
+    pub input_id: String,
+    /// The artifact name this input writes to (`veloxagent-…`).
+    pub index: String,
+    pub engine: EngineKind,
+    pub body: String,
+}
+
+/// Which process a rendered body is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EngineKind {
+    FluentBit,
+    OtelCollector,
+}
+
+/// Render every enabled input of a package for one target. `vars_for` builds
+/// the closed-set values for an input's artifact name — the caller owns the
+/// deployment facts (`Vars::new`), this crate owns which index each input
+/// writes to. An enabled input with no template for the target renders
+/// nothing there and is not an error: a package may well collect its metrics
+/// on a host only.
+pub fn render_inputs(
+    pkg: &Package,
+    version: &str,
+    selection: &InputSelection,
+    target: TargetKind,
+    vars_for: &dyn Fn(&str) -> Vars,
+) -> Result<Vec<RenderedInput>> {
+    let mut out = Vec::new();
+    for (input, given) in selection.enabled(pkg)? {
+        let resolved = resolve_input_variables(&input, &given, target)?;
+        let index = agent_artifact_name(&pkg.manifest.id, &input.index, version);
+        let vars = vars_for(&index);
+        let mut push = |engine: EngineKind, tmpl: &str| -> Result<()> {
+            out.push(RenderedInput {
+                input_id: input.id.clone(),
+                index: index.clone(),
+                engine,
+                body: render(&apply_variables(tmpl, &resolved), &vars)?,
+            });
+            Ok(())
+        };
+        if let Some(t) = input.template(target) {
+            push(EngineKind::FluentBit, t)?;
+        }
+        if target == TargetKind::Host {
+            if let Some(t) = input.otel_host_template {
+                push(EngineKind::OtelCollector, t)?;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The `[SERVICE]` section every Fluent Bit configuration needs, exactly once.
+/// Flush seconds and the storage ceiling are the agent's knobs, not an
+/// integration's (`velox_policy::AgentSettings`).
+pub fn fluent_bit_service(flush_seconds: u32, storage_limit: Option<&str>) -> String {
+    let mut s = format!("[SERVICE]\n    Flush {flush_seconds}\n    Log_Level info\n");
+    if let Some(limit) = storage_limit {
+        s.push_str("    storage.path /var/lib/velox-agent/fluent-bit/storage\n");
+        s.push_str(&format!("    storage.total_limit_size {limit}\n"));
+    }
+    s
+}
+
+/// Assemble one Fluent Bit configuration out of rendered input bodies: one
+/// `[SERVICE]` section (supplied), then each body with its own `[SERVICE]`
+/// section removed. Every template shipped so far opens with a `[SERVICE]`
+/// block of its own — fine for one input, and a duplicate section the moment
+/// a policy carries two. Nothing else in a body is touched, so an input's
+/// `[INPUT]`/`[FILTER]`/`[OUTPUT]` stanzas reach the engine as the package
+/// wrote them.
+pub fn assemble_fluent_bit(service: &str, bodies: &[&str]) -> String {
+    let mut out = String::from(service.trim_end_matches('\n'));
+    out.push('\n');
+    for b in bodies {
+        let stripped = strip_service_section(b);
+        let stripped = stripped.trim_matches('\n');
+        if stripped.is_empty() {
+            continue;
+        }
+        out.push_str(stripped);
+        out.push('\n');
+    }
+    out
+}
+
+/// A classic-format body without its `[SERVICE]` section(s). A section runs
+/// from its `[NAME]` line to the line before the next `[NAME]` line.
+pub fn strip_service_section(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut skipping = false;
+    for line in body.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            skipping = t.eq_ignore_ascii_case("[SERVICE]");
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn yaml_scalar(name: &str, v: &serde_yaml::Value) -> Result<String> {
@@ -508,12 +1061,12 @@ pub type ResourceKey = (ResourceKind, String);
 /// describes everything the collector account may touch.
 pub const AGENT_ARTIFACT_PREFIX: &str = "veloxagent";
 
-/// The signal words an index name may end in. A closed list on purpose: the
-/// alternative is deriving the signal by stripping the package id, which
-/// breaks the moment an id and its index do not share a prefix
-/// (`k8s-events`/`k8s-events`), and would put an empty segment in the middle
-/// of a name.
-const SIGNALS: [&str; 5] = ["logs", "metrics", "traces", "events", "audit"];
+/// The signal words an index name may end in — and the only values a schema
+/// 1.2 input's `signal` may take. A closed list on purpose: the alternative
+/// is deriving the signal by stripping the package id, which breaks the
+/// moment an id and its index do not share a prefix (`k8s-events`/
+/// `k8s-events`), and would put an empty segment in the middle of a name.
+pub const SIGNALS: [&str; 5] = ["logs", "metrics", "traces", "events", "audit"];
 
 /// The signal an index name denotes — its last `-` segment when that is a word
 /// we know, and `logs` otherwise, because every integration shipped so far is
@@ -597,19 +1150,48 @@ fn agent_saved_object_id(id: &str, package_id: &str, name: &str) -> String {
 }
 
 /// Work out every rename for one package at one version.
+///
+/// `name` is the first input's artifact name — what the saved objects are
+/// prefixed with. Every input's declared index maps to its own name, so a
+/// metrics input's template and pipeline land under
+/// `veloxagent-nginx-metrics-v1` while the logs input's keep
+/// `veloxagent-nginx-logs-v1`, and the dashboard that reads both follows both.
 pub fn agent_renaming(pkg: &Package, version: &str) -> Result<AgentRenaming> {
+    let inputs = pkg.inputs();
     let name = agent_artifact_name(&pkg.manifest.id, &pkg.manifest.index, version);
     let mut map = BTreeMap::new();
-    map.insert(pkg.manifest.index.clone(), name.clone());
-    for o in parse_saved_objects(&pkg.saved_objects)? {
-        if o.id == pkg.manifest.index {
-            // The index pattern is named after the index; already mapped.
+    for i in &inputs {
+        map.insert(
+            i.index.clone(),
+            agent_artifact_name(&pkg.manifest.id, &i.index, version),
+        );
+    }
+    for o in all_saved_objects(pkg)? {
+        if map.contains_key(&o.id) {
+            // An index pattern named after an index is already mapped.
             continue;
         }
         let renamed = agent_saved_object_id(&o.id, &pkg.manifest.id, &name);
         map.insert(o.id, renamed);
     }
     Ok(AgentRenaming { name, map })
+}
+
+/// Every saved object the package ships: the package-level ndjson and each
+/// input's own, in that order.
+pub fn all_saved_objects(pkg: &Package) -> Result<Vec<SavedObj>> {
+    let mut out = parse_saved_objects(&pkg.saved_objects)?;
+    for i in pkg.inputs() {
+        if let Some(nd) = i.saved_objects {
+            out.extend(parse_saved_objects(nd)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The artifact name of one input at one version.
+pub fn input_artifact_name(pkg: &Package, input: &Input<'_>, version: &str) -> String {
+    agent_artifact_name(&pkg.manifest.id, &input.index, version)
 }
 
 /// One string, renamed if it names something we are renaming.
@@ -668,8 +1250,20 @@ fn rename_in_value(v: &mut serde_json::Value, map: &BTreeMap<String, String>) {
 /// the new index name, and `index.default_pipeline` follows the pipeline —
 /// which is renamed too, and whose id is not in the map because the package's
 /// pipeline id is a bare word (`nginx`) that would match prose and field
-/// values if it were renamed by string equality.
+/// values if it were renamed by string equality. `pipeline_name` is the
+/// artifact name of the input the template belongs to (the package's first
+/// input's for a 1.0 package: [`AgentRenaming::name`]).
 pub fn agent_index_template(body: &str, r: &AgentRenaming) -> Result<String> {
+    agent_index_template_for(body, r, &r.name)
+}
+
+/// [`agent_index_template`] for one input's template, pointing its default
+/// pipeline at that input's artifact name.
+pub fn agent_index_template_for(
+    body: &str,
+    r: &AgentRenaming,
+    pipeline_name: &str,
+) -> Result<String> {
     let mut json: serde_json::Value =
         serde_json::from_str(body).map_err(|e| Error::SavedObjects {
             line: 0,
@@ -684,7 +1278,7 @@ pub fn agent_index_template(body: &str, r: &AgentRenaming) -> Result<String> {
         if settings.contains_key("index.default_pipeline") {
             settings.insert(
                 "index.default_pipeline".to_string(),
-                serde_json::Value::String(r.name.clone()),
+                serde_json::Value::String(pipeline_name.to_string()),
             );
         }
     }
@@ -726,13 +1320,16 @@ pub fn agent_saved_objects(ndjson: &str, r: &AgentRenaming) -> Result<String> {
 pub fn agent_created_resources(pkg: &Package, version: &str) -> Result<BTreeSet<ResourceKey>> {
     let r = agent_renaming(pkg, version)?;
     let mut set = BTreeSet::new();
-    if pkg.pipeline.is_some() {
-        set.insert((ResourceKind::IngestPipeline, r.name.clone()));
+    for i in pkg.inputs() {
+        let name = input_artifact_name(pkg, &i, version);
+        if i.pipeline.is_some() {
+            set.insert((ResourceKind::IngestPipeline, name.clone()));
+        }
+        if i.index_template.is_some() {
+            set.insert((ResourceKind::IndexTemplate, name));
+        }
     }
-    if pkg.index_template.is_some() {
-        set.insert((ResourceKind::IndexTemplate, r.name.clone()));
-    }
-    for o in parse_saved_objects(&pkg.saved_objects)? {
+    for o in all_saved_objects(pkg)? {
         let id = r.map.get(&o.id).cloned().unwrap_or(o.id);
         if o.kind == "index-pattern" {
             set.insert((ResourceKind::IndexPattern, id));
@@ -783,13 +1380,22 @@ pub fn agent_artifact_pattern(name: &str) -> String {
 /// its own, see [`agent_created_resources`].
 pub fn created_resources(pkg: &Package) -> Result<BTreeSet<ResourceKey>> {
     let mut set = BTreeSet::new();
-    if pkg.pipeline.is_some() {
-        set.insert((ResourceKind::IngestPipeline, pkg.manifest.id.clone()));
+    for (n, i) in pkg.inputs().into_iter().enumerate() {
+        // The declared ids: a 1.0 package's pipeline is its bare id and its
+        // template its index; a later input's are named after its index.
+        if i.pipeline.is_some() {
+            let id = if n == 0 {
+                pkg.manifest.id.clone()
+            } else {
+                i.index.clone()
+            };
+            set.insert((ResourceKind::IngestPipeline, id));
+        }
+        if i.index_template.is_some() {
+            set.insert((ResourceKind::IndexTemplate, i.index.clone()));
+        }
     }
-    if pkg.index_template.is_some() {
-        set.insert((ResourceKind::IndexTemplate, pkg.manifest.index.clone()));
-    }
-    for o in parse_saved_objects(&pkg.saved_objects)? {
+    for o in all_saved_objects(pkg)? {
         if o.kind == "index-pattern" {
             set.insert((ResourceKind::IndexPattern, o.id));
         } else {
@@ -802,10 +1408,10 @@ pub fn created_resources(pkg: &Package) -> Result<BTreeSet<ResourceKey>> {
 /// Everything the manifest's `teardown` will remove.
 pub fn teardown_resources(t: &Teardown) -> BTreeSet<ResourceKey> {
     let mut set = BTreeSet::new();
-    if let Some(id) = &t.ingest_pipeline {
+    for id in t.ingest_pipeline.iter().chain(t.ingest_pipelines.iter()) {
         set.insert((ResourceKind::IngestPipeline, id.clone()));
     }
-    if let Some(id) = &t.index_template {
+    for id in t.index_template.iter().chain(t.index_templates.iter()) {
         set.insert((ResourceKind::IndexTemplate, id.clone()));
     }
     set.insert((ResourceKind::IndexPattern, t.index_pattern.clone()));
@@ -937,6 +1543,7 @@ mod tests {
             .join("\n"),
             agent_config: "[OUTPUT]\n    Index {index}\n".into(),
             otel_config: None,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -1210,9 +1817,12 @@ mod tests {
                     otel_config: None,
                 },
                 variables: vec![],
+                inputs: vec![],
                 teardown: Teardown {
                     ingest_pipeline: Some("demo".into()),
                     index_template: None,
+                    ingest_pipelines: vec![],
+                    index_templates: vec![],
                     index_pattern: "demo-logs".into(),
                     saved_objects: vec!["velox-demo".into()],
                     index_patterns: vec![],
@@ -1225,6 +1835,7 @@ mod tests {
             saved_objects: saved_objects.into(),
             agent_config: "[OUTPUT]\n    Index {index}\n".into(),
             otel_config: None,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -1355,6 +1966,252 @@ mod tests {
         assert!(m.teardown.ism_policies.is_empty());
         let err = parse_manifest("id: [\n").unwrap_err();
         assert!(matches!(err, Error::Manifest(_)));
+    }
+
+    // ── schema 1.2: inputs (ADR-073) ──────────────────────────────────
+
+    /// A package shaped like nginx 1.2: access logs collectable in the cluster
+    /// and on a host (with a host-only path), and status metrics on a host
+    /// only, off by default, with their own index, pipeline and template.
+    fn nginx_12() -> Package {
+        let manifest = parse_manifest(
+            "schema_version: \"1.2\"\nid: nginx\nindex: nginx-logs\ndashboard: velox-nginx-overview\n\
+             assets:\n  agent_config: agent.conf.tmpl\n  pipeline: pipeline.json\n  \
+             index_template: index-template.json\n  saved_objects: saved-objects.ndjson\n\
+             inputs:\n\
+             \x20 - id: logs\n    signal: logs\n    title: {en: Access logs}\n    templates: {cluster: agent.conf.tmpl, host: agent.host.conf.tmpl}\n    pipeline: pipeline.json\n    index_template: index-template.json\n    vars:\n      - {name: access_log, type: string, description: {en: path}, default: /var/log/nginx/access.log, targets: [host]}\n\
+             \x20 - id: metrics\n    signal: metrics\n    enabled: false\n    templates: {host: agent.metrics.host.conf.tmpl}\n    pipeline: pipeline-metrics.json\n    index_template: index-template-metrics.json\n    saved_objects: saved-objects-metrics.ndjson\n    vars:\n      - {name: status_port, type: integer, description: {en: port}, default: 80}\n\
+             teardown:\n  ingest_pipeline: nginx\n  index_template: nginx-logs\n  index_pattern: nginx-logs\n  saved_objects: [velox-nginx-overview]\n",
+        )
+        .expect("1.2 manifest");
+        let extra = BTreeMap::from([
+            ("agent.host.conf.tmpl".to_string(), "[SERVICE]\n    Flush 1\n[INPUT]\n    Name tail\n    Path ${access_log}\n[OUTPUT]\n    Index {index}\n".to_string()),
+            ("agent.metrics.host.conf.tmpl".to_string(), "[SERVICE]\n    Flush 1\n[INPUT]\n    Name exec\n    Command curl -s http://127.0.0.1:${status_port}/status\n[OUTPUT]\n    Index {index}\n".to_string()),
+            ("pipeline-metrics.json".to_string(), "{}".to_string()),
+            ("saved-objects-metrics.ndjson".to_string(), "{\"type\":\"index-pattern\",\"id\":\"nginx-metrics\",\"attributes\":{\"title\":\"nginx-metrics*\"}}\n".to_string()),
+            ("index-template-metrics.json".to_string(), r#"{"index_patterns":["nginx-metrics*"],"template":{"settings":{"index.default_pipeline":"nginx-metrics"}}}"#.to_string()),
+        ]);
+        Package {
+            manifest,
+            pipeline: Some("{}".into()),
+            index_template: Some(r#"{"index_patterns":["nginx-logs*"],"template":{"settings":{"index.default_pipeline":"nginx"}}}"#.into()),
+            saved_objects: "{\"type\":\"index-pattern\",\"id\":\"nginx-logs\"}\n{\"type\":\"dashboard\",\"id\":\"velox-nginx-overview\"}\n".into(),
+            agent_config: "[SERVICE]\n    Flush 5\n[INPUT]\n    Name tail\n    Path /var/log/containers/*nginx*.log\n[OUTPUT]\n    Index {index}\n".into(),
+            otel_config: None,
+            extra,
+        }
+    }
+
+    fn vars_for(index: &str) -> Vars {
+        Vars::new("logs-ab12", "ns", index, "nginx", "u", "p")
+    }
+
+    /// A 1.0/1.1 package is one `logs` input on both targets, with the
+    /// package's own template, variables and backend assets — so everything
+    /// written against `inputs()` handles the twelve shipped packages as-is.
+    #[test]
+    fn a_1_0_package_is_one_logs_input_on_both_targets() {
+        let pkg = nginx_package();
+        let inputs = pkg.inputs();
+        assert_eq!(inputs.len(), 1);
+        let i = &inputs[0];
+        assert_eq!(i.id, "logs");
+        assert_eq!(i.signal, "logs");
+        assert_eq!(i.index, "nginx-logs");
+        assert!(i.enabled);
+        assert_eq!(i.targets(), vec![TargetKind::Cluster, TargetKind::Host]);
+        assert_eq!(
+            i.template(TargetKind::Cluster),
+            Some(pkg.agent_config.as_str())
+        );
+        assert_eq!(
+            i.template(TargetKind::Host),
+            Some(pkg.agent_config.as_str())
+        );
+        assert!(i.pipeline.is_some() && i.index_template.is_some());
+    }
+
+    #[test]
+    fn a_1_2_package_declares_its_inputs() {
+        let pkg = nginx_12();
+        let inputs = pkg.inputs();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(
+            inputs[0].index, "nginx-logs",
+            "the first input takes the manifest's index"
+        );
+        assert_eq!(
+            inputs[1].index, "nginx-metrics",
+            "a later input defaults to <id>-<signal>"
+        );
+        assert_eq!(
+            inputs[0].targets(),
+            vec![TargetKind::Cluster, TargetKind::Host]
+        );
+        assert_eq!(inputs[1].targets(), vec![TargetKind::Host]);
+        assert!(!inputs[1].enabled);
+        assert_eq!(inputs[1].pipeline, Some("{}"));
+        // Every file an input names is an asset the fetch must download.
+        assert_eq!(
+            input_asset_names(&pkg.manifest),
+            vec![
+                "agent.conf.tmpl",
+                "agent.host.conf.tmpl",
+                "agent.metrics.host.conf.tmpl",
+                "index-template-metrics.json",
+                "index-template.json",
+                "pipeline-metrics.json",
+                "pipeline.json",
+                "saved-objects-metrics.ndjson",
+            ]
+        );
+    }
+
+    #[test]
+    fn inputs_are_checked_at_parse() {
+        let base = "id: a\nindex: a-logs\ndashboard: d\nassets:\n  saved_objects: s\n  agent_config: t\nteardown:\n  index_pattern: a-logs\n  saved_objects: [d]\n";
+        let bad = |inputs: &str| {
+            parse_manifest(&format!("{base}{inputs}"))
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(
+            bad("inputs:\n  - {id: logs, signal: pings, templates: {host: t}}\n")
+                .contains("signal must be one of")
+        );
+        assert!(bad("inputs:\n  - {id: logs, signal: logs, templates: {host: t}}\n  - {id: logs, signal: metrics, templates: {host: t}}\n").contains("duplicate input id"));
+        assert!(bad("inputs:\n  - {id: logs, signal: logs}\n").contains("no template"));
+        assert!(
+            bad("inputs:\n  - {id: Logs, signal: logs, templates: {host: t}}\n").contains("[a-z]")
+        );
+        assert!(bad("variables:\n  - {name: x, type: string, description: {en: x}}\ninputs:\n  - {id: logs, signal: logs, templates: {host: t}}\n").contains("not at the top level"));
+        assert!(bad("inputs:\n  - {id: a, signal: logs, index: same, templates: {host: t}}\n  - {id: b, signal: metrics, index: same, templates: {host: t}}\n").contains("used by another input"));
+    }
+
+    /// Rendering is per input and per target: the cluster gets the logs
+    /// input's cluster template only; a host gets every enabled input, each
+    /// writing to its own `veloxagent-…` index.
+    #[test]
+    fn render_inputs_uses_each_inputs_index_and_target() {
+        let pkg = nginx_12();
+        let defaults = InputSelection::defaults(&pkg);
+        assert_eq!(defaults.inputs.keys().collect::<Vec<_>>(), vec!["logs"]);
+
+        let cluster =
+            render_inputs(&pkg, "1.0.0", &defaults, TargetKind::Cluster, &vars_for).unwrap();
+        assert_eq!(cluster.len(), 1);
+        assert_eq!(cluster[0].input_id, "logs");
+        assert_eq!(cluster[0].index, "veloxagent-nginx-logs-v1");
+        assert!(cluster[0].body.contains("/var/log/containers/*nginx*.log"));
+        assert!(cluster[0].body.contains("Index veloxagent-nginx-logs-v1"));
+
+        let mut both = InputSelection::default();
+        both.inputs.insert(
+            "logs".into(),
+            InputValues {
+                vars: BTreeMap::from([("access_log".to_string(), "/srv/nginx/a.log".to_string())]),
+            },
+        );
+        both.inputs.insert(
+            "metrics".into(),
+            InputValues {
+                vars: BTreeMap::from([("status_port".to_string(), "8080".to_string())]),
+            },
+        );
+        let host = render_inputs(&pkg, "1.0.0", &both, TargetKind::Host, &vars_for).unwrap();
+        assert_eq!(host.len(), 2);
+        assert!(host[0].body.contains("Path /srv/nginx/a.log"));
+        assert_eq!(host[1].index, "veloxagent-nginx-metrics-v1");
+        assert!(host[1].body.contains(":8080/status"));
+        assert!(host[1].body.contains("Index veloxagent-nginx-metrics-v1"));
+
+        // A host-only variable given for the cluster target is refused by
+        // name rather than silently dropped.
+        let err = render_inputs(&pkg, "1.0.0", &both, TargetKind::Cluster, &vars_for).unwrap_err();
+        assert!(
+            err.to_string().contains("access_log") && err.to_string().contains("cluster"),
+            "{err}"
+        );
+
+        // An input the package does not declare is refused.
+        let mut unknown = InputSelection::default();
+        unknown
+            .inputs
+            .insert("traces".into(), InputValues::default());
+        assert!(
+            render_inputs(&pkg, "1.0.0", &unknown, TargetKind::Host, &vars_for)
+                .unwrap_err()
+                .to_string()
+                .contains("traces")
+        );
+    }
+
+    /// One `[SERVICE]` section per configuration, whatever the templates
+    /// carry: a policy with two inputs must not hand Fluent Bit two.
+    #[test]
+    fn assembly_keeps_exactly_one_service_section() {
+        let a = "[SERVICE]\n    Flush 5\n    Log_Level info\n[INPUT]\n    Name tail\n[OUTPUT]\n    Name opensearch\n";
+        let b = "[SERVICE]\n    Flush 1\n[INPUT]\n    Name exec\n";
+        let out = assemble_fluent_bit(&fluent_bit_service(5, Some("1G")), &[a, b]);
+        assert_eq!(out.matches("[SERVICE]").count(), 1, "{out}");
+        assert!(out.starts_with("[SERVICE]\n    Flush 5\n"));
+        assert!(out.contains("storage.total_limit_size 1G"));
+        assert!(
+            out.contains(
+                "[INPUT]\n    Name tail\n[OUTPUT]\n    Name opensearch\n[INPUT]\n    Name exec\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("Flush 1"));
+        // A body with no SERVICE section passes through whole.
+        assert_eq!(
+            strip_service_section("[INPUT]\n    Name x\n"),
+            "[INPUT]\n    Name x\n"
+        );
+    }
+
+    /// Every input's artifacts are renamed and accounted under its own name;
+    /// a template's default pipeline follows its own input, not the first.
+    #[test]
+    fn renaming_and_accounting_cover_every_input() {
+        let pkg = nginx_12();
+        let r = agent_renaming(&pkg, "1.0.0").unwrap();
+        assert_eq!(r.name, "veloxagent-nginx-logs-v1");
+        assert_eq!(r.map["nginx-metrics"], "veloxagent-nginx-metrics-v1");
+        let set = agent_created_resources(&pkg, "1.0.0").unwrap();
+        assert!(set.contains(&(
+            ResourceKind::IngestPipeline,
+            "veloxagent-nginx-metrics-v1".into()
+        )));
+        assert!(set.contains(&(
+            ResourceKind::IndexTemplate,
+            "veloxagent-nginx-metrics-v1".into()
+        )));
+        assert!(set.contains(&(
+            ResourceKind::IndexPattern,
+            "veloxagent-nginx-metrics-v1".into()
+        )));
+        assert!(set.contains(&(
+            ResourceKind::SavedObject,
+            "veloxagent-nginx-logs-v1-overview".into()
+        )));
+        let metrics = pkg.input("metrics").unwrap();
+        let tmpl = agent_index_template_for(
+            metrics.index_template.unwrap(),
+            &r,
+            "veloxagent-nginx-metrics-v1",
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&tmpl).unwrap();
+        assert_eq!(json["index_patterns"][0], "veloxagent-nginx-metrics-v1*");
+        assert_eq!(
+            json["template"]["settings"]["index.default_pipeline"],
+            "veloxagent-nginx-metrics-v1"
+        );
+        // The declared (pre-rename) set names the metrics pipeline after its index.
+        let declared = created_resources(&pkg).unwrap();
+        assert!(declared.contains(&(ResourceKind::IngestPipeline, "nginx".into())));
+        assert!(declared.contains(&(ResourceKind::IngestPipeline, "nginx-metrics".into())));
     }
 
     /// The wire names are fixed: a variant rename must not change an API

@@ -172,7 +172,15 @@ pub fn recipe_index(recipe: &str) -> &'static str {
 /// sets of names and two logins; one cannot drift.
 pub async fn apply(deployment: &Deployment, recipe: &str) -> Result<()> {
     let pkg = bootstrap_package(recipe)?;
-    crate::integrations::apply_package(deployment, &pkg, crate::catalog::BOOTSTRAP_VERSION).await
+    // A built-in recipe has one input and no variables: the defaults ARE the
+    // package.
+    crate::integrations::apply_package(
+        deployment,
+        &pkg,
+        crate::catalog::BOOTSTRAP_VERSION,
+        &velox_integrations::InputSelection::default(),
+    )
+    .await
 }
 
 /// The registry package a built-in recipe is, assembled from the in-binary
@@ -218,6 +226,7 @@ pub(crate) fn bootstrap_package(recipe: &str) -> Result<crate::integrations::Pac
         saved_objects: ndjson.join("\n") + "\n",
         agent_config: crate::agents::fluent_bit_conf_template(recipe),
         otel_config: None,
+        extra: std::collections::BTreeMap::new(),
     })
 }
 
@@ -1387,8 +1396,13 @@ pub(crate) async fn ensure_tenant(deployment: &Deployment) {
 /// (the log documents) is intentionally left; only the config objects go.
 pub async fn disable(deployment: &Deployment, recipe: &str) -> Result<()> {
     let pkg = bootstrap_package(recipe)?;
-    crate::integrations::uninstall_package(deployment, &pkg, crate::catalog::BOOTSTRAP_VERSION)
-        .await
+    crate::integrations::uninstall_package(
+        deployment,
+        &pkg,
+        crate::catalog::BOOTSTRAP_VERSION,
+        true,
+    )
+    .await
 }
 
 /// Build a recipe's teardown inventory from its own in-binary definitions: the
@@ -1421,6 +1435,8 @@ pub(crate) fn recipe_teardown(
     let teardown = crate::integrations::Teardown {
         ingest_pipeline: has_os_config.then(|| recipe.to_string()),
         index_template: has_os_config.then(|| index.clone()),
+        ingest_pipelines: Vec::new(),
+        index_templates: Vec::new(),
         index_pattern: index,
         saved_objects: saved,
         // A recipe creates exactly one index-pattern and no ISM policy or

@@ -266,9 +266,16 @@ fn the_bootstrap_package_is_the_registry_package() {
         let boot = recipes::bootstrap_package(recipe).expect(recipe);
         assert_eq!(boot.manifest.id, reg.manifest.id, "{recipe}: id");
         assert_eq!(boot.manifest.index, reg.manifest.index, "{recipe}: index");
+        // The recipe IS the registry package's first input collected in the
+        // cluster (ADR-073): a schema 1.2 package may add a host template and
+        // further inputs the recipe never had, but its first input's cluster
+        // template, pipeline and index template are the recipe's, byte for
+        // byte.
+        let first = reg.inputs().into_iter().next().expect(recipe);
         assert_eq!(
-            boot.agent_config, reg.agent_config,
-            "{recipe}: agent.conf.tmpl"
+            Some(boot.agent_config.as_str()),
+            first.template(velox_integrations::TargetKind::Cluster),
+            "{recipe}: the first input's cluster template is the recipe's agent.conf.tmpl"
         );
         assert_eq!(
             boot.saved_objects, reg.saved_objects,
@@ -276,24 +283,34 @@ fn the_bootstrap_package_is_the_registry_package() {
         );
         assert_eq!(
             json(&boot.pipeline),
-            json(&reg.pipeline),
+            json(&first.pipeline.map(str::to_string)),
             "{recipe}: pipeline"
         );
         assert_eq!(
             json(&boot.index_template),
-            json(&reg.index_template),
+            json(&first.index_template.map(str::to_string)),
             "{recipe}: index template"
         );
-        assert_eq!(
-            integrations::teardown_resources(&boot.manifest.teardown),
-            integrations::teardown_resources(&reg.manifest.teardown),
-            "{recipe}: teardown"
+        // Everything the recipe tears down and creates, the package does too;
+        // a 1.2 package may have more (its other inputs'), never less.
+        let boot_teardown = integrations::teardown_resources(&boot.manifest.teardown);
+        let reg_teardown = integrations::teardown_resources(&reg.manifest.teardown);
+        assert!(
+            boot_teardown.is_subset(&reg_teardown),
+            "{recipe}: teardown lost {:?}",
+            boot_teardown.difference(&reg_teardown).collect::<Vec<_>>()
         );
-        assert_eq!(
-            velox_integrations::agent_created_resources(&boot, "1.0.0").unwrap(),
-            velox_integrations::agent_created_resources(&reg, "1.0.0").unwrap(),
-            "{recipe}: renamed inventory"
+        let boot_created = velox_integrations::agent_created_resources(&boot, "1.0.0").unwrap();
+        let reg_created = velox_integrations::agent_created_resources(&reg, "1.0.0").unwrap();
+        assert!(
+            boot_created.is_subset(&reg_created),
+            "{recipe}: renamed inventory lost {:?}",
+            boot_created.difference(&reg_created).collect::<Vec<_>>()
         );
+        if reg.manifest.inputs.is_empty() {
+            assert_eq!(boot_teardown, reg_teardown, "{recipe}: teardown");
+            assert_eq!(boot_created, reg_created, "{recipe}: renamed inventory");
+        }
     }
 }
 

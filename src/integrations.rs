@@ -63,9 +63,10 @@ pub fn vars(
 // core's, used for the writes below and never handed to a collector.
 // ---------------------------------------------------------------------------
 
-/// Install the backend half of a package — ingest pipeline, index template,
-/// index pattern, dashboards — under the renamed ids, and return the renaming
-/// so the caller's collector config points at the same index.
+/// Install the backend half of a package — ingest pipeline and index
+/// template per enabled input, index patterns, dashboards — under the renamed
+/// ids, and return the renaming so the caller's collector config points at
+/// the same indices.
 ///
 /// Every asset is rendered (and therefore interpolation-checked) before the
 /// first write: a foreign `{token}` aborts the whole install with nothing
@@ -74,6 +75,7 @@ async fn install_backend(
     deployment: &Deployment,
     pkg: &Package,
     version: &str,
+    selection: &velox_integrations::InputSelection,
 ) -> Result<velox_integrations::AgentRenaming> {
     let renaming = velox_integrations::agent_renaming(pkg, version)?;
     // Backend assets carry no credential tokens that reach a collector — the
@@ -81,49 +83,70 @@ async fn install_backend(
     // closed set is rendered in full so a package cannot smuggle a token past
     // the check by putting it in a file the collector never reads.
     let (u, p) = crate::k8s::admin_creds(deployment).await;
-    let vars = vars(deployment, &renaming.name, &pkg.manifest.id, &u, &p);
 
-    let pipeline = match &pkg.pipeline {
-        Some(s) => Some(render(s, &vars)?),
-        None => None,
-    };
-    let index_template = match &pkg.index_template {
-        Some(s) => Some(velox_integrations::agent_index_template(
-            &render(s, &vars)?,
-            &renaming,
-        )?),
-        None => None,
-    };
-    let saved_objects =
-        velox_integrations::agent_saved_objects(&render(&pkg.saved_objects, &vars)?, &renaming)?;
+    // Per enabled input: (artifact name, pipeline body, template body).
+    let mut per_input = Vec::new();
+    for (input, _) in selection.enabled(pkg)? {
+        let name = velox_integrations::input_artifact_name(pkg, &input, version);
+        let vars = vars(deployment, &name, &pkg.manifest.id, &u, &p);
+        let pipeline = match input.pipeline {
+            Some(s) => Some(render(s, &vars)?),
+            None => None,
+        };
+        let index_template = match input.index_template {
+            Some(s) => Some(velox_integrations::agent_index_template_for(
+                &render(s, &vars)?,
+                &renaming,
+                &name,
+            )?),
+            None => None,
+        };
+        per_input.push((name, pipeline, index_template));
+    }
+    let base = vars(deployment, &renaming.name, &pkg.manifest.id, &u, &p);
+    let mut saved_objects =
+        velox_integrations::agent_saved_objects(&render(&pkg.saved_objects, &base)?, &renaming)?;
+    // Each enabled input's own saved objects, rendered with that input's
+    // index as `{index}`.
+    for (input, _) in selection.enabled(pkg)? {
+        if let Some(nd) = input.saved_objects {
+            let name = velox_integrations::input_artifact_name(pkg, &input, version);
+            let v = vars(deployment, &name, &pkg.manifest.id, &u, &p);
+            saved_objects.push_str(&velox_integrations::agent_saved_objects(
+                &render(nd, &v)?,
+                &renaming,
+            )?);
+        }
+    }
 
     let base = crate::recipes::os_base(deployment);
     let c = crate::recipes::http()?;
 
-    if let Some(body) = &pipeline {
-        let json: serde_json::Value =
-            serde_json::from_str(body).context("pipeline.json is not valid JSON")?;
-        c.put(format!("{base}/_ingest/pipeline/{}", renaming.name))
-            .basic_auth(&u, Some(&p))
-            .json(&json)
-            .send()
-            .await
-            .context("creating ingest pipeline")?
-            .error_for_status()
-            .context("ingest pipeline rejected")?;
-    }
-
-    if let Some(body) = &index_template {
-        let json: serde_json::Value =
-            serde_json::from_str(body).context("index-template.json is not valid JSON")?;
-        c.put(format!("{base}/_index_template/{}", renaming.name))
-            .basic_auth(&u, Some(&p))
-            .json(&json)
-            .send()
-            .await
-            .context("creating index template")?
-            .error_for_status()
-            .context("index template rejected")?;
+    for (name, pipeline, index_template) in &per_input {
+        if let Some(body) = pipeline {
+            let json: serde_json::Value =
+                serde_json::from_str(body).context("pipeline.json is not valid JSON")?;
+            c.put(format!("{base}/_ingest/pipeline/{name}"))
+                .basic_auth(&u, Some(&p))
+                .json(&json)
+                .send()
+                .await
+                .context("creating ingest pipeline")?
+                .error_for_status()
+                .context("ingest pipeline rejected")?;
+        }
+        if let Some(body) = index_template {
+            let json: serde_json::Value =
+                serde_json::from_str(body).context("index-template.json is not valid JSON")?;
+            c.put(format!("{base}/_index_template/{name}"))
+                .basic_auth(&u, Some(&p))
+                .json(&json)
+                .send()
+                .await
+                .context("creating index template")?
+                .error_for_status()
+                .context("index template rejected")?;
+        }
     }
 
     // Saved objects into the deployment's own Dashboards tenant (best-effort,
@@ -150,50 +173,84 @@ async fn install_backend(
     Ok(renaming)
 }
 
-/// The collector config a package renders to on the in-cluster path: the
-/// renamed index, `veloxagent-user`, and the password as the `${VAR}` reference
-/// the pod resolves from its Secret — the value is never rendered into text
-/// that could reach a ConfigMap.
+/// The collector config a package renders to on the in-cluster path: every
+/// enabled input's cluster template, assembled under one `[SERVICE]`, each
+/// writing to its renamed index as `veloxagent-user`, with the password as
+/// the `${VAR}` reference the pod resolves from its Secret — the value is
+/// never rendered into text that could reach a ConfigMap.
+///
+/// `None` when no enabled input collects in the cluster (a package whose
+/// inputs are host-only): nothing to deploy, and not an error.
 pub(crate) fn collector_config(
     deployment: &Deployment,
     pkg: &Package,
     version: &str,
-) -> Result<String> {
-    let name =
-        velox_integrations::agent_artifact_name(&pkg.manifest.id, &pkg.manifest.index, version);
-    let vars = vars(
-        deployment,
-        &name,
-        &pkg.manifest.id,
-        crate::os_agent_user::AGENT_USER,
-        crate::agents::PASSWORD_REF,
-    );
-    // Schema 1.1 variables on the DaemonSet path: defaults only (there is no
-    // policy here); a `required` variable without a default refuses the
-    // install by name, before anything is written.
-    let declared = resolve_variables(&pkg.manifest, &BTreeMap::new())?;
-    Ok(render(
-        &apply_variables(&pkg.agent_config, &declared),
-        &vars,
-    )?)
+    selection: &velox_integrations::InputSelection,
+) -> Result<Option<String>> {
+    let vars_for = |index: &str| {
+        vars(
+            deployment,
+            index,
+            &pkg.manifest.id,
+            crate::os_agent_user::AGENT_USER,
+            crate::agents::PASSWORD_REF,
+        )
+    };
+    // Variables: the operator's values for this cluster, defaults for the
+    // rest; a `required` variable with neither refuses the install by name,
+    // before anything is written.
+    let rendered = velox_integrations::render_inputs(
+        pkg,
+        version,
+        selection,
+        velox_integrations::TargetKind::Cluster,
+        &vars_for,
+    )?;
+    let bodies: Vec<&str> = rendered
+        .iter()
+        .filter(|r| r.engine == velox_integrations::EngineKind::FluentBit)
+        .map(|r| r.body.as_str())
+        .collect();
+    if bodies.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(velox_integrations::assemble_fluent_bit(
+        &velox_integrations::fluent_bit_service(5, None),
+        &bodies,
+    )))
 }
 
 /// Install a package end-to-end on the in-cluster path: the backend half under
 /// the `veloxagent-` names, then the collector, writing with `veloxagent-user`.
-pub async fn apply_package(deployment: &Deployment, pkg: &Package, version: &str) -> Result<()> {
+/// `selection` is what the operator turned on for this cluster (ADR-073).
+pub async fn apply_package(
+    deployment: &Deployment,
+    pkg: &Package,
+    version: &str,
+    selection: &velox_integrations::InputSelection,
+) -> Result<()> {
     // The collector config first, so a package that cannot render fails
     // before the backend half is touched.
-    let agent_config = collector_config(deployment, pkg, version)?;
+    let agent_config = collector_config(deployment, pkg, version, selection)?;
     // The account before the collector that logs in with it.
     crate::os_agent_user::ensure(deployment).await?;
-    install_backend(deployment, pkg, version).await?;
+    install_backend(deployment, pkg, version, selection).await?;
 
-    // A config that tails host files uses the Fluent Bit `tail` input
-    // (DaemonSet); an API-server watcher (`kubernetes_events`) does not
-    // (single-replica Deployment) — read off the config.
-    let tails_logs = agent_config.contains("Name tail");
-    crate::agents::deploy_rendered_agent(deployment, &pkg.manifest.id, &agent_config, tails_logs)
-        .await?;
+    match agent_config {
+        Some(conf) => {
+            // A config that tails host files uses the Fluent Bit `tail` input
+            // (DaemonSet); an API-server watcher (`kubernetes_events`) does
+            // not (single-replica Deployment) — read off the config.
+            let tails_logs = conf.contains("Name tail");
+            crate::agents::deploy_rendered_agent(deployment, &pkg.manifest.id, &conf, tails_logs)
+                .await?;
+        }
+        // Nothing of this selection collects in the cluster: a collector left
+        // from an earlier selection would keep collecting what was turned off.
+        None => {
+            let _ = crate::agents::remove_agent(deployment, &pkg.manifest.id).await;
+        }
+    }
     Ok(())
 }
 
@@ -205,30 +262,51 @@ pub async fn apply_package_for_agent(
     deployment: &Deployment,
     pkg: &Package,
     version: &str,
+    selection: &velox_integrations::InputSelection,
 ) -> Result<()> {
-    install_backend(deployment, pkg, version).await.map(|_| ())
+    install_backend(deployment, pkg, version, selection)
+        .await
+        .map(|_| ())
 }
 
 /// What installing `pkg` at `version` put in OpenSearch, as a teardown set
-/// under the renamed ids, with each saved object's type for the Dashboards
-/// DELETE API.
+/// under the renamed ids — every input's, whether or not it was enabled, so a
+/// selection that changed between install and uninstall leaves nothing
+/// behind — with each saved object's type for the Dashboards DELETE API.
 fn renamed_teardown(pkg: &Package, version: &str) -> Result<(Teardown, BTreeMap<String, String>)> {
     let r = velox_integrations::agent_renaming(pkg, version)?;
     let mut kinds = BTreeMap::new();
     let mut saved = Vec::new();
-    for o in parse_saved_objects(&pkg.saved_objects)? {
+    for o in velox_integrations::all_saved_objects(pkg)? {
         let id = r.map.get(&o.id).cloned().unwrap_or(o.id);
         if o.kind != "index-pattern" {
             saved.push(id.clone());
         }
         kinds.insert(id, o.kind);
     }
+    let mut pipelines = Vec::new();
+    let mut templates = Vec::new();
+    let mut patterns = Vec::new();
+    for i in pkg.inputs() {
+        let name = velox_integrations::input_artifact_name(pkg, &i, version);
+        if i.pipeline.is_some() {
+            pipelines.push(name.clone());
+        }
+        if i.index_template.is_some() {
+            templates.push(name.clone());
+        }
+        if name != r.name {
+            patterns.push(name);
+        }
+    }
     Ok((
         Teardown {
-            ingest_pipeline: pkg.pipeline.as_ref().map(|_| r.name.clone()),
-            index_template: pkg.index_template.as_ref().map(|_| r.name.clone()),
+            ingest_pipeline: None,
+            index_template: None,
+            ingest_pipelines: pipelines,
+            index_templates: templates,
             index_pattern: r.name.clone(),
-            index_patterns: Vec::new(),
+            index_patterns: patterns,
             saved_objects: saved,
             ism_policies: Vec::new(),
             datasources: Vec::new(),
@@ -237,7 +315,12 @@ fn renamed_teardown(pkg: &Package, version: &str) -> Result<(Teardown, BTreeMap<
     ))
 }
 
-/// Uninstall a package: remove its collector, then delete what it created.
+/// Uninstall a package from the cluster target: remove its collector and,
+/// when `backend` is set, delete what it created.
+///
+/// The backend half is shared by both targets (ADR-073): a policy whose hosts
+/// still write through this integration's pipeline needs it to stay, so the
+/// caller decides `backend` from what else is still using the integration.
 ///
 /// Two teardown sets, and both run: the renamed one this core installs, and
 /// the package's **declared** one, which is what a deployment installed before
@@ -250,11 +333,21 @@ pub async fn uninstall_package(
     deployment: &Deployment,
     pkg: &Package,
     version: &str,
+    backend: bool,
 ) -> Result<()> {
     let _ = crate::agents::remove_agent(deployment, &pkg.manifest.id).await;
+    if backend {
+        teardown_backend(deployment, pkg, version).await?;
+    }
+    Ok(())
+}
+
+/// Delete the backend half of a package: the renamed set and the declared
+/// one. No collector is touched — see [`uninstall_package`].
+pub async fn teardown_backend(deployment: &Deployment, pkg: &Package, version: &str) -> Result<()> {
     let (renamed, renamed_kinds) = renamed_teardown(pkg, version)?;
     teardown_os(deployment, &renamed, &renamed_kinds).await;
-    let legacy_kinds: BTreeMap<String, String> = parse_saved_objects(&pkg.saved_objects)?
+    let legacy_kinds: BTreeMap<String, String> = velox_integrations::all_saved_objects(pkg)?
         .into_iter()
         .map(|o| (o.id, o.kind))
         .collect();
@@ -286,14 +379,14 @@ pub(crate) async fn teardown_os(
     // that was never created, leaving the real objects behind.
     let tenant = crate::recipes::tenant_scope(deployment).await;
 
-    if let Some(id) = &t.ingest_pipeline {
+    for id in t.ingest_pipeline.iter().chain(t.ingest_pipelines.iter()) {
         let _ = c
             .delete(format!("{base}/_ingest/pipeline/{id}"))
             .basic_auth(&u, Some(&p))
             .send()
             .await;
     }
-    if let Some(id) = &t.index_template {
+    for id in t.index_template.iter().chain(t.index_templates.iter()) {
         let _ = c
             .delete(format!("{base}/_index_template/{id}"))
             .basic_auth(&u, Some(&p))
@@ -366,7 +459,16 @@ mod tests {
         let dep = Deployment::for_test("logs-a1b2", "veloxsearch", None);
         for r in crate::recipes::RECIPES {
             let pkg = crate::recipes::bootstrap_package(r).unwrap();
-            let conf = collector_config(&dep, &pkg, "1.0.0").unwrap();
+            let conf = collector_config(&dep, &pkg, "1.0.0", &Default::default())
+                .unwrap()
+                .expect("every built-in recipe collects in the cluster");
+            // Assembly reproduces the recipe's own text: one SERVICE block,
+            // the recipe's, then its stanzas untouched.
+            assert!(
+                conf.starts_with("[SERVICE]\n    Flush 5\n    Log_Level info\n[INPUT]"),
+                "{r}: {conf}"
+            );
+            assert_eq!(conf.matches("[SERVICE]").count(), 1, "{r}");
             assert!(conf.contains("HTTP_User veloxagent-user"), "{r}: {conf}");
             assert!(
                 conf.contains("HTTP_Passwd ${VELOX_OS_PASSWORD}"),
@@ -477,8 +579,14 @@ mod tests {
             "teardown removes uncreated: {phantom:?}"
         );
         assert_eq!(created, removed);
-        // The index-pattern + dashboard + 9 visualizations + pipeline + template.
-        assert_eq!(created.len(), 13, "unexpected resource count");
+        // The logs input: index-pattern + dashboard + 9 visualizations +
+        // pipeline + template; the 1.2 package adds the metrics input's
+        // pipeline, template and index-pattern.
+        assert!(
+            created.len() >= 13,
+            "unexpected resource count {}",
+            created.len()
+        );
     }
 
     /// The fixture's agent config renders cleanly with the closed set and tails

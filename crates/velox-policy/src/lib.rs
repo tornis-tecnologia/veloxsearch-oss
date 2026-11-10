@@ -71,10 +71,38 @@ pub enum Engine {
 pub struct Activation {
     pub package_id: String,
     pub package_version: String,
-    /// Variables the package manifest declares. Validated against the
+    /// Schema 1.1: variables the package manifest declares at the top level.
+    /// Kept for revisions written before inputs existed; a renderer treats
+    /// them as the values of the implicit `logs` input. Validated against the
     /// manifest by the renderer, not here.
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
+    /// Schema 1.2 (ADR-073): the inputs turned on, each with its values. The
+    /// same shape the cluster's own record carries, so the Data tab and a
+    /// policy edit one thing. Empty = the package's default-enabled inputs
+    /// with default values.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, velox_integrations::InputValues>,
+}
+
+impl Activation {
+    /// What this activation selects, in the shared crate's terms. A 1.1
+    /// activation that set top-level `vars` and no inputs is the `logs` input
+    /// with those values — the only input such a package has.
+    pub fn selection(&self) -> velox_integrations::InputSelection {
+        let mut sel = velox_integrations::InputSelection {
+            inputs: self.inputs.clone(),
+        };
+        if sel.inputs.is_empty() && !self.vars.is_empty() {
+            sel.inputs.insert(
+                "logs".into(),
+                velox_integrations::InputValues {
+                    vars: self.vars.clone(),
+                },
+            );
+        }
+        sel
+    }
 }
 
 /// Where a policy's data goes. Credentials are **not** in the policy: the
@@ -155,6 +183,9 @@ pub struct BackendRequirement {
     /// `(kind, id)` for everything installing this package creates, under the
     /// ids this path uses.
     pub resources: Vec<(String, String)>,
+    /// The input ids this activation turns on (ADR-073), in package order.
+    #[serde(default)]
+    pub inputs: Vec<String>,
 }
 
 /// The artifact families an operator chooses between when they read an
@@ -292,48 +323,47 @@ impl<S: PackageStore + ?Sized> PackageRenderer<'_, S> {
 impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
     fn render(&self, activation: &Activation, outputs: &[Output]) -> Result<Vec<Fragment>, String> {
         let pkg = self.package(activation)?;
-        // Schema 1.1 variables: validated against the manifest, defaults
-        // filled, unknown names refused — the same function the core's
-        // DaemonSet path runs with an empty policy map.
-        let resolved = velox_integrations::resolve_variables(&pkg.manifest, &activation.vars)
-            .map_err(|e| e.to_string())?;
         self.target(outputs)?;
-        // The index the agent writes to is NOT the one the package declares:
-        // every artifact either collection path creates is named
-        // `veloxagent-<integration>-<signal>-v<major>` (ADR-071). The prefix
+        // Every enabled input, for the HOST target (this is Velox Agent's
+        // side), each writing to its own index: every artifact either
+        // collection path creates is named
+        // `veloxagent-<integration>-<signal>-v<major>` (ADR-071) — the prefix
         // is what the collector account is granted, and the version keeps a
-        // mapping change from having to be made in place.
-        let index = velox_integrations::agent_artifact_name(
-            &pkg.manifest.id,
-            &pkg.manifest.index,
-            &activation.package_version,
-        );
-        let mut vars = velox_integrations::Vars::new(
-            &self.target.deployment,
-            &self.target.namespace,
-            &index,
-            &pkg.manifest.id,
-            OS_USER_REF,
-            OS_PASSWORD_REF,
-        );
-        if let Some(h) = &self.target.os_host {
-            vars = vars.with_os_host(h);
-        }
-        let render = |tmpl: &str| {
-            velox_integrations::render(&velox_integrations::apply_variables(tmpl, &resolved), &vars)
-                .map_err(|e| e.to_string())
+        // mapping change from having to be made in place. Variables are
+        // validated against the input's declaration, defaults filled, unknown
+        // names refused — the same function the core's cluster path runs.
+        let vars_for = |index: &str| {
+            let mut vars = velox_integrations::Vars::new(
+                &self.target.deployment,
+                &self.target.namespace,
+                index,
+                &pkg.manifest.id,
+                OS_USER_REF,
+                OS_PASSWORD_REF,
+            );
+            if let Some(h) = &self.target.os_host {
+                vars = vars.with_os_host(h);
+            }
+            vars
         };
-        let mut out = vec![Fragment {
-            engine: Engine::FluentBit,
-            body: render(&pkg.agent_config)?,
-        }];
-        if let Some(otel) = &pkg.otel_config {
-            out.push(Fragment {
-                engine: Engine::OtelCollector,
-                body: render(otel)?,
-            });
-        }
-        Ok(out)
+        let rendered = velox_integrations::render_inputs(
+            pkg,
+            &activation.package_version,
+            &activation.selection(),
+            velox_integrations::TargetKind::Host,
+            &vars_for,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(rendered
+            .into_iter()
+            .map(|r| Fragment {
+                engine: match r.engine {
+                    velox_integrations::EngineKind::FluentBit => Engine::FluentBit,
+                    velox_integrations::EngineKind::OtelCollector => Engine::OtelCollector,
+                },
+                body: r.body,
+            })
+            .collect())
     }
 
     /// The other half: everything this package creates in the target
@@ -358,6 +388,13 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
                 .into_iter()
                 .map(|(kind, id)| (kind.name().to_string(), id))
                 .collect();
+        let inputs = activation
+            .selection()
+            .enabled(pkg)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(i, _)| i.id)
+            .collect();
         Ok(Some(BackendRequirement {
             deployment,
             package_id: pkg.manifest.id.clone(),
@@ -368,6 +405,7 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
                 &activation.package_version,
             ),
             resources,
+            inputs,
         }))
     }
 }
@@ -413,9 +451,25 @@ pub fn compile(policy: &Policy, renderer: &dyn FragmentRenderer) -> Result<Compi
             backend.push(req);
         }
     }
+    // Fluent Bit gets ONE configuration: a single `[SERVICE]` section the
+    // agent settings decide, then every fragment with its own stripped
+    // (ADR-073) — two inputs, or two integrations, must not hand the engine
+    // two SERVICE sections. The OTel body is YAML and concatenates as before.
     let bodies: BTreeMap<Engine, String> = bodies
         .into_iter()
-        .map(|(e, parts)| (e, parts.join("\n")))
+        .map(|(e, parts)| match e {
+            Engine::FluentBit => {
+                let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+                (
+                    e,
+                    velox_integrations::assemble_fluent_bit(
+                        &velox_integrations::fluent_bit_service(policy.agent.flush_seconds, None),
+                        &refs,
+                    ),
+                )
+            }
+            Engine::OtelCollector => (e, parts.join("\n")),
+        })
         .collect();
 
     let mut h = Sha256::new();
@@ -486,6 +540,7 @@ mod tests {
                     package_id: id.to_string(),
                     package_version: "1.0.0".into(),
                     vars: BTreeMap::new(),
+                    inputs: BTreeMap::new(),
                 })
                 .collect(),
             outputs: vec![Output::OpenSearch {
@@ -559,9 +614,12 @@ mod tests {
                     otel_config: None,
                 },
                 variables: vec![],
+                inputs: vec![],
                 teardown: Teardown {
                     ingest_pipeline: None,
                     index_template: None,
+                    ingest_pipelines: vec![],
+                    index_templates: vec![],
                     index_pattern: "nginx-logs".into(),
                     saved_objects: vec![],
                     index_patterns: vec![],
@@ -574,6 +632,7 @@ mod tests {
             saved_objects: String::new(),
             agent_config: agent_config.into(),
             otel_config: None,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -589,12 +648,16 @@ mod tests {
                 kind: velox_integrations::VarType::String,
                 default: Some("/var/log/nginx/access.log".into()),
                 required: false,
+                description: BTreeMap::new(),
+                targets: vec![],
             },
             velox_integrations::Variable {
                 name: "port".into(),
                 kind: velox_integrations::VarType::Integer,
                 default: None,
                 required: true,
+                description: BTreeMap::new(),
+                targets: vec![],
             },
         ];
         pkg.otel_config =

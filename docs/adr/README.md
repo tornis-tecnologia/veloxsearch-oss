@@ -121,6 +121,8 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 
 | ADR-072 | *(proposed)* Velox Mesh is a deployment's, not the installation's: one controller, data partitioned by `(namespace, deployment)` on every policy and agent row; every console call names a deployment the core minted through `Scope::require`, agents belong to the deployment they enrolled under (moving means re-enrolling), deleting a deployment forgets its policies, tokens and agents, `os_host` is a deployment annotation, uninstalling an integration a policy activates is refused, tenants operate the Mesh of their own deployments, and the screen moves to `/deployments/:id/mesh`. [ADR-072](ADR-072-the-mesh-is-scoped-to-a-deployment.md) |
 
+| ADR-073 | *(proposed)* One onboarding for an integration, modelled on Fleet's: a package declares **inputs** (schema 1.2 — a signal, a Fluent Bit template per target, the variables they reference, optional backend assets of their own; a 1.0 package is one implicit `logs` input), an activation is the same `{inputs: {id: {vars}}}` on a Mesh policy and on the cluster's CR, the Data tab's *Add* dialog asks where (this cluster, a policy, a new policy) and what (inputs, variables), and the backend half is torn down only when the last target gives the integration up. [ADR-073](ADR-073-one-onboarding-for-an-integration.md) |
+
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and
 are not cited anywhere in the source.

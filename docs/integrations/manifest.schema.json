@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://veloxsearch.ai/schemas/integration-manifest-1.1.json",
+  "$id": "https://veloxsearch.ai/schemas/integration-manifest-1.2.json",
   "title": "VeloxSearch integration manifest",
   "description": "Schema for `manifest.yaml`, the declarative descriptor of an integration package (ADR-039). A package is pure data applied by the fixed core engine; this manifest names the assets, the index/dashboard they target, how the source is discovered, and what an uninstall must remove. The core validates every package against this schema on load and refuses any that does not conform. See docs/integrations/interpolation.md for the closed variable set assets may use and docs/integrations/signing.md for the signature block.",
   "type": "object",
@@ -20,11 +20,12 @@
   ],
   "properties": {
     "schema_version": {
-      "description": "Version of THIS manifest schema the package targets, so the engine can reject packages written against a schema it does not understand. Independent of the package's own `version`. `1.1` adds the optional `variables` and `assets.otel_config` (Velox Mesh, ADR-068); a package using either MUST declare `1.1`, so a core that only knows `1.0` refuses it instead of shipping a template with unfilled `${name}` holes.",
+      "description": "Version of THIS manifest schema the package targets, so the engine can reject packages written against a schema it does not understand. Independent of the package's own `version`. `1.1` adds the optional `variables` and `assets.otel_config` (Velox Mesh, ADR-068); a package using either MUST declare `1.1`, so a core that only knows `1.0` refuses it instead of shipping a template with unfilled `${name}` holes. `1.2` adds `inputs` (ADR-073): the package's inputs, each with a signal, a template per target (cluster/host), its own variables and backend assets; a package declaring `inputs` MUST declare `1.2` and MUST NOT declare top-level `variables`.",
       "type": "string",
       "enum": [
         "1.0",
-        "1.1"
+        "1.1",
+        "1.2"
       ]
     },
     "id": {
@@ -138,6 +139,33 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "ingest_pipelines": {
+          "description": "Schema 1.2: ingest-pipeline ids of the package's other inputs to DELETE (the first input's is `ingest_pipeline`).",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "index_templates": {
+          "description": "Schema 1.2: index-template ids of the package's other inputs to DELETE (the first input's is `index_template`).",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "index_patterns": {
+          "description": "Extra index-pattern saved-object ids to DELETE beyond `index_pattern` — one per additional input (schema 1.2), or the OTel stack's.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
@@ -170,6 +198,14 @@
           "pattern": "^[A-Za-z0-9+/]+={0,2}$",
           "minLength": 1
         }
+      }
+    },
+    "inputs": {
+      "description": "OPTIONAL (schema 1.2, ADR-073). The inputs an operator turns on and configures when they add the integration — what Elastic calls a policy template's inputs, reduced to what a signed data package can carry. Each input has a `signal` (which names its index `veloxagent-<id>-<signal>-v<major>`, ADR-071), a Fluent Bit template per target it can be collected on (`cluster`: the DaemonSet; `host`: Velox Agent), the variables those templates reference as `${name}`, and optionally its own ingest pipeline and index template. The first input's `index` defaults to the manifest's `index`; a later input's defaults to `<id>-<signal>`. The `[SERVICE]` section of every template is replaced by the engine's own, so a policy with several inputs gets exactly one. Every file named here is an asset: fetched, digested and signed like the ones under `assets`.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/input"
       }
     }
   },
@@ -302,36 +338,159 @@
         "required": {
           "type": "boolean",
           "default": false
+        },
+        "targets": {
+          "description": "Schema 1.2: the targets this variable applies to. Absent = both. A host-only variable (a log path the DaemonSet has no use for) is neither asked for nor required when the input is collected in the cluster, and a value given for it there is refused.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "cluster",
+              "host"
+            ]
+          }
+        }
+      }
+    },
+    "input": {
+      "description": "One input (schema 1.2).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "signal",
+        "templates"
+      ],
+      "properties": {
+        "id": {
+          "description": "Unique within the package; what a policy or the cluster record names.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,31}$"
+        },
+        "signal": {
+          "description": "What the input collects; decides the index name (ADR-071).",
+          "type": "string",
+          "enum": [
+            "logs",
+            "metrics",
+            "traces",
+            "events",
+            "audit"
+          ]
+        },
+        "index": {
+          "description": "The declared index (pre-rename). Defaults to the manifest's `index` for the first input and to `<id>-<signal>` for a later one.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$",
+          "minLength": 1
+        },
+        "title": {
+          "$ref": "#/$defs/i18n"
+        },
+        "description": {
+          "$ref": "#/$defs/i18n"
+        },
+        "enabled": {
+          "description": "Pre-selected in the console's onboarding. Ship `false` for an input that needs something the server may not expose (a status endpoint).",
+          "type": "boolean",
+          "default": true
+        },
+        "templates": {
+          "description": "Fluent Bit (or OTel) template per target. At least one.",
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "cluster": {
+              "description": "Template for the in-cluster DaemonSet/Deployment.",
+              "$ref": "#/$defs/asset_file"
+            },
+            "host": {
+              "description": "Template for Velox Agent's Fluent Bit on a host.",
+              "$ref": "#/$defs/asset_file"
+            },
+            "otel_host": {
+              "description": "OpenTelemetry Collector template for Velox Agent on a host (schema 1.1's `assets.otel_config`, per input).",
+              "$ref": "#/$defs/asset_file"
+            }
+          }
+        },
+        "vars": {
+          "description": "The variables this input's templates reference as `${name}`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/variable"
+          }
+        },
+        "pipeline": {
+          "description": "Ingest-pipeline JSON for this input's index.",
+          "$ref": "#/$defs/asset_file"
+        },
+        "index_template": {
+          "description": "Index-template JSON for this input's index.",
+          "$ref": "#/$defs/asset_file"
+        },
+        "saved_objects": {
+          "description": "ndjson of this input's own saved objects (its index pattern, a dashboard), beside the package-level `assets.saved_objects`, which belong to the first input. Rendered with this input's index as `{index}`.",
+          "$ref": "#/$defs/asset_file"
         }
       }
     }
   },
-  "if": {
-    "anyOf": [
-      {
+  "allOf": [
+    {
+      "if": {
         "required": [
-          "variables"
+          "inputs"
         ]
       },
-      {
+      "then": {
         "properties": {
-          "assets": {
-            "required": [
-              "otel_config"
-            ]
+          "schema_version": {
+            "const": "1.2"
           }
         },
-        "required": [
-          "assets"
-        ]
+        "not": {
+          "required": [
+            "variables"
+          ]
+        }
       }
-    ]
-  },
-  "then": {
-    "properties": {
-      "schema_version": {
-        "const": "1.1"
+    },
+    {
+      "if": {
+        "anyOf": [
+          {
+            "required": [
+              "variables"
+            ]
+          },
+          {
+            "properties": {
+              "assets": {
+                "required": [
+                  "otel_config"
+                ]
+              }
+            },
+            "required": [
+              "assets"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "schema_version": {
+            "enum": [
+              "1.1",
+              "1.2"
+            ]
+          }
+        }
       }
     }
-  }
+  ]
 }

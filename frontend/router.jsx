@@ -13,8 +13,11 @@
      /deployments/:id           → /deployments/:id/overview
      /deployments/:id/:tab      overview | data | backup | access | config | activity | mesh
      /deployments/:id/mesh/:sub overview | agents | policies (ADR-072: the Mesh
-                                is the deployment's; `?integration=<id>` preselects
-                                one in the policy composer, a one-shot intent)
+                                is the deployment's)
+     /deployments/:id/data?integration=<id>&policy=<cluster|id>
+                                opens the add-integration dialog on that
+                                integration and/or with that target preselected
+                                (ADR-073) — one-shot intents, stripped once used
      /capacity
      /mesh, /mesh/*             → /deployments (the pre-ADR-072 global screen)
      /settings
@@ -57,11 +60,14 @@ function parse(pathname, search) {
       tab = TAB_ALIASES[tab] || tab;
       if (!TABS.includes(tab)) tab = "overview";
       const r = { name: "deployment", id, tab, upgrade: q.get("upgrade") === "1" };
-      if (tab === "mesh") {
-        r.sub = MESH_TABS.includes(seg[3]) ? seg[3] : "overview";
-        const integ = q.get("integration") || "";
-        if (INTEGRATION_RE.test(integ)) r.integration = integ;
-      }
+      if (tab === "mesh") r.sub = MESH_TABS.includes(seg[3]) ? seg[3] : "overview";
+      // One-shot intents for the Data tab's onboarding (ADR-073): the
+      // integration to open the dialog on, and/or the policy to preselect
+      // as its target ("cluster" or a policy id). The Mesh tab sends them.
+      const integ = q.get("integration") || "";
+      if (INTEGRATION_RE.test(integ)) r.integration = integ;
+      const policy = q.get("policy") || "";
+      if (INTEGRATION_RE.test(policy)) r.policy = policy;
       return r;
     }
     case "capacity": return { name: "capacity" };
@@ -82,7 +88,8 @@ function pathFor(r) {
       const sub = tab === "mesh" && r.sub && r.sub !== "overview" ? `/${r.sub}` : "";
       const q = [];
       if (r.upgrade) q.push("upgrade=1");
-      if (tab === "mesh" && r.integration) q.push(`integration=${encodeURIComponent(r.integration)}`);
+      if (r.integration) q.push(`integration=${encodeURIComponent(r.integration)}`);
+      if (r.policy) q.push(`policy=${encodeURIComponent(r.policy)}`);
       return `/deployments/${r.id}/${tab}${sub}${q.length ? `?${q.join("&")}` : ""}`;
     }
     case "capacity": return "/capacity";

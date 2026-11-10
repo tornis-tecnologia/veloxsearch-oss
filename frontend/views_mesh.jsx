@@ -39,7 +39,7 @@
    carry; nothing is persisted and nothing is mocked. With one, the fleet is
    the product: `POST /api/mesh_overview` for THIS deployment, polled.
    ============================================================ */
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
 import { Banner, Btn, Icon, Tabs, copyText } from "./ui.jsx";
@@ -557,223 +557,112 @@ function AgentsTab({ t, dep, overview, onReload, onToast }) {
   );
 }
 
-/* ---- Tab 3: compose a policy ----------------------------------------
-   An activation is two halves (velox-policy): the stanza the agent runs and
-   the artifacts the target deployment must carry. Both are shown, because
-   an operator picking an integration is deciding about both. ---------- */
-function ArtifactChips({ a, t }) {
-  if (!a) return <span className="hint">{t.mesh_art_loading}</span>;
-  const chips = [
-    { on: true, label: t.mesh_art_agent },
-    { on: !!a.ingest_pipeline, label: t.mesh_art_pipeline },
-    { on: !!a.index_template, label: t.mesh_art_template },
-    { on: (a.index_patterns || []).length > 0, label: t.mesh_art_index_pattern },
-    { on: (a.dashboards || []).length > 0, label: t.mesh_art_dashboards, n: (a.dashboards || []).length },
-    { on: !!a.otel_config, label: t.mesh_art_otel },
-  ];
-  return (
-    <div className="mesh-chips">
-      {chips.map(c => (
-        <span key={c.label} className={`mesh-chip${c.on ? " on" : ""}`}>
-          <Icon name={c.on ? "check" : "x"} size={11} />
-          {c.label}{c.on && c.n > 1 ? ` · ${c.n}` : ""}
-        </span>
-      ))}
-    </div>
-  );
-}
+/* ---- Tab 3: the deployment's policies ----------------------------------
+   A policy is what a group of hosts runs (ADR-073). It is created here with a
+   name and nothing else; integrations are added to it from the Data tab —
+   the one onboarding, the same one the cluster target uses — so this tab
+   lists, mints tokens and shows rollouts, and never composes. -------- */
+function PoliciesTab({ t, d, overview, onReload, onToast, onTab }) {
+  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [created, setCreated] = useState(null);
+  const [createErr, setCreateErr] = useState(null);
+  const [tokens, setTokens] = useState({});
+  const policies = (overview && overview.policies) || [];
+  const agentsByPolicy = {};
+  ((overview && overview.agents) || []).forEach(a => { if (a.policy_id && a.status !== "unenrolled") agentsByPolicy[a.policy_id] = (agentsByPolicy[a.policy_id] || 0) + 1; });
+  const slug = (n) => n.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "policy";
 
-/* The destination is the deployment this tab belongs to — there is no
-   picker (ADR-072). `preselect` is an integration id the Data tab sent over
-   ("collect from hosts"), turned on before the operator sees the grid. */
-function PoliciesTab({ t, d, overview, preselect, onReload, onToast }) {
-  const target = d.id;
-  const [name, setName] = useState("Web tier");
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(null);
-  const [token, setToken] = useState(null);
-  const [saveErr, setSaveErr] = useState(null);
-  const [catalog, setCatalog] = useState(null);
-  const [picked, setPicked] = useState([]);
-  const [artifacts, setArtifacts] = useState({});
-  const [err, setErr] = useState(null);
-
-  useEffect(() => {
-    let alive = true;
-    API.catalog(d.id)
-      .then(c => { if (alive) setCatalog(c); })
-      .catch(e => { if (alive) setErr(e.message); });
-    return () => { alive = false; };
-  }, [d.id]);
-
-  const toggle = useCallback((id) => {
-    setPicked(p => (p.includes(id) ? p.filter(x => x !== id) : [...p, id]));
-    setArtifacts(a => {
-      if (a[id] !== undefined) return a;
-      API.integrationArtifacts(id)
-        .then(r => setArtifacts(x => ({ ...x, [id]: r })))
-        .catch(() => setArtifacts(x => ({ ...x, [id]: null })));
-      return { ...a, [id]: undefined };
-    });
-  }, []);
-
-  useEffect(() => {
-    if (preselect && !picked.includes(preselect)) toggle(preselect);
-    // Once, for the id the URL carried; the operator's clicks own `picked`
-    // from here on.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preselect]);
-
-  const items = (catalog && catalog.integrations) || [];
+  if (!overview) {
+    return (
+      <div className="ag-panel" data-testid="mesh-panel-policies">
+        <Banner tone="warn" title={t.mesh_pol_save_h} testid="mesh-policy-save-blocked">
+          {t.mesh_pol_save_p}
+        </Banner>
+      </div>
+    );
+  }
 
   return (
     <div className="ag-panel" data-testid="mesh-panel-policies">
-      <Banner tone="info" title={t.mesh_policy_h} style={{ marginBottom: 18 }}>
-        {t.mesh_policy_p}
-      </Banner>
+      <h3 className="ag-h">{t.mesh_pol_list_h}</h3>
+      <p className="hint" style={{ margin: "0 0 14px", maxWidth: "70ch" }}>{t.mesh_pol_list_p}</p>
 
-      <Step n={1} title={t.mesh_pol_integrations_h} t={t}>
-        <p className="hint" style={{ margin: "0 0 12px" }}>{t.mesh_pol_integrations_p}</p>
-        {err && <Banner tone="danger" title={t.mesh_pol_catalog_err}>{err}</Banner>}
-        {!catalog && !err && <p className="hint">{t.mesh_art_loading}</p>}
-        <div className="mesh-grid">
-          {items.map(it => {
-            const on = picked.includes(it.id);
-            return (
-              <button type="button" key={it.id}
-                className={`mesh-card${on ? " on" : ""}`}
-                aria-pressed={on}
-                data-testid={`mesh-integration-${it.id}`}
-                onClick={() => toggle(it.id)}>
-                <div className="mesh-card-head">
-                  <span className="mono">{it.id}</span>
-                  <Icon name={on ? "check" : "plus"} size={14} />
-                </div>
-                {on && <ArtifactChips a={artifacts[it.id]} t={t} />}
-              </button>
-            );
-          })}
+      <div className="card pad" style={{ marginBottom: 18 }} data-testid="mesh-policy-new">
+        <h3 className="section-title">{t.mesh_pol_new_h}</h3>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <input className="input" value={name} onChange={e => setName(e.target.value)}
+            placeholder={t.mesh_pol_new_ph} aria-label={t.mesh_policy_name} data-testid="mesh-policy-name" style={{ maxWidth: 280 }} />
+          {name.trim() && <span className="hint mono">{slug(name)}</span>}
+          <Btn variant="primary" icon="plus" disabled={creating || !name.trim()} data-testid="mesh-policy-create"
+            onClick={async () => {
+              setCreating(true); setCreateErr(null);
+              try {
+                const id = slug(name);
+                await API.meshCreatePolicy(d.id, id, name.trim());
+                setCreated(id); setName("");
+                if (onToast) onToast(t.mesh_pol_created.replace("{id}", id), true);
+                if (onReload) onReload();
+              } catch (e) {
+                setCreateErr(e.message);
+              } finally { setCreating(false); }
+            }}>{creating ? t.mesh_saving : t.mesh_pol_create}</Btn>
         </div>
-      </Step>
-
-      <Step n={2} title={t.mesh_pol_result_h} t={t}>
-        {picked.length === 0 ? (
-          <p className="hint">{t.mesh_pol_result_empty}</p>
-        ) : (
-          <div data-testid="mesh-policy-summary">
-            <p className="hint" style={{ margin: "0 0 10px" }}>
-              {t.mesh_pol_result_p.replace("{n}", picked.length).replace("{target}", target || "—")}
-            </p>
-            <div className="kvrow"><span className="k">{t.mesh_pol_edge}</span>
-              <span className="v sans">{picked.join(", ")}</span></div>
-            <div className="kvrow"><span className="k">{t.mesh_pol_backend}</span>
-              <span className="v sans">
-                {picked.map(id => {
-                  const a = artifacts[id];
-                  if (!a) return null;
-                  const parts = [];
-                  if (a.ingest_pipeline) parts.push(a.ingest_pipeline);
-                  if (a.index_template) parts.push(a.index_template);
-                  (a.index_patterns || []).forEach(p => parts.push(p));
-                  (a.dashboards || []).forEach(p => parts.push(p));
-                  return parts.length ? `${id}: ${parts.length}` : null;
-                }).filter(Boolean).join(" · ") || "—"}
-              </span></div>
-          </div>
+        {createErr && <Banner tone="danger" title={t.mesh_save_err} style={{ marginTop: 10 }}>{createErr}</Banner>}
+        {created && (
+          <p className="hint" style={{ marginTop: 8 }} data-testid="mesh-policy-saved">
+            {t.mesh_pol_created.replace("{id}", created)}
+          </p>
         )}
-      </Step>
+      </div>
 
-      {/* Saving needs a controller. With one, this is the step that makes
-          the policy real: the core compiles it against verified packages and
-          the Mesh stores it as a new revision. */}
-      {overview ? (
-        <>
-          <Step n={3} title={t.mesh_save} t={t}>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <input className="input" value={name} onChange={e => setName(e.target.value)}
-                aria-label={t.mesh_policy_name} data-testid="mesh-policy-name" style={{ maxWidth: 260 }} />
-              <Btn variant="primary" disabled={saving || picked.length === 0 || !target}
-                data-testid="mesh-policy-save"
-                onClick={async () => {
-                  setSaving(true); setSaveErr(null);
-                  try {
-                    const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "policy";
-                    const r = await API.meshSavePolicy({
-                      id, name: name.trim() || id, deployment: target, integrations: picked,
-                    });
-                    setSaved(r.revision);
-                    if (onToast) onToast(t.mesh_saved.replace("{rev}", r.revision), true);
-                    if (onReload) onReload();
-                  } catch (e) {
-                    setSaveErr(e.message);
-                    if (onToast) onToast(t.mesh_save_err, false);
-                  } finally { setSaving(false); }
-                }}>
-                {saving ? t.mesh_saving : t.mesh_save}
-              </Btn>
-              {saved != null && (
-                <span className="badge green" data-testid="mesh-policy-saved">
-                  {t.mesh_revision.replace("{n}", saved)}
-                </span>
-              )}
-            </div>
-            {saveErr && <Banner tone="danger" title={t.mesh_save_err} style={{ marginTop: 10 }}>{saveErr}</Banner>}
-          </Step>
-
-          <Step n={4} title={t.mesh_token_h} t={t}>
-            {saved == null ? (
-              <p className="hint">{t.mesh_need_policy}</p>
-            ) : (
-              <>
-                <Btn variant="ghost" icon="plus" data-testid="mesh-token-get"
-                  onClick={async () => {
-                    const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "policy";
-                    try {
-                      const r = await API.meshEnrollmentToken(d.id, id);
-                      setToken(r.token);
-                    } catch (e) { if (onToast) onToast(e.message, false); }
-                  }}>{t.mesh_token_get}</Btn>
-                {token && (
+      {policies.length === 0 ? (
+        <p className="hint" data-testid="mesh-policies-empty">{t.mesh_pol_empty}</p>
+      ) : (
+        <div style={{ display: "grid", gap: 10 }}>
+          {policies.map(p => {
+            const r = (overview.rollout || {})[p.id] || {};
+            const tok = tokens[p.id];
+            return (
+              <div className="card pad" key={p.id} data-testid={`policy-${p.id}`}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <b className="mono">{p.id}</b>
+                  <span className="hint">{p.name}</span>
+                  <span className="badge">{t.mesh_pol_agents.replace("{n}", agentsByPolicy[p.id] || 0)}</span>
+                  <span className="badge mono">{t.mesh_revision.replace("{n}", p.current_revision)}</span>
+                  {r.complete && <span className="badge green">{t.mesh_rollout_done}</span>}
+                  {r.updating > 0 && <span className="badge yellow">{t.mesh_rollout_wait.replace("{n}", r.updating)}</span>}
+                  {r.failed > 0 && <span className="badge red">{t.mesh_rollout_failed.replace("{n}", r.failed)}</span>}
+                </div>
+                <div className="kvrow" style={{ marginTop: 10 }}>
+                  <span className="k">{t.mesh_pol_integrations}</span>
+                  <span className="v sans" data-testid={`policy-integrations-${p.id}`}>
+                    {(p.integrations || []).length
+                      ? (p.integrations || []).map(i => <span key={i} className="badge mono" style={{ marginRight: 6 }}>{i}</span>)
+                      : <span className="hint">{t.mesh_pol_none}</span>}
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+                  <Btn variant="outline" size="sm" icon="plus" data-testid={`policy-add-${p.id}`}
+                    onClick={() => onTab && onTab("data", null, { policy: p.id })}>{t.mesh_pol_add_integ}</Btn>
+                  <Btn variant="ghost" size="sm" icon="check" data-testid={`policy-token-${p.id}`}
+                    onClick={async () => {
+                      try {
+                        const res = await API.meshEnrollmentToken(d.id, p.id);
+                        setTokens(x => ({ ...x, [p.id]: res.token }));
+                      } catch (e) { if (onToast) onToast(e.message, false); }
+                    }}>{t.mesh_token_get}</Btn>
+                </div>
+                {tok && (
                   <div style={{ marginTop: 10 }}>
-                    <CmdBlock t={t} onToast={onToast}
-                      text={`sudo velox-agent enroll --mesh MESH_URL --token ${token}`} />
+                    <CmdBlock t={t} onToast={onToast} text={`sudo velox-agent enroll --mesh MESH_URL --token ${tok}`} />
                     <p className="hint" style={{ marginTop: 6 }}>{t.mesh_token_once}</p>
                   </div>
                 )}
-              </>
-            )}
-          </Step>
-
-          {overview.policies && overview.policies.length > 0 && (
-            <Step n={5} title={t.mesh_rollout_h} t={t}>
-              <table className="fleet" data-testid="mesh-rollout">
-                <tbody>
-                  {overview.policies.map(p => {
-                    const r = (overview.rollout || {})[p.id] || {};
-                    return (
-                      <tr key={p.id} data-testid={`rollout-${p.id}`} data-complete={r.complete ? "1" : "0"}>
-                        <td className="mono">{p.id}</td>
-                        <td>{t.mesh_rollout_p
-                          .replace("{current}", r.current || 0)
-                          .replace("{total}", r.total || 0)
-                          .replace("{rev}", p.current_revision)}</td>
-                        <td>
-                          {r.complete && <span className="badge green">{t.mesh_rollout_done}</span>}
-                          {r.updating > 0 && <span className="badge yellow">{t.mesh_rollout_wait.replace("{n}", r.updating)}</span>}
-                          {r.failed > 0 && <span className="badge red">{t.mesh_rollout_failed.replace("{n}", r.failed)}</span>}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </Step>
-          )}
-        </>
-      ) : (
-        <Banner tone="warn" title={t.mesh_pol_save_h} testid="mesh-policy-save-blocked" style={{ marginTop: 18 }}>
-          {t.mesh_pol_save_p}
-        </Banner>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -782,7 +671,7 @@ function PoliciesTab({ t, d, overview, preselect, onReload, onToast }) {
 const TABS = ["overview", "agents", "policies"];
 
 /* The `mesh` tab of one deployment: `/deployments/:id/mesh/:sub`. */
-function MeshTab({ d, lang, sub, onSub, preselect, onToast }) {
+function MeshTab({ d, lang, sub, onSub, onToast, onTab }) {
   const t = STR[lang] || STR.pt;
   const [status, setStatus] = useState(null);
   const [overview, setOverview] = useState(null);
@@ -831,8 +720,8 @@ function MeshTab({ d, lang, sub, onSub, preselect, onToast }) {
         <AgentsTab t={t} dep={d} overview={overview} onReload={reload} onToast={onToast} />
       )}
       {active === "policies" && (
-        <PoliciesTab t={t} d={d} overview={overview} preselect={preselect}
-          onReload={reload} onToast={onToast} />
+        <PoliciesTab t={t} d={d} overview={overview}
+          onReload={reload} onToast={onToast} onTab={onTab} />
       )}
     </div>
   );

@@ -408,7 +408,7 @@ function App() {
             )}
             {route.name === "deployment" && (current
               ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}
-                  sub={route.sub} integration={route.integration}
+                  sub={route.sub} integration={route.integration} policy={route.policy}
                   openUpgrade={!!route.upgrade}
                   // `sub` is the Mesh tab's sub-screen; `extra` carries the
                   // one-shot `?integration=` intent from the Data tab.

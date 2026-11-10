@@ -31,6 +31,7 @@ import {
 import { AuthProviderTab } from "./views_auth_provider.jsx";
 import { SnapshotTab } from "./views_snapshot.jsx";
 import { MeshTab } from "./views_mesh.jsx";
+import { AddIntegrationDialog, CLUSTER_TARGET } from "./views_integration_add.jsx";
 import { ActivityPanel, ActivityDetails, lockReason, LockNotice } from "./views_activity.jsx";
 import { relAge } from "./views_status.jsx";
 
@@ -1083,28 +1084,34 @@ function fmtAge(sec, t) {
 // The runtime catalog (ADR-039 / ADR-047, #76). Installed first, then the
 // catalog in a grid with search and categories. The degraded-registry states
 // are RENDERED, not hidden.
-function DataTab({ d, lang, onToggleStack, onToast, locked, onTab }) {
+function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
   const t = STR[lang];
   const [view, setView] = useState(null);
-  // Which of this deployment's Mesh policies activate each integration
-  // (ADR-072 §6): the Data tab and the Mesh tab install the same
-  // `veloxagent-*` artifacts, so an integration hosts write through is shown
-  // as such here, and its uninstall is refused by the server. No Mesh (or
-  // no permission) leaves this empty and the tab is exactly what it was.
-  const [hostPolicies, setHostPolicies] = useState({});
+  // The deployment's Mesh policies and which integrations each activates
+  // (ADR-072 §6, ADR-073): an integration is added to a POLICY — the cluster
+  // being the implicit one — so the tab shows, per integration, every target
+  // it is collected on. No Mesh (or no permission) leaves this null and only
+  // the cluster target exists.
+  const [mesh, setMesh] = useState(null);
+  const [meshTick, setMeshTick] = useState(0);
   useEffect(() => {
     let alive = true;
     API.meshOverview(d.id)
-      .then(o => {
-        if (!alive) return;
-        const m = {};
-        (o.policies || []).forEach(p => (p.integrations || []).forEach(i => { (m[i] = m[i] || []).push(p.id); }));
-        setHostPolicies(m);
-      })
-      .catch(() => { if (alive) setHostPolicies({}); });
+      .then(o => { if (alive) setMesh(o); })
+      .catch(() => { if (alive) setMesh(null); });
     return () => { alive = false; };
-  }, [d.id]);
-  const collectFromHosts = (id) => onTab && onTab("mesh", "policies", { integration: id });
+  }, [d.id, meshTick]);
+  const policies = (mesh && mesh.policies) || [];
+  const hostPolicies = {};
+  policies.forEach(p => (p.integrations || []).forEach(i => { (hostPolicies[i] = hostPolicies[i] || []).push(p.id); }));
+  const agentsByPolicy = {};
+  ((mesh && mesh.agents) || []).forEach(a => { if (a.policy_id && a.status !== "unenrolled") agentsByPolicy[a.policy_id] = (agentsByPolicy[a.policy_id] || 0) + 1; });
+
+  // The onboarding dialog (ADR-073): { item, target?, initial? }. `intent`
+  // is the one-shot `?integration=&policy=` the Mesh tab sends; it opens the
+  // dialog once the catalog has loaded.
+  const [dialog, setDialog] = useState(null);
+  const [pendingPolicy, setPendingPolicy] = useState(intent && intent.policy ? intent.policy : null);
   const [loadErr, setLoadErr] = useState("");
   const [status, setStatus] = useState({});
   const [busy, setBusy] = useState({});
@@ -1126,8 +1133,45 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab }) {
 
   const items = view ? view.integrations || [] : [];
   const monitors = d.monitors || [];
-  const isInstalled = (it) => it.installed_version != null || monitors.includes(it.id);
+  const onCluster = (it) => it.installed_version != null || monitors.includes(it.id);
+  // Active anywhere: the cluster or any policy of this deployment.
+  const isInstalled = (it) => onCluster(it) || !!hostPolicies[it.id];
   const installedSig = items.filter(isInstalled).map(it => it.id).join(",");
+
+  useEffect(() => {
+    if (!intent || !intent.integration || !items.length) return;
+    const it = items.find(x => x.id === intent.integration);
+    if (it) setDialog({ item: it, target: intent.policy || null });
+    // Consumed once, like `?upgrade=1`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [intent && intent.integration, items.length]);
+
+  const openAdd = (it, target) => setDialog({ item: it, target: target || pendingPolicy || null });
+  const openEdit = async (it, target) => {
+    try {
+      let initial = null;
+      if (target === CLUSTER_TARGET) initial = it.installed_inputs || null;
+      else {
+        const doc = await API.meshPolicy(d.id, target);
+        const act = ((doc.body || {}).activations || []).find(a => a.package_id === it.id);
+        initial = act ? { inputs: act.inputs || {} } : null;
+      }
+      setDialog({ item: it, fixed: target, initial });
+    } catch (e) { onToast(e.message); }
+  };
+  async function removeFrom(it, target) {
+    setBusy(b => ({ ...b, [it.id]: "remove" }));
+    setItemErr(e => ({ ...e, [it.id]: "" }));
+    try {
+      await API.removeIntegration(d.id, it.id, target);
+      onToast(t.integ_removed_toast.replace("{target}", target === CLUSTER_TARGET ? t.integ_target_cluster : target));
+      await reload(); setMeshTick(x => x + 1);
+    } catch (e) {
+      setItemErr(er => ({ ...er, [it.id]: e.status === 404 ? t.integ_dep_gone : e.message }));
+    } finally {
+      setBusy(b => ({ ...b, [it.id]: null }));
+    }
+  }
 
   useEffect(() => {
     if (!installedSig) return undefined;
@@ -1150,6 +1194,8 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab }) {
     return () => { alive = false; clearInterval(h); };
   }, [d.id, installedSig]);
 
+  // An update keeps the recorded inputs: the cluster target re-installed at
+  // the catalog's version.
   async function act(id, kind, version) {
     setBusy(b => ({ ...b, [id]: kind }));
     setItemErr(e => ({ ...e, [id]: "" }));
@@ -1210,6 +1256,17 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab }) {
     <div className="view-enter" data-testid="integrations-tab">
       <LockNotice reason={locked} />
       <p className="lead" style={{ marginBottom: 18 }}>{t.integ_lead}</p>
+      {pendingPolicy && pendingPolicy !== CLUSTER_TARGET && (
+        <Banner tone="info" testid="integ-adding-to" style={{ marginBottom: 14 }}
+          action={<Btn variant="ghost" size="sm" onClick={() => setPendingPolicy(null)}>{t.close}</Btn>}>
+          {t.integ_adding_to.replace("{policy}", pendingPolicy)}
+        </Banner>
+      )}
+      <AddIntegrationDialog open={!!dialog} onClose={() => setDialog(null)} lang={lang} d={d}
+        item={dialog && dialog.item} policies={policies} meshReady={!!mesh}
+        fixedTarget={dialog && dialog.fixed} initialTarget={dialog && dialog.target} initial={dialog && dialog.initial}
+        agentsByPolicy={agentsByPolicy} onToast={onToast}
+        onDone={() => { setPendingPolicy(null); reload(); setMeshTick(x => x + 1); }} />
 
       {/* 1. what is already sending data */}
       <div className="section-title">{t.integ_installed_h} <span className="tab-count">{installedItems.length}</span></div>
@@ -1228,36 +1285,45 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab }) {
                 <div style={{ minWidth: 0 }}>
                   <div className="ttl">
                     <b>{loc(it.title, lang, it.id)}</b>
-                    <span className="badge green mono" data-testid={`installed-${it.id}`}>
-                      <Icon name="check" size={11} />{t.integ_installed} {it.installed_version || `(${t.integ_version_unknown})`}
-                    </span>
-                    {state === "update" && <span className="badge yellow" data-testid={`update-badge-${it.id}`}>{t.integ_update_badge} · {it.version}</span>}
-                    {it.builtin && <span className="badge">{t.integ_builtin}</span>}
-                    {hostPolicies[it.id] && (
-                      <span className="badge" data-testid={`hosts-${it.id}`} title={t.integ_uninstall_blocked}>
-                        <Icon name="server" size={11} />{t.integ_hosts_badge.replace("{policies}", hostPolicies[it.id].join(", "))}
+                    {onCluster(it) && (
+                      <span className="badge green mono" data-testid={`installed-${it.id}`} title={t.add_integ_cluster}>
+                        <Icon name="check" size={11} />{t.integ_target_cluster} {it.installed_version || `(${t.integ_version_unknown})`}
                       </span>
                     )}
+                    {(hostPolicies[it.id] || []).map(pid => (
+                      <span key={pid} className="badge green mono" data-testid={`on-policy-${it.id}-${pid}`}>
+                        <Icon name="server" size={11} />{pid}
+                      </span>
+                    ))}
+                    {state === "update" && onCluster(it) && <span className="badge yellow" data-testid={`update-badge-${it.id}`}>{t.integ_update_badge} · {it.version}</span>}
+                    {it.builtin && <span className="badge">{t.integ_builtin}</span>}
                   </div>
                   <div className="d">{loc(it.summary, lang, "")}</div>
                   <div className={rs.live ? "live" : "idle"} style={{ marginTop: 4 }}>{rs.live && <Icon name="spark" size={12} style={{ verticalAlign: -2, marginRight: 4 }} />}{rs.text}</div>
                   {err && <div className="field-err" data-testid={`error-${it.id}`}>{err}</div>}
                 </div>
                 <div className="acts">
-                  {state === "update" && (
+                  {state === "update" && onCluster(it) && (
                     <Btn variant="primary" size="sm" icon="arrowUp" disabled={!!working || !!locked}
                       data-testid={`update-${it.id}`} onClick={() => act(it.id, "install", it.version)}>
                       {working === "install" ? t.integ_installing : t.integ_update}
                     </Btn>
                   )}
                   {dashUrl && <a href={`${dashUrl}/app/dashboards`} target="_blank" rel="noreferrer" className="btn btn-outline btn-sm">{t.open_dashboard}<Icon name="ext" size={12} /></a>}
+                  {/* One entry per target it is on (configure / remove), plus
+                      "add to another" — the same dialog as the catalog's. */}
                   <Menu label={t.more_actions} testid={`integ-menu-${it.id}`} items={[
-                    ...(onTab ? [{ label: t.integ_collect_hosts, icon: "server", testid: `collect-hosts-${it.id}`, onClick: () => collectFromHosts(it.id) }] : []),
-                    // The server refuses it anyway (400, naming the policy);
-                    // disabling it here says why before the click.
-                    { label: hostPolicies[it.id] ? `${t.integ_uninstall} — ${t.integ_uninstall_blocked}` : t.integ_uninstall,
-                      icon: "trash", danger: true, disabled: !!working || !!locked || !!hostPolicies[it.id],
-                      testid: `uninstall-${it.id}`, onClick: () => act(it.id, "uninstall") },
+                    { label: t.integ_add_target, icon: "plus", disabled: !!working || !!locked, testid: `add-more-${it.id}`, onClick: () => openAdd(it, null) },
+                    { sep: true },
+                    ...([...(onCluster(it) ? [CLUSTER_TARGET] : []), ...(hostPolicies[it.id] || [])].flatMap(target => {
+                      const label = target === CLUSTER_TARGET ? t.integ_target_cluster : target;
+                      return [
+                        { label: t.integ_edit_target.replace("{target}", label), icon: "sliders", disabled: !!working || !!locked,
+                          testid: `edit-${it.id}-${target}`, onClick: () => openEdit(it, target) },
+                        { label: t.integ_remove_target.replace("{target}", label), icon: "trash", danger: true, disabled: !!working || !!locked,
+                          testid: target === CLUSTER_TARGET ? `uninstall-${it.id}` : `remove-${it.id}-${target}`, onClick: () => removeFrom(it, target) },
+                      ];
+                    })),
                   ]} />
                 </div>
               </div>
@@ -1322,20 +1388,11 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab }) {
                         </p>
                       )}
                       {err && <div className="field-err" data-testid={`error-${it.id}`}>{err}</div>}
-                      {hostPolicies[it.id] && (
-                        <p className="hint" data-testid={`hosts-${it.id}`}>
-                          {t.integ_hosts_badge.replace("{policies}", hostPolicies[it.id].join(", "))}
-                        </p>
-                      )}
                       <div className="ft">
                         <Btn variant="outline" size="sm" icon="plus" disabled={!!working || !!locked || !it.compatible}
-                          data-testid={`install-${it.id}`} onClick={() => act(it.id, "install", it.version)}>
-                          {working === "install" ? t.integ_installing : t.integ_install}
+                          data-testid={`install-${it.id}`} onClick={() => openAdd(it, null)}>
+                          {t.integ_add}
                         </Btn>
-                        {onTab && it.compatible && (
-                          <Btn variant="ghost" size="sm" icon="server" data-testid={`collect-hosts-${it.id}`}
-                            onClick={() => collectFromHosts(it.id)}>{t.integ_collect_hosts}</Btn>
-                        )}
                         <span className="badge mono" title={`${t.integ_version} ${it.version}`}>{it.version}</span>
                       </div>
                     </div>
@@ -1528,7 +1585,7 @@ function ActivityTab({ d, lang, onToast }) {
 /* ============================================================
    The view
    ============================================================ */
-function DeploymentView({ d, lang, hostNodes = [], tab, sub, integration, onTab, onToggleStack, onSaveEdit, onResetPass, onToast, onDelete, openUpgrade }) {
+function DeploymentView({ d, lang, hostNodes = [], tab, sub, integration, policy, onTab, onToggleStack, onSaveEdit, onResetPass, onToast, onDelete, openUpgrade }) {
   const t = STR[lang];
   const [confirm, setConfirm] = useState(false);
   // Computed once from the server's verdict (ADR-050 invariant 3).
@@ -1590,8 +1647,9 @@ function DeploymentView({ d, lang, hostNodes = [], tab, sub, integration, onTab,
       <Tabs items={tabs} value={tab} onChange={onTab} label={t.dep_tabs_label} testidPrefix="dep-tab" />
 
       {tab === "overview" && <OverviewTab d={d} lang={lang} onToast={onToast} hostNodes={hostNodes} onTab={onTab} />}
-      {tab === "data" && <DataTab d={d} lang={lang} onToggleStack={onToggleStack} onToast={onToast} locked={locked} onTab={onTab} />}
-      {tab === "mesh" && <MeshTab d={d} lang={lang} sub={sub} preselect={integration} onSub={s => onTab("mesh", s)} onToast={onToast} />}
+      {tab === "data" && <DataTab d={d} lang={lang} onToggleStack={onToggleStack} onToast={onToast} locked={locked} onTab={onTab}
+        intent={integration || policy ? { integration, policy } : null} />}
+      {tab === "mesh" && <MeshTab d={d} lang={lang} sub={sub} onSub={s => onTab("mesh", s)} onToast={onToast} onTab={onTab} />}
       {tab === "backup" && <SnapshotTab d={d} lang={lang} onToast={onToast} locked={locked} />}
       {tab === "access" && <AccessTab d={d} lang={lang} onReset={onResetPass} onToast={onToast} locked={locked} />}
       {tab === "config" && <ConfigTab d={d} lang={lang} onSave={onSaveEdit} onToast={onToast} locked={locked} onDeleteRequest={() => setConfirm(true)} />}
