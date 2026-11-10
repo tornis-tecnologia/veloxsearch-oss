@@ -2475,7 +2475,7 @@ mod server {
         // The destination must be a deployment this caller owns: a policy is
         // a write of that deployment's data path.
         let dep = scope.require(&req.deployment).await?;
-        let revision = crate::mesh::save_policy(&req, dep.namespace())
+        let revision = crate::mesh::save_policy(&req, &dep)
             .await
             .map_err(ApiError::internal)?;
         Ok(Json(serde_json::json!({ "revision": revision })))

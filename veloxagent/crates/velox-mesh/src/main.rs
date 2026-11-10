@@ -182,8 +182,13 @@ async fn opamp(
                             (
                                 engine,
                                 velox_opamp::AgentConfigObject {
+                                    // Fluent Bit's classic format, which is
+                                    // what the packages ship and the compiler
+                                    // assembles — it has no registered media
+                                    // type, and claiming YAML would be a lie
+                                    // the agent could act on.
                                     body,
-                                    content_type: "text/yaml".into(),
+                                    content_type: "text/plain".into(),
                                 },
                             )
                         })
@@ -195,11 +200,27 @@ async fn opamp(
         _ => None,
     };
 
+    // The data-path credential, on every check-in rather than only alongside
+    // a new configuration: a credential can be rotated without the policy
+    // changing, and an agent that only learned about it with a new revision
+    // would keep flushing with the old password until someone edited
+    // something. The agent compares a fingerprint and restarts its engine
+    // only when the value actually changed.
+    let velox_output_credential = match &agent.policy_id {
+        Some(p) => store::policy_credential(&st.pg, p)
+            .await
+            .ok()
+            .flatten()
+            .map(|(username, password)| velox_opamp::OutputCredential { username, password }),
+        None => None,
+    };
+
     Ok(Json(velox_opamp::ServerToAgent {
         instance_uid: agent.instance_uid,
         remote_config,
         flags: vec![],
         error_response: None,
+        velox_output_credential,
     }))
 }
 
@@ -360,6 +381,34 @@ async fn put_policy(
     Ok(Json(serde_json::json!({ "revision": revision })))
 }
 
+#[derive(Deserialize)]
+struct PutCredentialReq {
+    policy_id: String,
+    username: String,
+    password: String,
+}
+
+/// Store the OpenSearch login the agents on a policy write with.
+///
+/// Written by the core, which is the side that holds the deployment's admin
+/// credentials and creates the account. The Mesh is a courier here: it does
+/// not mint this credential, cannot verify it, and serves it only to an agent
+/// that authenticated on this policy.
+async fn put_policy_credential(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<PutCredentialReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    console_auth(&st, &headers)?;
+    store::put_policy_credential(&st.pg, &req.policy_id, &req.username, &req.password)
+        .await
+        .map_err(|e| match e {
+            store::Error::Refused(m) => err(StatusCode::BAD_REQUEST, m),
+            other => err(StatusCode::INTERNAL_SERVER_ERROR, other),
+        })?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// The policy document of the current revision, for the editor. The console
 /// edits what is stored, never what it happens to have in a tab.
 async fn policy(
@@ -504,6 +553,10 @@ async fn main() {
         .route("/api/mesh/policies", get(policies))
         .route("/api/mesh/policy", post(policy))
         .route("/api/mesh/put_policy", post(put_policy))
+        .route(
+            "/api/mesh/put_policy_credential",
+            post(put_policy_credential),
+        )
         .route("/api/mesh/enrollment_token", post(mint_token))
         .route("/api/mesh/assign_policy", post(assign))
         .route("/api/mesh/unenrol", post(unenrol))

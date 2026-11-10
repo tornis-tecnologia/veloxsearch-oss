@@ -234,6 +234,15 @@ pub struct Target {
 pub const OS_USER_REF: &str = "${VELOX_OS_USER}";
 pub const OS_PASSWORD_REF: &str = "${VELOX_OS_PASSWORD}";
 
+/// The same two names without the `${...}`, which is what the agent exports
+/// into the engine's environment. They are consts rather than a `strip` at
+/// the call site because the two spellings have to agree: a rename on one
+/// side and not the other produces a configuration whose credentials are
+/// silently empty, and the symptom is a 401 from OpenSearch — an hour of
+/// looking in the wrong place.
+pub const OS_USER_ENV: &str = "VELOX_OS_USER";
+pub const OS_PASSWORD_ENV: &str = "VELOX_OS_PASSWORD";
+
 /// The production [`FragmentRenderer`]: `velox_integrations::render` over the
 /// package's `agent.conf.tmpl`, with the closed variable set resolved from the
 /// policy's OpenSearch output. The same function, the same eight tokens and the
@@ -402,6 +411,14 @@ pub fn compile(policy: &Policy, renderer: &dyn FragmentRenderer) -> Result<Compi
 
 #[cfg(test)]
 mod tests {
+
+    /// The reference a package renders and the variable the agent exports are
+    /// the same name, or the credential never reaches the engine.
+    #[test]
+    fn the_reference_and_the_variable_cannot_drift() {
+        assert_eq!(OS_USER_REF, format!("${{{OS_USER_ENV}}}"));
+        assert_eq!(OS_PASSWORD_REF, format!("${{{OS_PASSWORD_ENV}}}"));
+    }
     use super::*;
 
     /// Stands in for the open-source renderer: emits a Fluent Bit stanza per

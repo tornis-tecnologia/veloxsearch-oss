@@ -30,8 +30,13 @@ use std::collections::BTreeMap;
 use tokio_postgres::{Client, NoTls};
 
 /// Ordered, embedded migrations. Append-only, exactly like the core's.
-const MIGRATIONS: &[(&str, &str)] =
-    &[("001_mesh", include_str!("../../../migrations/001_mesh.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("001_mesh", include_str!("../../../migrations/001_mesh.sql")),
+    (
+        "002_policy_credentials",
+        include_str!("../../../migrations/002_policy_credentials.sql"),
+    ),
+];
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -230,6 +235,47 @@ pub async fn current_config(
         .await?
         .ok_or(Error::NotFound)?;
     Ok((row.get::<_, i64>(0) as u64, row.get(1), row.get(2)))
+}
+
+/// The OpenSearch login the agents on this policy write with. Replaced
+/// whole on every save: there is one current credential, and keeping older
+/// ones would mean keeping passwords that nothing can use.
+pub async fn put_policy_credential(
+    pg: &Client,
+    policy_id: &str,
+    username: &str,
+    password: &str,
+) -> Result<()> {
+    if username.is_empty() || password.is_empty() {
+        return Err(Error::Refused(
+            "a collector credential needs both a username and a password".into(),
+        ));
+    }
+    pg.execute(
+        "INSERT INTO mesh_policy_credentials (policy_id, username, password, updated_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (policy_id) DO UPDATE
+            SET username = EXCLUDED.username,
+                password = EXCLUDED.password,
+                updated_at = EXCLUDED.updated_at",
+        &[&policy_id, &username, &password, &(now() as i64)],
+    )
+    .await?;
+    Ok(())
+}
+
+/// What an agent on this policy is given on check-in. `None` when no
+/// credential has been stored yet — an older policy, or a core that could not
+/// reach its deployment — and the agent then reports a configuration it
+/// cannot authenticate rather than guessing.
+pub async fn policy_credential(pg: &Client, policy_id: &str) -> Result<Option<(String, String)>> {
+    Ok(pg
+        .query_opt(
+            "SELECT username, password FROM mesh_policy_credentials WHERE policy_id = $1",
+            &[&policy_id],
+        )
+        .await?
+        .map(|r| (r.get(0), r.get(1))))
 }
 
 // ---------------------------------------------------------------------------
@@ -490,23 +536,40 @@ mod tests {
     /// brings its schema to head.
     #[test]
     fn the_schema_is_embedded_in_the_binary() {
-        assert_eq!(MIGRATIONS.len(), 1);
-        let (version, sql) = MIGRATIONS[0];
-        assert_eq!(version, "001_mesh");
+        let versions: Vec<&str> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        assert_eq!(versions, vec!["001_mesh", "002_policy_credentials"]);
+        let sql: String = MIGRATIONS.iter().map(|(_, s)| *s).collect();
         for table in [
             "mesh_policies",
             "mesh_policy_revisions",
             "mesh_enrollment_tokens",
             "mesh_agents",
+            "mesh_policy_credentials",
         ] {
             assert!(sql.contains(table), "{table} is not in the migration");
         }
-        // Secrets are columns of hashes, never of secrets.
+        // Secrets the Mesh only has to VERIFY are columns of hashes.
         assert!(sql.contains("token_hash"));
         assert!(sql.contains("credential_hash"));
         assert!(
             !sql.contains("token text NOT NULL"),
             "a raw token column would be a leak"
+        );
+    }
+
+    /// The one secret kept in the clear, and the reason, in the schema where
+    /// the next person will read it. The Mesh must *hand this one over* — an
+    /// agent cannot authenticate to OpenSearch with a hash — so the limit on
+    /// the damage is the account's permissions, not the storage. If this test
+    /// ever has to be relaxed, that argument has changed and someone should
+    /// have to say so out loud.
+    #[test]
+    fn the_only_plaintext_secret_is_the_output_credential_and_it_is_explained() {
+        let (_, sql) = MIGRATIONS[1];
+        assert!(sql.contains("password   text NOT NULL"));
+        assert!(
+            sql.contains("hand") && sql.contains("hash"),
+            "the migration must say WHY this one is not hashed"
         );
     }
 }

@@ -146,6 +146,45 @@ pub struct AgentRemoteConfig {
     pub config_hash: String,
 }
 
+/// The login the agent's collector authenticates to its *destination* with.
+///
+/// **This is ours, not OpAMP's**, and it is named so on the wire
+/// (`velox_output_credential`). OpAMP's `connection_settings` offers an agent
+/// the settings for its own connection back to the server, and its
+/// `OtherConnectionSettings` carries an endpoint, headers and a certificate —
+/// none of which is a username and a password for an OpenSearch output.
+/// Putting this in that field would have made a Velox invention look like
+/// protocol, so it is a declared extension instead (see `VELOX_EXTENSIONS` in
+/// the tests).
+///
+/// It travels on the check-in response, which is already authenticated by the
+/// agent's per-host credential, and the agent puts it in the engine's
+/// environment — never on disk, and never into the configuration file the
+/// policy compiled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputCredential {
+    pub username: String,
+    pub password: String,
+}
+
+impl OutputCredential {
+    /// A value that identifies the credential without revealing it, so the
+    /// agent can notice a rotation and restart its engine without ever
+    /// logging or comparing the password itself.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest as _, Sha256};
+        let mut h = Sha256::new();
+        h.update(self.username.as_bytes());
+        h.update([0u8]);
+        h.update(self.password.as_bytes());
+        h.finalize()
+            .iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+}
+
 /// OpAMP `ServerToAgentFlags`, spelled out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ServerToAgentFlags {
@@ -184,6 +223,13 @@ pub struct ServerToAgent {
     pub flags: Vec<ServerToAgentFlags>,
     #[serde(default)]
     pub error_response: Option<ServerErrorResponse>,
+    /// Credentials for the data path (not for the OpAMP connection itself).
+    /// Absent when the server has none for this agent's policy; the agent
+    /// then applies the configuration anyway and lets the engine report what
+    /// it cannot do, because a host that stops collecting is worse than a
+    /// host whose output is rejected.
+    #[serde(default)]
+    pub velox_output_credential: Option<OutputCredential>,
 }
 
 #[cfg(test)]
@@ -288,12 +334,64 @@ mod tests {
             .collect()
     }
 
+    /// Fields that are deliberately OURS and not OpAMP's. The guard below
+    /// lets exactly these through, so an extension is a line in this list and
+    /// a decision, never an accident.
+    ///
+    /// * `ServerToAgent.velox_output_credential` — the login the collector
+    ///   writes to OpenSearch with. OpAMP has no equivalent: its
+    ///   `connection_settings` is about the agent's own link to the server.
+    const VELOX_EXTENSIONS: &[(&str, &str)] = &[("ServerToAgent", "velox_output_credential")];
+
+    fn assert_subset_of(
+        message_name: &str,
+        ours: BTreeSet<String>,
+        theirs: BTreeSet<String>,
+        message: &str,
+    ) {
+        let declared: BTreeSet<String> = VELOX_EXTENSIONS
+            .iter()
+            .filter(|(m, _)| *m == message_name)
+            .map(|(_, f)| (*f).to_string())
+            .collect();
+        assert_subset(
+            ours.difference(&declared).cloned().collect(),
+            theirs,
+            message,
+        );
+    }
+
     fn assert_subset(ours: BTreeSet<String>, theirs: BTreeSet<String>, message: &str) {
         let foreign: Vec<_> = ours.difference(&theirs).collect();
         assert!(
             foreign.is_empty(),
             "{message}: fields {foreign:?} are not in the proto (has {theirs:?})"
         );
+    }
+
+    /// An extension has to be in the list to be allowed, and the list has to
+    /// name real fields: a stale entry would quietly widen the guard.
+    #[test]
+    fn declared_extensions_are_real_and_not_in_the_proto() {
+        for (message, field) in VELOX_EXTENSIONS {
+            assert!(
+                !proto_fields(message).contains(*field),
+                "{message}.{field} IS in the proto — it is not an extension, drop it from the list"
+            );
+        }
+        let s2a = ServerToAgent {
+            instance_uid: String::new(),
+            remote_config: None,
+            flags: vec![],
+            error_response: None,
+            velox_output_credential: None,
+        };
+        let ours = json_keys(&s2a);
+        for (message, field) in VELOX_EXTENSIONS {
+            if *message == "ServerToAgent" {
+                assert!(ours.contains(*field), "{field} is not a field we serialise");
+            }
+        }
     }
 
     /// Every field our JSON types name exists on the proto message of the same
@@ -346,6 +444,10 @@ mod tests {
             remote_config: Some(cfg.clone()),
             flags: vec![ServerToAgentFlags::ReportFullState],
             error_response: Some(err.clone()),
+            velox_output_credential: Some(OutputCredential {
+                username: "velox_mesh_agent".into(),
+                password: "pw".into(),
+            }),
         };
 
         assert_subset(
@@ -353,7 +455,8 @@ mod tests {
             proto_fields("AgentToServer"),
             "AgentToServer",
         );
-        assert_subset(
+        assert_subset_of(
+            "ServerToAgent",
             json_keys(&s2a),
             proto_fields("ServerToAgent"),
             "ServerToAgent",

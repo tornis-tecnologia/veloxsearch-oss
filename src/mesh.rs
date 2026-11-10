@@ -136,7 +136,10 @@ impl velox_policy::PackageStore for Verified {
 /// agent gets the collection stanza, and `compiled.backend` names what the
 /// deployment must carry — which the core then installs with the same
 /// apply-engine the DaemonSet path uses, so both ends come from one package.
-pub async fn save_policy(draft: &PolicyDraft, namespace: &str) -> anyhow::Result<u64> {
+pub async fn save_policy(
+    draft: &PolicyDraft,
+    dep: &crate::scope::Deployment,
+) -> anyhow::Result<u64> {
     use anyhow::Context as _;
 
     let mut packages = BTreeMap::new();
@@ -159,6 +162,13 @@ pub async fn save_policy(draft: &PolicyDraft, namespace: &str) -> anyhow::Result
         });
     }
 
+    // Read off the verified packages while we still own them: the renderer
+    // below takes the map.
+    let indices: Vec<String> = packages
+        .values()
+        .map(|p| p.manifest.index.clone())
+        .collect();
+
     let policy = velox_policy::Policy {
         id: draft.id.clone(),
         name: draft.name.clone(),
@@ -175,7 +185,7 @@ pub async fn save_policy(draft: &PolicyDraft, namespace: &str) -> anyhow::Result
         store: &Verified(packages),
         target: velox_policy::Target {
             deployment: draft.deployment.clone(),
-            namespace: namespace.to_string(),
+            namespace: dep.namespace().to_string(),
             os_host: draft.os_host.clone(),
         },
     };
@@ -194,6 +204,25 @@ pub async fn save_policy(draft: &PolicyDraft, namespace: &str) -> anyhow::Result
         })
         .collect();
 
+    // The collector account, before the policy that needs it exists.
+    //
+    // Order is the whole point: an agent picks up a new revision on its next
+    // check-in, and a revision whose indices the account cannot write yet
+    // means a flush rejected with a 403 and an operator reading a 401-shaped
+    // error. The account is created (or widened to cover a newly added
+    // integration) first, then the policy is stored, then agents converge.
+    //
+    // The indices come from the packages we just verified, so the role grants
+    // exactly what the policy's integrations declare and nothing else.
+    let (os_user, os_password) = crate::os_agent_user::ensure(dep, &indices)
+        .await
+        .with_context(|| {
+            format!(
+                "preparing the collector account on {} for policy {}",
+                dep.name(),
+                draft.id
+            )
+        })?;
     let out: serde_json::Value = call_mesh(
         "put_policy",
         &serde_json::json!({
@@ -205,9 +234,36 @@ pub async fn save_policy(draft: &PolicyDraft, namespace: &str) -> anyhow::Result
         }),
     )
     .await?;
-    out.get("revision")
+    let revision = out
+        .get("revision")
         .and_then(|v| v.as_u64())
-        .context("the Mesh did not answer with a revision")
+        .context("the Mesh did not answer with a revision")?;
+
+    // The credential row, after the policy it belongs to exists — it is keyed
+    // by policy id, and a credential for a policy that does not exist yet is
+    // not a thing the Mesh will store.
+    //
+    // Handed over separately from the policy and never inside it: revisions
+    // are immutable, kept forever and readable by anyone who can read the
+    // fleet, while this is a password. The Mesh serves it only to an agent
+    // that authenticated on this policy.
+    //
+    // The window this ordering opens is empty in practice: the only moment
+    // the row is missing is the first save of a brand-new policy, which by
+    // definition has no agents yet. A later save reuses the same account, so
+    // agents already running are unaffected.
+    let _: serde_json::Value = call_mesh(
+        "put_policy_credential",
+        &serde_json::json!({
+            "policy_id": draft.id,
+            "username": os_user,
+            "password": os_password,
+        }),
+    )
+    .await
+    .context("handing the collector credential to the Mesh")?;
+
+    Ok(revision)
 }
 
 /// POST to the Mesh's console face with the shared service token. Every call

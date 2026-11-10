@@ -115,6 +115,8 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 
 | ADR-069 | *(proposed)* The collection engines are the operator's to install — VeloxSearch distributes no Fluent Bit binary and downloads none (upstream publishes no standalone static Linux build); the console carries the per-distribution procedure, the agent enforces a minimum of Fluent Bit 3.2 and names the version it found, generated configs use absolute paths (hot reload only keeps the config directory from 5.1.2), and `--dry-run` is probed rather than assumed. [ADR-069](ADR-069-engines-are-the-operators-to-install.md) |
 
+| ADR-070 | *(proposed)* A host agent's collector writes with a **scoped** OpenSearch account, not the admin login — one least-privilege user per deployment created by the core (`write` + `create_index` on the policy's index patterns, plus bulk at cluster level; no read, no delete, no wildcard), the password read-or-created in a Secret beside the deployment, carried to agents by the Mesh over the authenticated check-in as the declared extension `velox_output_credential`, and put in the engine's environment rather than on the host's disk. [ADR-070](ADR-070-the-collector-writes-with-a-scoped-account.md) |
+
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and
 are not cited anywhere in the source.

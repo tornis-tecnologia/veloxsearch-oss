@@ -13,6 +13,10 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Fingerprinting an output credential so a rotation can be noticed without
+# comparing — or logging — the password itself. Same hash the rest of this
+# workspace already links.
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

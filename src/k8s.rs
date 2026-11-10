@@ -469,7 +469,7 @@ pub(crate) fn random_chars(alphabet: &[u8], len: usize) -> Result<String> {
 /// the only specials are the RFC-3986 "unreserved" set `-._~`. Loops until all
 /// four classes are present (overwhelmingly the first draw at length 24), so the
 /// operator's securityconfig seeding never rejects it. NEVER a literal default.
-fn gen_admin_password() -> Result<String> {
+pub(crate) fn gen_admin_password() -> Result<String> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
     const LEN: usize = 24;
     loop {

@@ -163,6 +163,12 @@ struct Engine {
     files: EngineFiles,
     child: Option<Child>,
     dry_run: bool,
+    /// The data-path login, handed down by the Mesh on every check-in and put
+    /// in front of the engine as environment variables. Held in memory only:
+    /// writing it next to the configuration would put a password on the disk
+    /// of every collecting host, which is the thing the `${...}` references in
+    /// the compiled config exist to avoid.
+    creds: Option<velox_opamp::OutputCredential>,
 }
 
 impl Engine {
@@ -273,11 +279,26 @@ impl Engine {
             // A log we cannot open must not stop collection.
             Err(_) => (Stdio::null(), Stdio::null()),
         };
-        let child = Command::new(&self.bin)
-            .arg("-c")
-            .arg(&self.files.live)
-            .stdout(out)
-            .stderr(err)
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("-c").arg(&self.files.live).stdout(out).stderr(err);
+        // Fluent Bit expands `${VAR}` from its own environment at start, so
+        // this is where the credential meets the configuration. The names come
+        // from `velox_policy`, which is also what renders the references into
+        // the config — one definition, so the two cannot drift.
+        match &self.creds {
+            Some(c) => {
+                cmd.env(velox_policy::OS_USER_ENV, &c.username)
+                    .env(velox_policy::OS_PASSWORD_ENV, &c.password);
+            }
+            // Explicitly remove rather than leave inherited: a value from the
+            // agent's own environment would silently outlive a credential the
+            // Mesh revoked, and the engine would keep writing with it.
+            None => {
+                cmd.env_remove(velox_policy::OS_USER_ENV)
+                    .env_remove(velox_policy::OS_PASSWORD_ENV);
+            }
+        }
+        let child = cmd
             .spawn()
             .map_err(|e| format!("cannot start {}: {e}", self.bin.display()))?;
         let _ = std::fs::write(self.pid_path(), child.id().to_string());
@@ -399,6 +420,7 @@ pub async fn run() -> Result<(), String> {
         files: paths.engine(),
         child: None,
         dry_run,
+        creds: None,
     };
     // A restart of the agent must not stop collection: if a live config is
     // already on disk, bring the engine up on it before the first check-in.
@@ -483,6 +505,40 @@ pub async fn run() -> Result<(), String> {
             Ok(res) if res.status().is_success() => {
                 match res.json::<velox_opamp::ServerToAgent>().await {
                     Ok(s2a) => {
+                        // Credentials first: a configuration applied in this
+                        // same round must start the engine with the newest
+                        // login, not the previous one.
+                        let offered = s2a.velox_output_credential.as_ref();
+                        let before = engine.creds.as_ref().map(|c| c.fingerprint());
+                        let after = offered.map(|c| c.fingerprint());
+                        if before != after {
+                            engine.creds = offered.cloned();
+                            match &after {
+                                Some(fp) => {
+                                    eprintln!("velox-agent: output credential in place ({fp})")
+                                }
+                                None => {
+                                    eprintln!("velox-agent: the Mesh offers no output credential")
+                                }
+                            }
+                            // Restart on a rotation: the engine read the old
+                            // value into its process environment at start and
+                            // will never see the new one otherwise. Skipped
+                            // when a configuration is about to be applied in
+                            // this same round, because that restarts anyway.
+                            let config_coming = s2a
+                                .remote_config
+                                .as_ref()
+                                .is_some_and(|c| c.config_hash != applied_hash);
+                            if !config_coming && engine.files.live.exists() {
+                                if let Err(e) = engine.start() {
+                                    error = e;
+                                    eprintln!(
+                                        "velox-agent: could not restart on the new credential: {error}"
+                                    );
+                                }
+                            }
+                        }
                         if let Some(cfg) = s2a.remote_config {
                             if cfg.config_hash != applied_hash {
                                 match cfg.config.config_map.get(FLUENT_BIT) {
