@@ -499,8 +499,261 @@ impl ResourceKind {
 /// `(kind, id)` — one installed / torn-down object.
 pub type ResourceKey = (ResourceKind, String);
 
+// ---------------------------------------------------------------------------
+// Artifact naming for the agent path
+// ---------------------------------------------------------------------------
+
+/// The prefix every artifact Velox Agent's path creates carries. One glance at
+/// an index list says which side wrote it, and one pattern (`veloxagent-*`)
+/// describes everything the collector account may touch.
+pub const AGENT_ARTIFACT_PREFIX: &str = "veloxagent";
+
+/// The signal words an index name may end in. A closed list on purpose: the
+/// alternative is deriving the signal by stripping the package id, which
+/// breaks the moment an id and its index do not share a prefix
+/// (`k8s-events`/`k8s-events`), and would put an empty segment in the middle
+/// of a name.
+const SIGNALS: [&str; 5] = ["logs", "metrics", "traces", "events", "audit"];
+
+/// The signal an index name denotes — its last `-` segment when that is a word
+/// we know, and `logs` otherwise, because every integration shipped so far is
+/// a log source and a wrong guess here is a name nobody can read.
+pub fn signal_of(index: &str) -> &'static str {
+    let last = index.rsplit('-').next().unwrap_or("");
+    SIGNALS
+        .iter()
+        .copied()
+        .find(|s| *s == last)
+        .unwrap_or("logs")
+}
+
+/// The major of a semver-ish version string, as the `v1` segment of a name.
+/// Anything unparseable is `1`: a name is not the place to discover that a
+/// manifest's version is malformed (the schema validator is), and `v0` would
+/// silently claim a pre-release.
+pub fn major_of(version: &str) -> u64 {
+    version
+        .split(['.', '-', '+'])
+        .next()
+        .and_then(|m| m.parse::<u64>().ok())
+        .filter(|m| *m > 0)
+        .unwrap_or(1)
+}
+
+/// The name **one** integration's artifacts share on the agent path:
+/// `veloxagent-<integration>-<signal>-v<major>`, e.g.
+/// `veloxagent-nginx-logs-v1`.
+///
+/// One name for the index, the index template, the ingest pipeline and the
+/// index pattern. They live in different namespaces in OpenSearch, so the
+/// single string cannot collide — and sharing it means "which template covers
+/// this index" and "which pipeline fed it" are answerable by looking, not by
+/// cross-referencing a table.
+///
+/// The version is in the name because an index template is not editable in
+/// place for a mapping change that conflicts with what is already indexed:
+/// shipping `nginx` 2.0 with a different mapping writes
+/// `veloxagent-nginx-logs-v2` and leaves v1 to retention, instead of a
+/// deployment where half the documents disagree with the template.
+///
+/// Deliberately NOT applied to the in-cluster DaemonSet path, whose indices
+/// (`nginx-logs`, …) are named by the packages themselves and already carry
+/// years of data and dashboards. The prefix marks the agent's artifacts; it
+/// does not rename anyone else's.
+pub fn agent_artifact_name(package_id: &str, index: &str, version: &str) -> String {
+    format!(
+        "{AGENT_ARTIFACT_PREFIX}-{package_id}-{}-v{}",
+        signal_of(index),
+        major_of(version)
+    )
+}
+
+/// Every id this package's artifacts take on the agent path, keyed by the id
+/// the package itself declares.
+///
+/// Renaming is not cosmetic here: both paths can be active on the same
+/// deployment, and the packages' saved objects carry fixed ids
+/// (`velox-nginx-overview`, …). Installing an integration twice under one set
+/// of ids means the second install silently repoints the first one's panels at
+/// a different index. Separate names are what let a DaemonSet install and a
+/// policy coexist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRenaming {
+    /// The shared name: index, index template, ingest pipeline, index pattern.
+    pub name: String,
+    /// Declared id → id on this path. Covers the index and every saved object.
+    pub map: BTreeMap<String, String>,
+}
+
+/// One saved object's id on the agent path. `velox-nginx-overview` becomes
+/// `veloxagent-nginx-logs-v1-overview`: the package's own `velox-<id>-` prefix
+/// carries no information once the artifact name is in front, and keeping it
+/// would read `veloxagent-nginx-logs-v1-velox-nginx-overview`.
+fn agent_saved_object_id(id: &str, package_id: &str, name: &str) -> String {
+    let suffix = id
+        .strip_prefix(&format!("velox-{package_id}-"))
+        .unwrap_or(id);
+    format!("{name}-{suffix}")
+}
+
+/// Work out every rename for one package at one version.
+pub fn agent_renaming(pkg: &Package, version: &str) -> Result<AgentRenaming> {
+    let name = agent_artifact_name(&pkg.manifest.id, &pkg.manifest.index, version);
+    let mut map = BTreeMap::new();
+    map.insert(pkg.manifest.index.clone(), name.clone());
+    for o in parse_saved_objects(&pkg.saved_objects)? {
+        if o.id == pkg.manifest.index {
+            // The index pattern is named after the index; already mapped.
+            continue;
+        }
+        let renamed = agent_saved_object_id(&o.id, &pkg.manifest.id, &name);
+        map.insert(o.id, renamed);
+    }
+    Ok(AgentRenaming { name, map })
+}
+
+/// One string, renamed if it names something we are renaming.
+///
+/// Exact match only, plus the `<id>*` form an index template's
+/// `index_patterns` uses — a substring rule would rewrite prose (a pipeline
+/// description reads "VeloxSearch nginx access-log pipeline") and field names
+/// that merely contain an id.
+fn rename_str(s: &str, map: &BTreeMap<String, String>) -> Option<String> {
+    if let Some(to) = map.get(s) {
+        return Some(to.clone());
+    }
+    let stem = s.strip_suffix('*')?;
+    map.get(stem).map(|to| format!("{to}*"))
+}
+
+/// Rewrite every renamed id inside a JSON value, including ids buried in a
+/// JSON document that is itself stored as a string — Dashboards keeps a
+/// visualization's index reference in
+/// `attributes.kibanaSavedObjectMeta.searchSourceJSON`, and a rename that
+/// stops at the outer object leaves every panel pointing at the old pattern.
+fn rename_in_value(v: &mut serde_json::Value, map: &BTreeMap<String, String>) {
+    match v {
+        serde_json::Value::String(s) => {
+            if let Some(to) = rename_str(s, map) {
+                *s = to;
+                return;
+            }
+            // A string that parses as a JSON object or array is treated as a
+            // nested document. Scalars are left alone: `"1"` is not JSON here.
+            let trimmed = s.trim_start();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                if let Ok(mut inner) = serde_json::from_str::<serde_json::Value>(s) {
+                    rename_in_value(&mut inner, map);
+                    if let Ok(text) = serde_json::to_string(&inner) {
+                        *s = text;
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for i in items {
+                rename_in_value(i, map);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (_, val) in fields.iter_mut() {
+                rename_in_value(val, map);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An index template, renamed for the agent path: its `index_patterns` follow
+/// the new index name, and `index.default_pipeline` follows the pipeline —
+/// which is renamed too, and whose id is not in the map because the package's
+/// pipeline id is a bare word (`nginx`) that would match prose and field
+/// values if it were renamed by string equality.
+pub fn agent_index_template(body: &str, r: &AgentRenaming) -> Result<String> {
+    let mut json: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| Error::SavedObjects {
+            line: 0,
+            reason: format!("index-template.json is not valid JSON: {e}"),
+        })?;
+    rename_in_value(&mut json, &r.map);
+    if let Some(settings) = json
+        .get_mut("template")
+        .and_then(|t| t.get_mut("settings"))
+        .and_then(|s| s.as_object_mut())
+    {
+        if settings.contains_key("index.default_pipeline") {
+            settings.insert(
+                "index.default_pipeline".to_string(),
+                serde_json::Value::String(r.name.clone()),
+            );
+        }
+    }
+    serde_json::to_string(&json).map_err(|e| Error::SavedObjects {
+        line: 0,
+        reason: e.to_string(),
+    })
+}
+
+/// A saved-objects document, renamed for the agent path: every object id,
+/// every reference between them, and every index reference inside a panel.
+pub fn agent_saved_objects(ndjson: &str, r: &AgentRenaming) -> Result<String> {
+    let mut out = String::with_capacity(ndjson.len());
+    for (n, line) in ndjson.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut json: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| Error::SavedObjects {
+                line: n + 1,
+                reason: e.to_string(),
+            })?;
+        rename_in_value(&mut json, &r.map);
+        out.push_str(
+            &serde_json::to_string(&json).map_err(|e| Error::SavedObjects {
+                line: n + 1,
+                reason: e.to_string(),
+            })?,
+        );
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// What installing this package on the agent path creates — the same
+/// accounting as [`created_resources`], under the renamed ids. The UI and the
+/// teardown both read this, so a rename that forgot one artifact shows up as
+/// an inventory that does not match the cluster.
+pub fn agent_created_resources(pkg: &Package, version: &str) -> Result<BTreeSet<ResourceKey>> {
+    let r = agent_renaming(pkg, version)?;
+    let mut set = BTreeSet::new();
+    if pkg.pipeline.is_some() {
+        set.insert((ResourceKind::IngestPipeline, r.name.clone()));
+    }
+    if pkg.index_template.is_some() {
+        set.insert((ResourceKind::IndexTemplate, r.name.clone()));
+    }
+    for o in parse_saved_objects(&pkg.saved_objects)? {
+        let id = r.map.get(&o.id).cloned().unwrap_or(o.id);
+        if o.kind == "index-pattern" {
+            set.insert((ResourceKind::IndexPattern, id));
+        } else {
+            set.insert((ResourceKind::SavedObject, id));
+        }
+    }
+    Ok(set)
+}
+
+/// The index pattern the collector account is granted, for one artifact name.
+/// A trailing `*` so a rolled-over or dated index (`...-v1-000001`) is covered
+/// by the same grant.
+pub fn agent_artifact_pattern(name: &str) -> String {
+    format!("{name}*")
+}
+
 /// Everything applying `pkg` creates in the customer's OpenSearch, derived from
 /// the package itself (assets present + the ids inside `saved-objects.ndjson`).
+/// These are the ids the **DaemonSet** path installs under; the agent path has
+/// its own, see [`agent_created_resources`].
 pub fn created_resources(pkg: &Package) -> Result<BTreeSet<ResourceKey>> {
     let mut set = BTreeSet::new();
     if pkg.pipeline.is_some() {
@@ -600,6 +853,184 @@ pub fn saved_objects_bulk(ndjson: &str) -> Result<Vec<serde_json::Value>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A package shaped like the real nginx one: an index pattern named after
+    /// the index, a dashboard that references a visualization, and a
+    /// visualization whose index reference is JSON inside a string.
+    fn nginx_package() -> Package {
+        Package {
+            manifest: parse_manifest(
+                "id: nginx\nindex: nginx-logs\ndashboard: velox-nginx-overview\n\
+                 assets:\n  agent_config: agent.conf.tmpl\n  pipeline: pipeline.json\n  \
+                 index_template: index-template.json\n  saved_objects: saved-objects.ndjson\n\
+                 teardown:\n  ingest_pipeline: nginx\n  index_template: nginx-logs\n  \
+                 index_pattern: nginx-logs\n  saved_objects:\n    - velox-nginx-overview\n    \
+                 - velox-nginx-status\n",
+            )
+            .expect("fixture manifest"),
+            pipeline: Some(
+                r#"{"description":"VeloxSearch nginx access-log pipeline","processors":[]}"#
+                    .into(),
+            ),
+            index_template: Some(
+                r#"{"index_patterns":["nginx-logs*"],"template":{"settings":{"index.default_pipeline":"nginx"},"mappings":{"properties":{}}}}"#
+                    .into(),
+            ),
+            saved_objects: [
+                r#"{"type":"index-pattern","id":"nginx-logs","attributes":{"title":"nginx-logs","timeFieldName":"@timestamp"}}"#,
+                r#"{"type":"visualization","id":"velox-nginx-status","attributes":{"title":"Status","kibanaSavedObjectMeta":{"searchSourceJSON":"{\"index\":\"nginx-logs\",\"query\":{\"query\":\"\"}}"}},"references":[{"type":"index-pattern","id":"nginx-logs","name":"kibanaSavedObjectMeta.searchSourceJSON.index"}]}"#,
+                r#"{"type":"dashboard","id":"velox-nginx-overview","attributes":{"title":"nginx"},"references":[{"type":"visualization","id":"velox-nginx-status","name":"panel_1"}]}"#,
+            ]
+            .join("\n"),
+            agent_config: "[OUTPUT]\n    Index {index}\n".into(),
+            otel_config: None,
+        }
+    }
+
+    #[test]
+    fn the_agent_path_renames_the_index_the_template_and_the_pipeline() {
+        let pkg = nginx_package();
+        let r = agent_renaming(&pkg, "1.0.0").expect("renaming");
+        assert_eq!(r.name, "veloxagent-nginx-logs-v1");
+
+        let tmpl = agent_index_template(pkg.index_template.as_deref().unwrap(), &r).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&tmpl).unwrap();
+        // The template must match the index the agent actually writes...
+        assert_eq!(json["index_patterns"][0], "veloxagent-nginx-logs-v1*");
+        // ...and point at the pipeline under its new id, or every document is
+        // indexed raw and the dashboards' fields do not exist.
+        assert_eq!(
+            json["template"]["settings"]["index.default_pipeline"],
+            "veloxagent-nginx-logs-v1"
+        );
+    }
+
+    #[test]
+    fn renaming_follows_every_reference_including_the_one_inside_a_string() {
+        let pkg = nginx_package();
+        let r = agent_renaming(&pkg, "1.0.0").expect("renaming");
+        let out = agent_saved_objects(&pkg.saved_objects, &r).unwrap();
+        let objs: Vec<serde_json::Value> = out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        // The index pattern takes the artifact name, title included — the
+        // title is what the pattern matches, not decoration.
+        assert_eq!(objs[0]["id"], "veloxagent-nginx-logs-v1");
+        assert_eq!(objs[0]["attributes"]["title"], "veloxagent-nginx-logs-v1");
+
+        // The package's own `velox-nginx-` prefix is dropped: the artifact
+        // name already says which integration and version this is.
+        assert_eq!(objs[1]["id"], "veloxagent-nginx-logs-v1-status");
+        assert_eq!(objs[2]["id"], "veloxagent-nginx-logs-v1-overview");
+
+        // A reference between objects follows...
+        assert_eq!(objs[1]["references"][0]["id"], "veloxagent-nginx-logs-v1");
+        assert_eq!(
+            objs[2]["references"][0]["id"],
+            "veloxagent-nginx-logs-v1-status"
+        );
+        // ...and so does the index buried in searchSourceJSON, which is a
+        // JSON document stored as a string. A rename that stops at the outer
+        // object leaves every panel reading the old pattern.
+        let inner: serde_json::Value = serde_json::from_str(
+            objs[1]["attributes"]["kibanaSavedObjectMeta"]["searchSourceJSON"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inner["index"], "veloxagent-nginx-logs-v1");
+    }
+
+    #[test]
+    fn renaming_leaves_prose_and_unrelated_values_alone() {
+        let pkg = nginx_package();
+        let r = agent_renaming(&pkg, "1.0.0").expect("renaming");
+        // `nginx` is the package id and appears in a description. Renaming by
+        // substring would rewrite it; renaming by equality must not.
+        let out = agent_saved_objects(&pkg.saved_objects, &r).unwrap();
+        assert!(out.contains("\"title\":\"nginx\""), "{out}");
+        let tmpl = agent_index_template(pkg.index_template.as_deref().unwrap(), &r).unwrap();
+        assert!(!tmpl.contains("veloxagent-nginx-logs-v1-logs"), "{tmpl}");
+    }
+
+    /// The inventory the UI shows and the teardown uses must be the renamed
+    /// set, or it describes artifacts that are not in the cluster.
+    #[test]
+    fn the_inventory_is_the_renamed_one() {
+        let pkg = nginx_package();
+        let declared = created_resources(&pkg).unwrap();
+        let agent = agent_created_resources(&pkg, "1.0.0").unwrap();
+        assert_eq!(declared.len(), agent.len());
+        for (_, id) in &agent {
+            assert!(
+                id.starts_with("veloxagent-nginx-logs-v1"),
+                "{id} was not renamed"
+            );
+        }
+        assert!(agent.contains(&(
+            ResourceKind::IngestPipeline,
+            "veloxagent-nginx-logs-v1".to_string()
+        )));
+        assert!(agent.contains(&(
+            ResourceKind::IndexPattern,
+            "veloxagent-nginx-logs-v1".to_string()
+        )));
+    }
+
+    #[test]
+    fn an_agent_artifact_is_named_for_its_integration_signal_and_major() {
+        assert_eq!(
+            agent_artifact_name("nginx", "nginx-logs", "1.0.0"),
+            "veloxagent-nginx-logs-v1"
+        );
+        assert_eq!(
+            agent_artifact_name("nginx", "nginx-metrics", "1.4.2"),
+            "veloxagent-nginx-metrics-v1"
+        );
+        assert_eq!(
+            agent_artifact_name("nginx", "nginx-logs", "2.0.0"),
+            "veloxagent-nginx-logs-v2"
+        );
+    }
+
+    /// The signal comes from a closed list, not from stripping the package id:
+    /// `k8s-events` has the same id and index, and stripping would leave an
+    /// empty segment in the middle of the name.
+    #[test]
+    fn the_signal_never_comes_out_empty() {
+        assert_eq!(
+            agent_artifact_name("k8s-events", "k8s-events", "1.0.0"),
+            "veloxagent-k8s-events-events-v1"
+        );
+        assert_eq!(signal_of("k8s-audit-logs"), "logs");
+        // An index that ends in nothing we recognise is still a log source,
+        // which is what every integration shipped so far is.
+        assert_eq!(signal_of("something-else"), "logs");
+        assert_eq!(signal_of(""), "logs");
+    }
+
+    /// A malformed version must not produce `v0` (which would read as a
+    /// pre-release) or an empty segment.
+    #[test]
+    fn a_broken_version_still_names_something_readable() {
+        for v in ["", "x", "0.9.1", "0", "-", "1"] {
+            let n = agent_artifact_name("redis", "redis-logs", v);
+            assert!(n == "veloxagent-redis-logs-v1", "{v:?} produced {n}");
+        }
+        assert_eq!(major_of("12.3.4"), 12);
+    }
+
+    /// The grant has to cover a rolled-over index, or collection stops the
+    /// first time an index rolls.
+    #[test]
+    fn the_grant_covers_rollover() {
+        let name = agent_artifact_name("ssh", "ssh-logs", "1.0.0");
+        let pattern = agent_artifact_pattern(&name);
+        assert_eq!(pattern, "veloxagent-ssh-logs-v1*");
+        assert!(format!("{name}-000001").starts_with(pattern.trim_end_matches('*')));
+    }
     use super::*;
 
     fn nginx_vars() -> Vars {

@@ -120,10 +120,12 @@ pub struct PolicyDraft {
     pub os_host: Option<String>,
 }
 
-/// A `PackageStore` over packages this process fetched and verified.
-struct Verified(BTreeMap<(String, String), velox_integrations::Package>);
+/// A `PackageStore` over packages this process fetched and verified. Borrows
+/// rather than owns: the same set is needed again after compiling, to install
+/// each integration's backend half.
+struct Verified<'a>(&'a BTreeMap<(String, String), velox_integrations::Package>);
 
-impl velox_policy::PackageStore for Verified {
+impl velox_policy::PackageStore for Verified<'_> {
     fn get(&self, id: &str, version: &str) -> Option<&velox_integrations::Package> {
         self.0.get(&(id.to_string(), version.to_string()))
     }
@@ -162,13 +164,6 @@ pub async fn save_policy(
         });
     }
 
-    // Read off the verified packages while we still own them: the renderer
-    // below takes the map.
-    let indices: Vec<String> = packages
-        .values()
-        .map(|p| p.manifest.index.clone())
-        .collect();
-
     let policy = velox_policy::Policy {
         id: draft.id.clone(),
         name: draft.name.clone(),
@@ -182,7 +177,7 @@ pub async fn save_policy(
         agent: velox_policy::AgentSettings::default(),
     };
     let renderer = velox_policy::PackageRenderer {
-        store: &Verified(packages),
+        store: &Verified(&packages),
         target: velox_policy::Target {
             deployment: draft.deployment.clone(),
             namespace: dep.namespace().to_string(),
@@ -204,6 +199,16 @@ pub async fn save_policy(
         })
         .collect();
 
+    // The names this policy's artifacts take — `veloxagent-<integration>-
+    // <signal>-v<major>` (ADR-071) — read off what the compiler produced
+    // rather than derived again here, so the index in the collector's config,
+    // the artifacts in OpenSearch and the account's grant are one decision.
+    let artifact_names: Vec<String> = compiled
+        .backend
+        .iter()
+        .map(|b| b.artifact_name.clone())
+        .collect();
+
     // The collector account, before the policy that needs it exists.
     //
     // Order is the whole point: an agent picks up a new revision on its next
@@ -214,7 +219,7 @@ pub async fn save_policy(
     //
     // The indices come from the packages we just verified, so the role grants
     // exactly what the policy's integrations declare and nothing else.
-    let (os_user, os_password) = crate::os_agent_user::ensure(dep, &indices)
+    let (os_user, os_password) = crate::os_agent_user::ensure(dep, &artifact_names)
         .await
         .with_context(|| {
             format!(
@@ -223,6 +228,24 @@ pub async fn save_policy(
                 draft.id
             )
         })?;
+    // The backend half of every activation, under this path's names: ingest
+    // pipeline, index template, index pattern and dashboards. Before the
+    // policy is stored, because the agent starts writing on its next check-in
+    // and documents that arrive before the template do get the mapping the
+    // template was meant to prevent.
+    //
+    // No collector is deployed here — that is the policy's job, on the host.
+    for ((id, version), pkg) in &packages {
+        crate::integrations::apply_package_for_agent(dep, pkg, version)
+            .await
+            .with_context(|| {
+                format!(
+                    "installing the backend artifacts of {id}@{version} on {}",
+                    dep.name()
+                )
+            })?;
+    }
+
     let out: serde_json::Value = call_mesh(
         "put_policy",
         &serde_json::json!({

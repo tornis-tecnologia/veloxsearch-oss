@@ -156,6 +156,102 @@ pub async fn apply_package(deployment: &Deployment, pkg: &Package) -> Result<()>
     Ok(())
 }
 
+/// Install the **backend half** of an activation on the agent path: the ingest
+/// pipeline, the index template, the index pattern and the dashboards, all
+/// under the `veloxagent-<integration>-<signal>-v<major>` names (ADR-071), and
+/// no agent at all.
+///
+/// Two differences from [`apply_package`], and both are the point:
+///
+///  * **No collector is deployed.** The edge half of this activation runs on a
+///    host, under a policy, from the compiled configuration the Mesh serves.
+///    Deploying a DaemonSet here would collect everything twice.
+///  * **Every artifact is renamed.** Both paths can be active on one
+///    deployment, and the packages carry fixed saved-object ids. Installing
+///    under those ids would repoint the DaemonSet install's panels at the
+///    agent's index — the kind of breakage nobody attributes to the right
+///    cause.
+///
+/// `{index}` renders to the renamed index, so the dashboards and the template
+/// describe the index the agent actually writes to, and the collector
+/// account's grant covers exactly that name.
+pub async fn apply_package_for_agent(
+    deployment: &Deployment,
+    pkg: &Package,
+    version: &str,
+) -> Result<()> {
+    let renaming = velox_integrations::agent_renaming(pkg, version)?;
+    let (u, p) = crate::k8s::admin_creds(deployment).await;
+    let vars = vars(deployment, &renaming.name, &pkg.manifest.id, &u, &p);
+
+    // Interpolation safety first, exactly as on the DaemonSet path: render
+    // every asset before a single write, so a foreign `{token}` aborts the
+    // whole install.
+    let pipeline = match &pkg.pipeline {
+        Some(s) => Some(render(s, &vars)?),
+        None => None,
+    };
+    let index_template = match &pkg.index_template {
+        Some(s) => Some(velox_integrations::agent_index_template(
+            &render(s, &vars)?,
+            &renaming,
+        )?),
+        None => None,
+    };
+    let saved_objects =
+        velox_integrations::agent_saved_objects(&render(&pkg.saved_objects, &vars)?, &renaming)?;
+
+    let base = crate::recipes::os_base(deployment);
+    let c = crate::recipes::http()?;
+
+    if let Some(body) = &pipeline {
+        let json: serde_json::Value =
+            serde_json::from_str(body).context("pipeline.json is not valid JSON")?;
+        c.put(format!("{base}/_ingest/pipeline/{}", renaming.name))
+            .basic_auth(&u, Some(&p))
+            .json(&json)
+            .send()
+            .await
+            .context("creating ingest pipeline")?
+            .error_for_status()
+            .context("ingest pipeline rejected")?;
+    }
+
+    if let Some(body) = &index_template {
+        let json: serde_json::Value =
+            serde_json::from_str(body).context("index-template.json is not valid JSON")?;
+        c.put(format!("{base}/_index_template/{}", renaming.name))
+            .basic_auth(&u, Some(&p))
+            .json(&json)
+            .send()
+            .await
+            .context("creating index template")?
+            .error_for_status()
+            .context("index template rejected")?;
+    }
+
+    // Saved objects into the deployment's own Dashboards tenant, best-effort
+    // for the same reason as the DaemonSet path: a cluster without
+    // multitenancy still gets them, in Global.
+    let scope = crate::recipes::tenant_scope(deployment).await;
+    if scope.is_some() {
+        crate::recipes::ensure_tenant(deployment).await;
+    }
+    let objs = saved_objects_bulk(&saved_objects)?;
+    let dash = crate::recipes::dashboards_base(deployment);
+    let mut req = c
+        .post(format!(
+            "{dash}/api/saved_objects/_bulk_create?overwrite=true"
+        ))
+        .basic_auth(&u, Some(&p))
+        .header("osd-xsrf", "true");
+    if let Some(t) = &scope {
+        req = req.header("securitytenant", t);
+    }
+    let _ = req.json(&objs).send().await;
+    Ok(())
+}
+
 /// Uninstall a package: remove its agent, then delete exactly the manifest's
 /// `teardown` set from the deployment's OpenSearch — the fix for the historical
 /// `disable()` leak (ADR-039). Saved-object *types* (needed by the Dashboards

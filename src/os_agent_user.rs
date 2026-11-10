@@ -56,19 +56,19 @@ use anyhow::{Context as _, Result};
 
 /// The role the collector account holds. One per deployment's OpenSearch —
 /// each deployment is its own cluster, so the name does not need qualifying.
-pub(crate) const AGENT_ROLE: &str = "velox_mesh_writer";
+pub(crate) const AGENT_ROLE: &str = "veloxagent-role";
 
 /// The account itself. Shared by every agent writing into this deployment:
 /// per-agent accounts would be the stronger model, but revoking one host then
 /// means a security-plugin write per host and a rotation path we do not have
 /// yet — this is the honest first step, and the role is the part that limits
 /// the damage.
-pub(crate) const AGENT_USER: &str = "velox_mesh_agent";
+pub(crate) const AGENT_USER: &str = "veloxagent-user";
 
 /// The Secret holding the account's password, in the deployment's namespace
 /// beside its admin Secret.
 fn secret_name(dep: &Deployment) -> String {
-    format!("{}-velox-mesh-agent", dep.name())
+    format!("{}-veloxagent-user", dep.name())
 }
 
 /// What the account is allowed to do.
@@ -92,11 +92,11 @@ fn secret_name(dep: &Deployment) -> String {
 /// collector has no business reading back what it wrote.
 pub(crate) fn role_body(patterns: &[String]) -> serde_json::Value {
     serde_json::json!({
-        "description": "VeloxSearch: append-only access for Velox Mesh agents",
+        "description": "VeloxSearch: read and write on the veloxagent-* artifacts",
         "cluster_permissions": ["indices:data/write/bulk"],
         "index_permissions": [{
             "index_patterns": patterns,
-            "allowed_actions": ["write", "create_index"]
+            "allowed_actions": ["read", "write", "create_index"]
         }],
         "tenant_permissions": []
     })
@@ -110,20 +110,27 @@ fn user_body(password: &str) -> serde_json::Value {
         "password": password,
         "opendistro_security_roles": [AGENT_ROLE],
         "attributes": { "managed-by": "veloxsearch" },
-        "description": "VeloxSearch: Velox Mesh collector account"
+        "description": "VeloxSearch: the Velox Agent collector account"
     })
 }
 
-/// The index patterns a set of integration indices grants, sorted and
-/// deduplicated so the same policy always renders the same role (an
-/// unnecessary PUT is a needless audit-log entry and a needless chance to
-/// fail).
-pub(crate) fn patterns(indices: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = indices
+/// The index patterns a set of artifact names grants, sorted and deduplicated
+/// so the same policy always renders the same role (an unnecessary PUT is a
+/// needless audit-log entry and a needless chance to fail).
+///
+/// Every name is refused unless it carries the agent prefix. That is not
+/// defensive clutter: this list is the only thing standing between a policy
+/// and a grant, and a name that arrived from somewhere else — a package that
+/// declared its own index, a future caller passing `manifest.index` by
+/// mistake — would hand the collector write access to the DaemonSet path's
+/// data. `veloxagent-*` is what this account exists to touch.
+pub(crate) fn patterns(artifact_names: &[String]) -> Vec<String> {
+    let prefix = format!("{}-", velox_integrations::AGENT_ARTIFACT_PREFIX);
+    let mut out: Vec<String> = artifact_names
         .iter()
-        .map(|i| i.trim_end_matches('*').to_string())
-        .filter(|i| !i.is_empty())
-        .map(|i| format!("{i}*"))
+        .map(|n| n.trim_end_matches('*').to_string())
+        .filter(|n| n.starts_with(&prefix) && n.len() > prefix.len())
+        .map(|n| velox_integrations::agent_artifact_pattern(&n))
         .collect();
     out.sort();
     out.dedup();
@@ -187,7 +194,10 @@ async fn password(dep: &Deployment) -> Result<String> {
 /// The final check is not ceremony — it is the difference between "we wrote
 /// some JSON" and "this login can write", and the operator finds out here
 /// rather than from a 401 in an agent's log an hour later.
-pub(crate) async fn ensure(dep: &Deployment, indices: &[String]) -> Result<(String, String)> {
+pub(crate) async fn ensure(
+    dep: &Deployment,
+    artifact_names: &[String],
+) -> Result<(String, String)> {
     let base = crate::recipes::os_base(dep);
     let http = crate::recipes::http()?;
     let (admin_user, admin_pw) = crate::k8s::admin_creds(dep).await;
@@ -202,7 +212,7 @@ pub(crate) async fn ensure(dep: &Deployment, indices: &[String]) -> Result<(Stri
     let role = http
         .put(format!("{base}/_plugins/_security/api/roles/{AGENT_ROLE}"))
         .basic_auth(&admin_user, Some(&admin_pw))
-        .json(&role_body(&patterns(indices)))
+        .json(&role_body(&patterns(artifact_names)))
         .send()
         .await
         .context("creating the collector role")?;
@@ -261,8 +271,8 @@ mod tests {
     }
 
     #[test]
-    fn the_account_can_create_an_index_but_not_read_one() {
-        let b = role_body(&["ssh-logs*".into()]);
+    fn the_account_reads_writes_and_creates_but_holds_nothing_wider() {
+        let b = role_body(&["veloxagent-ssh-logs-v1*".into()]);
         let actions = b["index_permissions"][0]["allowed_actions"]
             .as_array()
             .unwrap()
@@ -273,37 +283,73 @@ mod tests {
         // fresh deployment creates the index.
         assert!(actions.contains(&"create_index"), "{actions:?}");
         assert!(actions.contains(&"write"), "{actions:?}");
-        // A collector has no business reading back what it wrote.
-        for forbidden in ["read", "search", "indices_all", "*"] {
+        // Read is granted on these indices so an agent-side check or a
+        // Dashboards session using this account can see what it wrote.
+        assert!(actions.contains(&"read"), "{actions:?}");
+        // What it must never hold: anything that reaches past the pattern.
+        for forbidden in ["indices_all", "*", "all_access", "manage"] {
             assert!(!actions.contains(&forbidden), "{actions:?}");
         }
+        assert!(b["cluster_permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p.as_str() == Some("indices:data/write/bulk")));
     }
 
     #[test]
-    fn the_role_is_scoped_to_the_declared_indices() {
-        let b = role_body(&patterns(&["nginx-logs".into(), "ssh-logs".into()]));
+    fn the_role_is_scoped_to_the_policys_artifacts() {
+        let b = role_body(&patterns(&[
+            "veloxagent-nginx-logs-v1".into(),
+            "veloxagent-ssh-logs-v1".into(),
+        ]));
         let pats = b["index_permissions"][0]["index_patterns"]
             .as_array()
             .unwrap()
             .iter()
             .filter_map(|v| v.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(pats, vec!["nginx-logs*", "ssh-logs*"]);
+        assert_eq!(
+            pats,
+            vec!["veloxagent-nginx-logs-v1*", "veloxagent-ssh-logs-v1*"]
+        );
     }
 
     #[test]
     fn patterns_are_stable_and_deduplicated() {
         // The same policy must render the same role: an unnecessary PUT is a
         // needless audit entry and a needless chance to fail.
-        let a = patterns(&["b-logs".into(), "a-logs".into(), "a-logs*".into()]);
-        assert_eq!(a, vec!["a-logs*", "b-logs*"]);
-        assert_eq!(a, patterns(&["a-logs*".into(), "b-logs".into()]));
+        let a = patterns(&[
+            "veloxagent-b-logs-v1".into(),
+            "veloxagent-a-logs-v1".into(),
+            "veloxagent-a-logs-v1*".into(),
+        ]);
+        assert_eq!(a, vec!["veloxagent-a-logs-v1*", "veloxagent-b-logs-v1*"]);
+        assert_eq!(
+            a,
+            patterns(&[
+                "veloxagent-a-logs-v1*".into(),
+                "veloxagent-b-logs-v1".into()
+            ])
+        );
     }
 
+    /// The grant list is the only thing between a policy and a permission, so
+    /// a name that is not one of this path's artifacts does not get one —
+    /// including the names the DaemonSet path owns, and `""`, which would
+    /// render `*` and grant the entire cluster.
     #[test]
-    fn an_empty_index_name_is_not_a_wildcard() {
-        // `""` would render `*` and grant the whole cluster.
-        assert!(patterns(&["".into(), "*".into()]).is_empty());
+    fn only_this_paths_artifacts_can_be_granted() {
+        for refused in ["", "*", "nginx-logs", "veloxagent-", "ssh-logs"] {
+            assert!(
+                patterns(&[refused.to_string()]).is_empty(),
+                "{refused:?} was granted"
+            );
+        }
+        assert_eq!(
+            patterns(&["veloxagent-x-logs-v1".into()]),
+            vec!["veloxagent-x-logs-v1*"]
+        );
     }
 
     #[test]

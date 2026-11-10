@@ -40,16 +40,18 @@ Three further constraints shaped the answer:
 ## Decision
 
 1. **One least-privilege account per deployment, created by the core.**
-   `src/os_agent_user.rs` writes a role (`velox_mesh_writer`) and an internal
-   user (`velox_mesh_agent`) through the security API with the deployment's
+   `src/os_agent_user.rs` writes a role (`veloxagent-role`) and an internal
+   user (`veloxagent-user`) through the security API with the deployment's
    admin login — the core is the only side that holds it. The role grants
    `indices:data/write/bulk` at the cluster level (OpenSearch checks the bulk
    action as a cluster permission *and* per index; the index-level grant alone
-   fails every flush with a 403 that reads like a bad password) plus `write`
-   and `create_index` on the index patterns the policy's integrations declare.
-   No `read`, no `search`, no `delete`, no wildcard: a collector has no
-   business reading back what it wrote, and an empty index name must not
-   render `*`.
+   fails every flush with a 403 that reads like a bad password) plus `read`,
+   `write` and `create_index` on the agent path's own artifact names
+   (ADR-071). Nothing wider: no `indices_all`, no wildcard, no cluster
+   permission beyond bulk — and a name that does not carry the
+   `veloxagent-` prefix is refused rather than granted, so the account cannot
+   be talked into reaching the DaemonSet path's data by a caller that passes
+   the wrong list.
 
 2. **The account is shared by the agents of a deployment, not per host.**
    Per-agent accounts are the stronger model and are not ruled out, but they
@@ -96,8 +98,8 @@ Three further constraints shaped the answer:
 
 ## Consequences
 
-- A host agent can be given a credential that can append to its own indices
-  and do nothing else. Verified on a live deployment: documents from a real
+- A host agent can be given a credential that can read and append to its own
+  indices and do nothing else. Verified on a live deployment: documents from a real
   `/var/log/auth.log` land in `ssh-logs`, and deleting the Secret and saving
   again rotates the password, updates the account, reaches the agent, restarts
   the engine and keeps collecting with no failed flush.

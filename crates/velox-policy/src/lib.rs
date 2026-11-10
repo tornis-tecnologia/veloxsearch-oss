@@ -146,7 +146,14 @@ pub struct BackendRequirement {
     pub deployment: String,
     pub package_id: String,
     pub package_version: String,
-    /// `(kind, id)` for everything installing this package creates.
+    /// The name this integration's artifacts share on the agent path —
+    /// `veloxagent-<integration>-<signal>-v<major>` — which is also the index
+    /// the compiled collector config writes to and the pattern the collector
+    /// account is granted. Carried rather than re-derived so the config, the
+    /// artifacts and the grant cannot be computed three different ways.
+    pub artifact_name: String,
+    /// `(kind, id)` for everything installing this package creates, under the
+    /// ids this path uses.
     pub resources: Vec<(String, String)>,
 }
 
@@ -291,10 +298,23 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
         let resolved = velox_integrations::resolve_variables(&pkg.manifest, &activation.vars)
             .map_err(|e| e.to_string())?;
         self.target(outputs)?;
+        // The index the agent writes to is NOT the one the package declares.
+        // On this path every artifact is named
+        // `veloxagent-<integration>-<signal>-v<major>` (ADR-071): the prefix
+        // says which side wrote the data, the version keeps a mapping change
+        // from having to be made in place, and one pattern describes
+        // everything the collector account may touch. The in-cluster
+        // DaemonSet path keeps the package's own name — it has data and
+        // dashboards under it already.
+        let index = velox_integrations::agent_artifact_name(
+            &pkg.manifest.id,
+            &pkg.manifest.index,
+            &activation.package_version,
+        );
         let mut vars = velox_integrations::Vars::new(
             &self.target.deployment,
             &self.target.namespace,
-            &pkg.manifest.index,
+            &index,
             &pkg.manifest.id,
             OS_USER_REF,
             OS_PASSWORD_REF,
@@ -331,15 +351,25 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
     ) -> Result<Option<BackendRequirement>, String> {
         let pkg = self.package(activation)?;
         let deployment = self.target(outputs)?.to_string();
-        let resources = velox_integrations::created_resources(pkg)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|(kind, id)| (kind.name().to_string(), id))
-            .collect();
+        // The renamed inventory, not the package's declared one: on this path
+        // the artifacts carry the `veloxagent-` names, and an inventory that
+        // named the package's own ids would describe objects that are not
+        // there (and would claim objects the DaemonSet path owns).
+        let resources =
+            velox_integrations::agent_created_resources(pkg, &activation.package_version)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|(kind, id)| (kind.name().to_string(), id))
+                .collect();
         Ok(Some(BackendRequirement {
             deployment,
             package_id: pkg.manifest.id.clone(),
             package_version: activation.package_version.clone(),
+            artifact_name: velox_integrations::agent_artifact_name(
+                &pkg.manifest.id,
+                &pkg.manifest.index,
+                &activation.package_version,
+            ),
             resources,
         }))
     }
@@ -612,7 +642,8 @@ mod tests {
         assert!(fb.contains("Host logs-a1b2.veloxsearch.svc"), "{fb}");
         assert!(fb.contains("HTTP_User ${VELOX_OS_USER}"), "{fb}");
         assert!(fb.contains("HTTP_Passwd ${VELOX_OS_PASSWORD}"), "{fb}");
-        assert!(fb.contains("Index nginx-logs"), "{fb}");
+        // The agent path's own name, not the package's (ADR-071).
+        assert!(fb.contains("Index veloxagent-nginx-logs-v1"), "{fb}");
         assert!(fb.contains("# velox-logs-a1b2 nginx veloxsearch"), "{fb}");
         assert!(!c.bodies.contains_key(&Engine::OtelCollector));
     }
@@ -722,7 +753,8 @@ mod tests {
         let fb = &c.bodies[&Engine::FluentBit];
         assert!(fb.contains("Path /var/log/nginx/access.log"), "{fb}");
         assert!(fb.contains("Port 8081"), "{fb}");
-        assert!(fb.contains("Index nginx-logs"), "{fb}");
+        // The agent path's own name, not the package's (ADR-071).
+        assert!(fb.contains("Index veloxagent-nginx-logs-v1"), "{fb}");
         let otel = &c.bodies[&Engine::OtelCollector];
         assert_eq!(
             otel,
@@ -774,7 +806,7 @@ mod tests {
         let c = compile(&policy(&["nginx"]), &r).unwrap();
 
         // Edge half.
-        assert!(c.bodies[&Engine::FluentBit].contains("Index nginx-logs"));
+        assert!(c.bodies[&Engine::FluentBit].contains("Index veloxagent-nginx-logs-v1"));
 
         // Backend half: one requirement, naming the deployment the policy
         // ships to and the package that fulfils it.
@@ -793,10 +825,18 @@ mod tests {
         assert!(kinds.contains(&"IndexTemplate"));
         assert!(kinds.contains(&"IndexPattern"));
         assert!(kinds.contains(&"SavedObject"));
+        // ...and every id is this path's, not the package's. Both paths can
+        // be active on one deployment, and installing under the package's own
+        // saved-object ids would repoint the DaemonSet install's panels.
+        assert_eq!(b.artifact_name, "veloxagent-nginx-logs-v1");
         assert!(b
             .resources
             .iter()
-            .any(|(_, id)| id == "velox-nginx-overview"));
+            .any(|(_, id)| id == "veloxagent-nginx-logs-v1-overview"));
+        assert!(b
+            .resources
+            .iter()
+            .all(|(_, id)| id.starts_with("veloxagent-nginx-logs-v1")));
 
         let sum = ArtifactSummary::of(&b.resources);
         assert_eq!(

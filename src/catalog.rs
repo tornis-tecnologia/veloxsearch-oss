@@ -499,21 +499,44 @@ pub async fn artifacts(id: &str) -> Result<IntegrationArtifacts> {
         );
     }
 
+    // The ids shown here are the ones the AGENT path creates
+    // (`veloxagent-<integration>-<signal>-v<major>`, ADR-071), because this is
+    // what the Velox Mesh policy composer reads: a screen that listed the
+    // package's own ids would name objects a policy never creates, and an
+    // operator looking for them in Dashboards would not find them.
+    let renaming = velox_integrations::agent_renaming(&pkg, &version)?;
     let mut index_patterns = Vec::new();
     let mut dashboards = Vec::new();
-    for (kind, oid) in crate::integrations::created_resources(&pkg)? {
+    for (kind, oid) in velox_integrations::agent_created_resources(&pkg, &version)? {
         match kind {
             crate::integrations::ResourceKind::IndexPattern => index_patterns.push(oid),
             crate::integrations::ResourceKind::SavedObject => dashboards.push(oid),
             _ => {}
         }
     }
+    index_patterns.sort();
+    dashboards.sort();
     Ok(IntegrationArtifacts {
         id: pkg.manifest.id.clone(),
         version,
-        index: pkg.manifest.index.clone(),
-        ingest_pipeline: pkg.manifest.teardown.ingest_pipeline.clone(),
-        index_template: pkg.manifest.teardown.index_template.clone(),
+        index: renaming.name.clone(),
+        // One name for the index, the template and the pipeline — they live in
+        // different namespaces in OpenSearch, so the single string cannot
+        // collide, and "which template covers this index" is answerable by
+        // looking. Still `Option`: a package that ships no pipeline reports
+        // none, which the screen shows as an artifact family it does NOT have.
+        ingest_pipeline: pkg
+            .manifest
+            .teardown
+            .ingest_pipeline
+            .as_ref()
+            .map(|_| renaming.name.clone()),
+        index_template: pkg
+            .manifest
+            .teardown
+            .index_template
+            .as_ref()
+            .map(|_| renaming.name.clone()),
         index_patterns,
         dashboards,
         otel_config: pkg.otel_config.is_some(),
