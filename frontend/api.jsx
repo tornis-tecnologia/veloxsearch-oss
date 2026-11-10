@@ -171,19 +171,37 @@ const API = {
   // install guide), configured but unreachable (show the URL and the error),
   // reachable (open the fleet). -> { configured, url, reachable, error }
   meshStatus: () => call("mesh_status", null, "GET"),
-  // The whole fleet in one read: where the operator is in the guided
-  // onboarding, the policies, every agent's DERIVED status (the Mesh stores
-  // facts, never a status column) and each policy's rollout.
-  // -> { onboarding, policies: [...], agents: [{status, up, applied_revision,
-  //      current_revision, config_error, ...}], rollout: {id: {...}}, seats, tier }
-  meshOverview: () => call("mesh_overview", null, "GET"),
+  // Everything below is about ONE deployment (ADR-072): its policies, its
+  // agents, its tokens. The server resolves `deployment` through the
+  // caller's scope before the Mesh is asked anything.
+  //
+  // The deployment's fleet in one read: where the operator is in the guided
+  // onboarding, its policies (each with the integration ids it activates),
+  // every agent's DERIVED status (the Mesh stores facts, never a status
+  // column) and each policy's rollout.
+  // -> { onboarding, policies: [{id, name, current_revision, integrations}],
+  //      agents: [{status, up, applied_revision, current_revision, config_error, ...}],
+  //      rollout: {id: {...}}, seats, enrolled_total, tier }
+  meshOverview: (deployment) => call("mesh_overview", { deployment }),
   // Compile a policy draft against VERIFIED packages and store it as a new
   // revision. Agents pick it up on their next check-in; nothing is pushed.
+  // `draft.deployment` names the destination; the published endpoint comes
+  // from the deployment's Mesh settings, not from the draft.
   meshSavePolicy: (draft) => call("mesh_save_policy", draft),
   // Shown once — the Mesh keeps only its hash.
-  meshEnrollmentToken: (policy_id) => call("mesh_enrollment_token", { policy_id }),
-  meshAssignPolicy: (instance_uid, policy_id) =>
-    call("mesh_assign_policy", { instance_uid, policy_id }),
+  meshEnrollmentToken: (deployment, policy_id) =>
+    call("mesh_enrollment_token", { deployment, policy_id }),
+  // Within the deployment only; another deployment's policy is a 400 that
+  // says to re-enrol.
+  meshAssignPolicy: (deployment, instance_uid, policy_id) =>
+    call("mesh_assign_policy", { deployment, instance_uid, policy_id }),
+  meshUnenrol: (deployment, instance_uid) =>
+    call("mesh_unenrol", { deployment, instance_uid }),
+  // The deployment's Mesh settings, off its CR. -> { os_host }
+  meshSettings: (deployment) => call("mesh_settings", { deployment }),
+  // `os_host` null clears it (= the in-cluster service name).
+  meshSaveSettings: (deployment, os_host) =>
+    call("mesh_save_settings", { deployment, os_host }),
   // ── OTel observability stack (ADR-053) ───────────────────────
   // The SECOND collection option, additive to the recipes above: it ships OTLP
   // traces + metrics, which is what fills the Trace Analytics, service-map and

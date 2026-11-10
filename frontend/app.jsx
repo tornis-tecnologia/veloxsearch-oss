@@ -31,7 +31,6 @@ import { BootstrapView, OperatorDriftNotice, TenantIsolationNotice } from "./vie
 import { StatusView } from "./views_status.jsx";
 import { CreateView } from "./views_create.jsx";
 import { CapacityView } from "./views_capacity.jsx";
-import { MeshView } from "./views_mesh.jsx";
 import { SettingsView } from "./views_settings.jsx";
 import { DeploymentView } from "./views_deployment.jsx";
 
@@ -126,7 +125,9 @@ function App() {
   useEffect(() => {
     if (boot !== "ready") return;
     if (route.name === "auth") go(nextAfterLogin(), { replace: true });
-  }, [boot, route.name, go]);
+    // A path the router only knows how to redirect (the pre-ADR-072 /mesh).
+    if (route.redirect) go(route.redirect, { replace: true });
+  }, [boot, route.name, route.redirect, go]);
 
   // ── the tab title follows the screen ───────────────────────────
   useEffect(() => {
@@ -136,7 +137,6 @@ function App() {
       parts.push(tr[`tab_${route.tab}`] || tr.tab_overview);
     } else if (route.name === "create") parts.push(tr.nav_create);
     else if (route.name === "capacity") parts.push(tr.nav_capacity);
-  else if (route.name === "mesh") parts.push(tr.nav_mesh);
     else if (route.name === "settings") parts.push(tr.nav_settings);
     else parts.push(tr.nav_deployments);
     document.title = `${parts.join(" · ")} · VeloxSearch`;
@@ -350,7 +350,6 @@ function App() {
           <NavLink href="/deployments" active={section === "deployments"} icon="grid" label={tr.nav_deployments}
             count={loaded ? deployments.length : null} onGo={go} testid="nav-deployments" />
           <NavLink href="/capacity" active={section === "capacity"} icon="gauge" label={tr.nav_capacity} onGo={go} testid="nav-capacity" />
-          <NavLink href="/mesh" active={section === "mesh"} icon="server" label={tr.nav_mesh} onGo={go} testid="nav-mesh" />
           <NavLink href="/settings" active={section === "settings"} icon="gear" label={tr.nav_settings} onGo={go} testid="nav-settings" />
         </nav>
         <div className="foot">
@@ -404,18 +403,16 @@ function App() {
             {route.name === "capacity" && (
               <CapacityView lang={lang} />
             )}
-            {route.name === "mesh" && (
-              <MeshView lang={lang} tab={route.tab || "overview"} deployments={deployments}
-                onTab={tab => go({ name: "mesh", tab }, { keepScroll: true })}
-                onToast={showToast} />
-            )}
             {route.name === "settings" && (
               <SettingsView lang={lang} onToast={showToast} buildInfo={buildInfo} isTenant={isTenant} />
             )}
             {route.name === "deployment" && (current
               ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}
+                  sub={route.sub} integration={route.integration}
                   openUpgrade={!!route.upgrade}
-                  onTab={tab => go({ name: "deployment", id: route.id, tab }, { keepScroll: true })}
+                  // `sub` is the Mesh tab's sub-screen; `extra` carries the
+                  // one-shot `?integration=` intent from the Data tab.
+                  onTab={(tab, sub, extra) => go({ name: "deployment", id: route.id, tab, sub, ...(extra || {}) }, { keepScroll: true })}
                   onToggleStack={toggleOtelStack}
                   onSaveEdit={saveEdit}
                   onResetPass={resetPass}

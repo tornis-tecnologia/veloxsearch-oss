@@ -1853,6 +1853,61 @@ pub async fn delete_cluster(dep: &Deployment) -> Result<()> {
     for recipe in crate::recipes::RECIPES {
         let _ = crate::agents::remove_agent(dep, recipe).await;
     }
+    // The deployment's fleet goes with it (ADR-072 §4): policies and tokens
+    // dropped, agents unenrolled. Best-effort — the data path is already gone
+    // and a Mesh that is down must not keep a deleted deployment half-alive.
+    match crate::mesh::forget(dep).await {
+        Ok(Some(f)) => tracing::info!("mesh forgot deployment {}: {f}", dep.name()),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("mesh could not forget deployment {}: {e:#}", dep.name()),
+    }
+    Ok(())
+}
+
+/// Where a host OUTSIDE the cluster reaches this deployment's OpenSearch
+/// (ADR-072 §5). Absent = the in-cluster service name.
+const LABEL_MESH_OS_HOST: &str = "veloxsearch.ai/mesh-os-host";
+
+/// The deployment's Mesh settings, off its CR.
+pub async fn mesh_settings(dep: &Deployment) -> Result<crate::mesh::MeshSettings> {
+    let name = dep.name();
+    validate_name(name)?;
+    let client = client().await?;
+    let obj = os_api(&client, dep)
+        .get(name)
+        .await
+        .context("fetching cluster for mesh settings")?;
+    let os_host = obj
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(LABEL_MESH_OS_HOST))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Ok(crate::mesh::MeshSettings { os_host })
+}
+
+/// Write the deployment's Mesh settings. An unset `os_host` removes the
+/// annotation. A merge patch on `metadata` alone, like `set_otel_stack`, so
+/// it can never move a version or clobber the spec.
+pub async fn set_mesh_settings(dep: &Deployment, s: &crate::mesh::MeshSettings) -> Result<()> {
+    let name = dep.name();
+    validate_name(name)?;
+    let client = client().await?;
+    let value = match s
+        .os_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(v) => serde_json::Value::String(v.to_string()),
+        None => serde_json::Value::Null,
+    };
+    let patch = serde_json::json!({ "metadata": { "annotations": { LABEL_MESH_OS_HOST: value } } });
+    os_api(&client, dep)
+        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .context("patching mesh-os-host annotation")?;
     Ok(())
 }
 

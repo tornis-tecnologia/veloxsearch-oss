@@ -78,12 +78,15 @@ it and tied to the integrations that deployment already has.
    deployment's CR, read at compile time. One deployment has one published
    address; every policy against it compiles against the same one.
 
-6. **Integrations and policies know about each other.** The Data tab shows,
-   per integration, whether hosts collect it too and under which policies;
-   uninstalling an integration a policy still activates is refused (400,
-   naming the policy). Installing the backend half for a policy records the
-   integration on the deployment like the in-cluster path does, so one
-   version is pinned for both paths.
+6. **Integrations and policies know about each other.** Each policy row the
+   Mesh serves names the integrations its current revision activates. The
+   Data tab shows, per integration, whether hosts collect it too and under
+   which policies, and hands an integration to the policy composer
+   ("collect from hosts"); the core refuses to uninstall an integration a
+   policy still activates (400, naming the policy). A policy pins its own
+   package version in its revision; the in-cluster install keeps its own
+   record — the two paths share the artifacts' *names* (ADR-071), not one
+   version pointer.
 
 7. **Tenants operate the Mesh of their own deployments.** The routes move
    from `AdminOnly` to `TenantScoped`; `Scope::resolve`'s anti-enumeration

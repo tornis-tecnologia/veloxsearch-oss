@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Velox Mesh — the fleet journey (ADR-068, ADR-069).
+"""Velox Mesh — the deployment's fleet tab (ADR-068, ADR-069, ADR-072).
 
 The journey is Elastic Fleet's, because operators already know it:
 
@@ -7,9 +7,14 @@ The journey is Elastic Fleet's, because operators already know it:
                            -> create a collection policy
                            -> add integrations to the policy
 
-Each assertion below guards a property that is easy to break and expensive
-to notice:
+Since ADR-072 the Mesh is a DEPLOYMENT's: the screen is a tab of
+`/deployments/:id/mesh/:sub`, every policy and agent on it belongs to that
+deployment, and the controller's install guide is an admin matter under
+Settings. Each assertion below guards a property that is easy to break and
+expensive to notice:
 
+  - **The Mesh lives under the deployment, not in the sidebar.** The old
+    global `/mesh` redirects to the list; the tab has a URL and a deep link.
   - **The install guide mirrors the project's own downloads index.** We ship
     no collection engine (ADR-069), so the set of targets is Fluent Bit's to
     decide, not ours. A target quietly dropped (or an invented one, like a
@@ -24,14 +29,19 @@ to notice:
     pipeline must render with no pipeline, or the screen is lying about what
     an operator is turning on.
   - **The Mesh's absence is a state, not an error.** A fresh install has no
-    controller; the screen says how to get one instead of failing.
+    controller; the tab says so and points at Settings instead of failing.
+  - **There is no destination picker.** The destination IS the deployment
+    whose tab this is; offering another would be offering a cross-deployment
+    write (ADR-072 §2).
+  - **The published endpoint is the deployment's setting**, on the overview,
+    not a field on every policy form (ADR-072 §5).
   - **With a controller, the fleet is the product.** The guided first run is
     ordered (exactly one step live, the earlier ones done), every agent row's
-    up/down agrees with its derived status, and the status reaches the screen
-    as a translated word rather than a raw enum.
-  - **An off-cluster fleet can be pointed somewhere reachable.** The policy
-    composer carries the published OpenSearch endpoint, because the in-cluster
-    service name is unresolvable from a host.
+    up/down agrees with its derived status, the status reaches the screen as
+    a translated word rather than a raw enum, and an agent can only be moved
+    between THIS deployment's policies.
+  - **The Data tab knows what hosts collect.** An integration a policy
+    activates says so there and its uninstall is disabled (ADR-072 §6).
   - Nothing renders an i18n key or `undefined` in any of three languages.
 
 Usage:
@@ -80,16 +90,38 @@ with sync_playwright() as p:
     page.on("pageerror", lambda e: errors.append(str(e)))
 
     page.goto(f"{base}/login", wait_until="networkidle")
-    if page.locator('[data-testid="nav-mesh"]').count() == 0:
+    if page.locator('[data-testid="nav-deployments"]').count() == 0:
         page.fill('input[name="username"], input[type="text"]', user)
         page.fill('input[type="password"]', pw)
         page.click('button[type="submit"]')
         page.wait_for_load_state("networkidle")
 
-    # ---- the section and its three tabs ---------------------------------
-    page.click('[data-testid="nav-mesh"]')
+    # ---- the Mesh is not a section any more ------------------------------
+    check(page.locator('[data-testid="nav-mesh"]').count() == 0,
+          "no Velox Mesh entry in the sidebar (ADR-072: it is the deployment's)")
+    page.goto(f"{base}/mesh/policies", wait_until="networkidle")
+    page.wait_for_url(lambda u: "/mesh" not in u, timeout=10000)
+    check(page.url.rstrip("/").endswith("/deployments"),
+          f"the old /mesh/* redirects to the list (got {page.url})")
+
+    # A deployment to hang the tab on. Without one there is nothing to
+    # assert about a per-deployment screen, and the run says so.
+    page.goto(f"{base}/deployments", wait_until="networkidle")
+    opens = page.locator('[data-testid^="dep-open-"]')
+    if opens.count() == 0:
+        print("  · no deployment; the Mesh tab needs one — skipped")
+        browser.close()
+        sys.exit(0)
+    dep = opens.first.get_attribute("data-testid")[len("dep-open-"):]
+    print(f"  · deployment {dep}")
+
+    # ---- the tab and its three sub-screens --------------------------------
+    page.goto(f"{base}/deployments/{dep}/overview", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="dep-tab-mesh"]', timeout=15000)
+    page.click('[data-testid="dep-tab-mesh"]')
     page.wait_for_selector('[data-testid="mesh-panel-overview"]', timeout=15000)
-    check("/mesh" in page.url, f"the sidebar lands on /mesh (got {page.url})")
+    check(page.url.endswith(f"/deployments/{dep}/mesh"),
+          f"the tab lands on /deployments/{dep}/mesh (got {page.url})")
 
     # No controller on a fresh install: a STATE with a way forward, not an error.
     check(page.locator('[data-testid="mesh-absent"]').count() == 1
@@ -97,13 +129,20 @@ with sync_playwright() as p:
           or page.locator('[data-testid="mesh-unreachable"]').count() == 1,
           "the overview states whether a Mesh is installed")
     overview = page.locator('[data-testid="mesh-panel-overview"]').inner_text()
-    check(overview.count("\n") > 5 and "VELOX_MESH_URL" in overview,
-          "the overview carries the four-step journey and how to point the console at a Mesh")
+    check("VELOX_MESH_URL" not in overview,
+          "the controller's install commands are NOT on the deployment's tab (they are the admin's, under Settings)")
+    # The deployment's own setting, where every policy reads it from.
+    osh = page.locator('[data-testid="mesh-settings"] [data-testid="mesh-policy-os-host"]')
+    check(osh.count() == 1, "the published OpenSearch endpoint is a deployment setting on the overview")
 
     # Deep links survive a reload (ADR-067: every screen has a URL).
-    page.goto(f"{base}/mesh/policies", wait_until="networkidle")
+    page.goto(f"{base}/deployments/{dep}/mesh/policies", wait_until="networkidle")
     page.wait_for_selector('[data-testid="mesh-panel-policies"]', timeout=15000)
-    check(True, "/mesh/policies opens the policies tab directly")
+    check(True, f"/deployments/{dep}/mesh/policies opens the policies sub-tab directly")
+    check(page.locator('[data-testid="mesh-policy-target"]').count() == 0,
+          "no destination picker: the destination is this deployment (ADR-072 §2)")
+    check(page.locator('[data-testid="mesh-panel-policies"] [data-testid="mesh-policy-os-host"]').count() == 0,
+          "the endpoint is not asked again on the policy form")
 
     # ---- the install guide ----------------------------------------------
     page.click('[data-testid="mesh-tab-agents"]')
@@ -149,10 +188,11 @@ with sync_playwright() as p:
     # nginx is the worked example of a complete package: all four families.
     for family in ("Pipeline", "Template"):
         check(family in card, f"nginx shows its {family}")
-    check(".mesh-chip" and page.locator('[data-testid="mesh-integration-nginx"] .mesh-chip.on').count() >= 5,
+    check(page.locator('[data-testid="mesh-integration-nginx"] .mesh-chip.on').count() >= 5,
           "nginx shows collection + pipeline + template + index + dashboards")
     summary = page.locator('[data-testid="mesh-policy-summary"]').inner_text()
     check("nginx" in summary, "the policy summary names the integration")
+    check(dep in summary, "the policy summary names THIS deployment as the destination")
     # Without a controller there is nothing to save to, and the screen says
     # so rather than offering a button that cannot work. With one, the save
     # step replaces that banner — asserted further down.
@@ -169,6 +209,20 @@ with sync_playwright() as p:
         on = k.locator(".mesh-chip.on").count()
         off = k.locator(".mesh-chip:not(.on)").count()
         check(off >= 1, f"kubernetes shows what it does NOT ship (on={on}, off={off})")
+
+    # ---- the Data tab hands an integration to the composer ---------------
+    page.goto(f"{base}/deployments/{dep}/data", wait_until="networkidle")
+    page.wait_for_selector('[data-testid="integrations-tab"]', timeout=15000)
+    page.wait_for_selector('[data-testid^="collect-hosts-"]', timeout=20000)
+    handoff = page.locator('[data-testid^="collect-hosts-"]').first
+    integ = handoff.get_attribute("data-testid")[len("collect-hosts-"):]
+    handoff.click()
+    page.wait_for_selector('[data-testid="mesh-panel-policies"]', timeout=15000)
+    check(f"/deployments/{dep}/mesh/policies" in page.url and f"integration={integ}" in page.url,
+          f"'collect from hosts' opens the composer with ?integration={integ}")
+    page.wait_for_selector(f'[data-testid="mesh-integration-{integ}"]', timeout=20000)
+    check(page.locator(f'[data-testid="mesh-integration-{integ}"][aria-pressed="true"]').count() == 1,
+          f"{integ} arrives preselected")
 
     # ---- the fleet, when a controller is configured ----------------------
     # Without a Mesh these screens are the install guide and there is nothing
@@ -193,9 +247,11 @@ with sync_playwright() as p:
             done = page.locator('.onb-step[data-state="ok"]').count()
             idx = ["install_mesh", "create_policy", "enrol_agent", "await_first_apply"].index(step)
             check(done == idx, f"the {idx} step(s) before it are done (got {done})")
+        check(page.locator('[data-testid="mesh-seats"]').count() == 1,
+              "seats are shown as the installation's, not the deployment's")
 
         page.click('[data-testid="mesh-tab-agents"]')
-        page.wait_for_selector('[data-testid="mesh-fleet"]', timeout=15000)
+        page.wait_for_selector('[data-testid="mesh-fleet"], [data-testid="mesh-panel-overview"]', timeout=15000)
         rows = page.locator('[data-testid="mesh-fleet"] tbody tr')
         check(True, f"the fleet renders ({rows.count()} agent(s))")
 
@@ -209,6 +265,11 @@ with sync_playwright() as p:
             check(up == expected_up, f"row {i}: {status} is up={expected_up}")
             # The word is translated, never the raw enum leaking through.
             check(status not in r.inner_text(), f"row {i}: the status is a word, not {status!r}")
+            # An agent can only be moved between THIS deployment's policies.
+            sel = r.locator('select[data-testid^="fleet-policy-"]')
+            if sel.count():
+                check(sel.locator("option").count() >= 1,
+                      f"row {i}: the policy picker offers this deployment's policies only")
 
         # Adding a host is something you do while looking at the fleet, so the
         # install guide stays on the same tab.
@@ -218,18 +279,31 @@ with sync_playwright() as p:
         page.click('[data-testid="mesh-tab-policies"]')
         page.wait_for_selector('[data-testid="mesh-policy-save"]', timeout=10000)
         check(True, "a policy can be saved when a Mesh holds it")
-        # A host agent cannot resolve `<deployment>.<namespace>.svc`, so the
-        # composer has to let the operator state the published OpenSearch
-        # address. Without this field an off-cluster fleet compiles a policy
-        # that can never reach its destination — and the only symptom is a
-        # healthy agent whose data never arrives.
-        osh = page.locator('[data-testid="mesh-policy-os-host"]')
-        check(osh.count() == 1, "the composer asks for the published OpenSearch endpoint")
-        check(osh.input_value() == "",
-              "it defaults to empty, which means the in-cluster service name")
         if page.locator('[data-testid="mesh-rollout"]').count():
             check(page.locator('[data-testid="mesh-rollout"] tr').count() > 0,
                   "the rollout is shown per policy")
+            # Every policy on this screen activates something, and the Data
+            # tab says so about each integration (ADR-072 §6).
+            ids = [page.locator('[data-testid="mesh-rollout"] tr').nth(i).locator("td").first.inner_text()
+                   for i in range(page.locator('[data-testid="mesh-rollout"] tr').count())]
+            page.goto(f"{base}/deployments/{dep}/data", wait_until="networkidle")
+            page.wait_for_selector('[data-testid="integrations-tab"]', timeout=15000)
+            page.wait_for_timeout(2000)
+            badges = page.locator('[data-testid^="hosts-"]')
+            check(badges.count() >= 1,
+                  f"the Data tab marks integrations hosts collect (got {badges.count()}; policies {ids})")
+            # Only an INSTALLED integration has an uninstall to disable; one
+            # that hosts collect but the cluster does not is just marked.
+            installed = page.locator('.installed-row [data-testid^="hosts-"]')
+            if installed.count():
+                integ = installed.first.get_attribute("data-testid")[len("hosts-"):]
+                page.click(f'[data-testid="integ-menu-{integ}"]')
+                item = page.locator(f'[data-testid="uninstall-{integ}"]')
+                item.wait_for(timeout=5000)
+                check(item.is_disabled(), f"{integ}: uninstall is disabled while a policy activates it")
+                page.keyboard.press("Escape")
+            else:
+                print("  · no installed integration is also collected by hosts; the disabled-uninstall check is skipped")
 
     if shot:
         page.screenshot(path=shot, full_page=True)

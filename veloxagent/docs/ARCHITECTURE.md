@@ -237,12 +237,15 @@ Regras que o compilador impõe sempre, por cima das integrações:
 ### 4.5 API de gestão e UI
 
 `/api/mesh/*` no Mesh, autenticado por token de serviço que o core emite para
-a sessão (o core continua dono do login). A UI é um **bundle separado**
-(`veloxagent/frontend`, Vite), carregado pela SPA por `import()` dinâmico
-quando `GET /api/features` diz `mesh: true`. Quem não instala o Mesh não
-baixa o bundle; o shell da ADR-067 ganha rotas `/mesh/agents`, `/mesh/policies`,
-`/mesh/enrollment` e `/settings/license`. Mesmas primitivas (`ui.jsx`), mesmo
-`i18n` por chave, mesmos `data-testid`.
+a sessão (o core continua dono do login). **Toda chamada nomeia um
+deployment** (ADR-072): o Mesh é um serviço só, mas políticas, agentes e
+tokens são de um deployment, e o core já passou o nome pelo `Scope::require`
+antes de chamar. A UI é um **bundle separado** (`veloxagent/frontend`, Vite),
+carregado pela SPA por `import()` dinâmico quando `GET /api/features` diz
+`mesh: true`. Quem não instala o Mesh não baixa o bundle; o shell da ADR-067
+ganha a aba `/deployments/:id/mesh/{overview,agents,policies}` em cada
+deployment e `/settings/license`. Mesmas primitivas (`ui.jsx`), mesmo `i18n`
+por chave, mesmos `data-testid`.
 
 ## 5. Plano de dados
 

@@ -30,6 +30,7 @@ import {
 } from "./ui.jsx";
 import { AuthProviderTab } from "./views_auth_provider.jsx";
 import { SnapshotTab } from "./views_snapshot.jsx";
+import { MeshTab } from "./views_mesh.jsx";
 import { ActivityPanel, ActivityDetails, lockReason, LockNotice } from "./views_activity.jsx";
 import { relAge } from "./views_status.jsx";
 
@@ -1082,9 +1083,28 @@ function fmtAge(sec, t) {
 // The runtime catalog (ADR-039 / ADR-047, #76). Installed first, then the
 // catalog in a grid with search and categories. The degraded-registry states
 // are RENDERED, not hidden.
-function DataTab({ d, lang, onToggleStack, onToast, locked }) {
+function DataTab({ d, lang, onToggleStack, onToast, locked, onTab }) {
   const t = STR[lang];
   const [view, setView] = useState(null);
+  // Which of this deployment's Mesh policies activate each integration
+  // (ADR-072 §6): the Data tab and the Mesh tab install the same
+  // `veloxagent-*` artifacts, so an integration hosts write through is shown
+  // as such here, and its uninstall is refused by the server. No Mesh (or
+  // no permission) leaves this empty and the tab is exactly what it was.
+  const [hostPolicies, setHostPolicies] = useState({});
+  useEffect(() => {
+    let alive = true;
+    API.meshOverview(d.id)
+      .then(o => {
+        if (!alive) return;
+        const m = {};
+        (o.policies || []).forEach(p => (p.integrations || []).forEach(i => { (m[i] = m[i] || []).push(p.id); }));
+        setHostPolicies(m);
+      })
+      .catch(() => { if (alive) setHostPolicies({}); });
+    return () => { alive = false; };
+  }, [d.id]);
+  const collectFromHosts = (id) => onTab && onTab("mesh", "policies", { integration: id });
   const [loadErr, setLoadErr] = useState("");
   const [status, setStatus] = useState({});
   const [busy, setBusy] = useState({});
@@ -1213,6 +1233,11 @@ function DataTab({ d, lang, onToggleStack, onToast, locked }) {
                     </span>
                     {state === "update" && <span className="badge yellow" data-testid={`update-badge-${it.id}`}>{t.integ_update_badge} · {it.version}</span>}
                     {it.builtin && <span className="badge">{t.integ_builtin}</span>}
+                    {hostPolicies[it.id] && (
+                      <span className="badge" data-testid={`hosts-${it.id}`} title={t.integ_uninstall_blocked}>
+                        <Icon name="server" size={11} />{t.integ_hosts_badge.replace("{policies}", hostPolicies[it.id].join(", "))}
+                      </span>
+                    )}
                   </div>
                   <div className="d">{loc(it.summary, lang, "")}</div>
                   <div className={rs.live ? "live" : "idle"} style={{ marginTop: 4 }}>{rs.live && <Icon name="spark" size={12} style={{ verticalAlign: -2, marginRight: 4 }} />}{rs.text}</div>
@@ -1226,8 +1251,13 @@ function DataTab({ d, lang, onToggleStack, onToast, locked }) {
                     </Btn>
                   )}
                   {dashUrl && <a href={`${dashUrl}/app/dashboards`} target="_blank" rel="noreferrer" className="btn btn-outline btn-sm">{t.open_dashboard}<Icon name="ext" size={12} /></a>}
-                  <Menu label={t.more_actions} items={[
-                    { label: t.integ_uninstall, icon: "trash", danger: true, disabled: !!working || !!locked, testid: `uninstall-${it.id}`, onClick: () => act(it.id, "uninstall") },
+                  <Menu label={t.more_actions} testid={`integ-menu-${it.id}`} items={[
+                    ...(onTab ? [{ label: t.integ_collect_hosts, icon: "server", testid: `collect-hosts-${it.id}`, onClick: () => collectFromHosts(it.id) }] : []),
+                    // The server refuses it anyway (400, naming the policy);
+                    // disabling it here says why before the click.
+                    { label: hostPolicies[it.id] ? `${t.integ_uninstall} — ${t.integ_uninstall_blocked}` : t.integ_uninstall,
+                      icon: "trash", danger: true, disabled: !!working || !!locked || !!hostPolicies[it.id],
+                      testid: `uninstall-${it.id}`, onClick: () => act(it.id, "uninstall") },
                   ]} />
                 </div>
               </div>
@@ -1292,11 +1322,20 @@ function DataTab({ d, lang, onToggleStack, onToast, locked }) {
                         </p>
                       )}
                       {err && <div className="field-err" data-testid={`error-${it.id}`}>{err}</div>}
+                      {hostPolicies[it.id] && (
+                        <p className="hint" data-testid={`hosts-${it.id}`}>
+                          {t.integ_hosts_badge.replace("{policies}", hostPolicies[it.id].join(", "))}
+                        </p>
+                      )}
                       <div className="ft">
                         <Btn variant="outline" size="sm" icon="plus" disabled={!!working || !!locked || !it.compatible}
                           data-testid={`install-${it.id}`} onClick={() => act(it.id, "install", it.version)}>
                           {working === "install" ? t.integ_installing : t.integ_install}
                         </Btn>
+                        {onTab && it.compatible && (
+                          <Btn variant="ghost" size="sm" icon="server" data-testid={`collect-hosts-${it.id}`}
+                            onClick={() => collectFromHosts(it.id)}>{t.integ_collect_hosts}</Btn>
+                        )}
                         <span className="badge mono" title={`${t.integ_version} ${it.version}`}>{it.version}</span>
                       </div>
                     </div>
@@ -1489,7 +1528,7 @@ function ActivityTab({ d, lang, onToast }) {
 /* ============================================================
    The view
    ============================================================ */
-function DeploymentView({ d, lang, hostNodes = [], tab, onTab, onToggleStack, onSaveEdit, onResetPass, onToast, onDelete, openUpgrade }) {
+function DeploymentView({ d, lang, hostNodes = [], tab, sub, integration, onTab, onToggleStack, onSaveEdit, onResetPass, onToast, onDelete, openUpgrade }) {
   const t = STR[lang];
   const [confirm, setConfirm] = useState(false);
   // Computed once from the server's verdict (ADR-050 invariant 3).
@@ -1503,6 +1542,8 @@ function DeploymentView({ d, lang, hostNodes = [], tab, onTab, onToggleStack, on
     { key: "access", label: t.tab_access },
     { key: "config", label: t.tab_config },
     { key: "activity", label: t.tab_activity },
+    // The deployment's fleet (ADR-072): its policies, its agents.
+    { key: "mesh", label: t.tab_mesh },
   ];
   const snap = d.snapshot || { configured: false };
   const sizeMetaStr = fmt(t.dep_size_meta, sizeLabel(d.size, t), d.node_count || 3, fmtQty(d.mem, lang));
@@ -1549,7 +1590,8 @@ function DeploymentView({ d, lang, hostNodes = [], tab, onTab, onToggleStack, on
       <Tabs items={tabs} value={tab} onChange={onTab} label={t.dep_tabs_label} testidPrefix="dep-tab" />
 
       {tab === "overview" && <OverviewTab d={d} lang={lang} onToast={onToast} hostNodes={hostNodes} onTab={onTab} />}
-      {tab === "data" && <DataTab d={d} lang={lang} onToggleStack={onToggleStack} onToast={onToast} locked={locked} />}
+      {tab === "data" && <DataTab d={d} lang={lang} onToggleStack={onToggleStack} onToast={onToast} locked={locked} onTab={onTab} />}
+      {tab === "mesh" && <MeshTab d={d} lang={lang} sub={sub} preselect={integration} onSub={s => onTab("mesh", s)} onToast={onToast} />}
       {tab === "backup" && <SnapshotTab d={d} lang={lang} onToast={onToast} locked={locked} />}
       {tab === "access" && <AccessTab d={d} lang={lang} onReset={onResetPass} onToast={onToast} locked={locked} />}
       {tab === "config" && <ConfigTab d={d} lang={lang} onSave={onSaveEdit} onToast={onToast} locked={locked} onDeleteRequest={() => setConfirm(true)} />}

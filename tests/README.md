@@ -90,14 +90,18 @@ each form, and for the one thing that is not obvious: with
 egress hole, so the LDAP fixture needs `netpol-tenant-egress-ldap.yaml` applied
 to the tenant namespace.
 
-`mesh_check.py <base> <user> <pw> [shot.png]` drives the **Velox Mesh**
-screens: the four-step journey, the per-target install guide (whose tab set
-mirrors the Fluent Bit project's own downloads index, ADR-069) and the policy
-composer, where turning on an integration must show both halves it brings.
-When a Velox Mesh is configured it also checks the fleet: the guided first
-run is ordered, each agent row's up/down agrees with its derived status, and
-a policy can be saved. Without one those are skipped, because the screens are
-then the install guide and there is nothing to assert. It needs Playwright
+`mesh_check.py <base> <user> <pw> [shot.png]` drives the **Velox Mesh** tab
+of a deployment (`/deployments/:id/mesh/:sub`, ADR-072; the old `/mesh` must
+redirect): the journey, the per-target install guide (whose tab set mirrors
+the Fluent Bit project's own downloads index, ADR-069) and the policy
+composer, where turning on an integration must show both halves it brings and
+the destination is the deployment itself — no picker. It also checks that the
+Data tab hands an integration to the composer (`?integration=`). When a Velox
+Mesh is configured it also checks the fleet: the guided first run is ordered,
+each agent row's up/down agrees with its derived status, a policy can be
+saved, and an integration a policy activates is marked on the Data tab with
+its uninstall disabled. Without one those are skipped, because the screens
+are then the install guide and there is nothing to assert. It needs Playwright
 and an authenticated install; it touches no cluster state, so it is safe
 against a live one.
 

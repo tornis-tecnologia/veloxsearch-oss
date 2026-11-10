@@ -235,6 +235,12 @@ pub struct PolicyRow {
     pub name: String,
     pub current_revision: u64,
     pub updated_at: u64,
+    /// The integration ids the current revision activates, in policy order.
+    /// Read off the revision body so the Data tab can say "hosts collect this
+    /// too, under policy X" and the core can refuse to uninstall an
+    /// integration a policy still writes through (ADR-072 §6) — without
+    /// either side fetching every policy document.
+    pub integrations: Vec<String>,
 }
 
 /// Create a policy at revision 1, or add revision N+1 to an existing one.
@@ -327,8 +333,15 @@ pub async fn list_policies(pg: &Client, dep: &DeploymentRef) -> Result<Vec<Polic
     dep.check()?;
     Ok(pg
         .query(
-            "SELECT id, name, current_revision, updated_at FROM mesh_policies
-              WHERE deployment_ns = $1 AND deployment = $2 ORDER BY name",
+            "SELECT p.id, p.name, p.current_revision, p.updated_at,
+                    COALESCE((SELECT array_agg(a->>'package_id' ORDER BY ord)
+                                FROM mesh_policy_revisions r,
+                                     jsonb_array_elements(r.body->'activations')
+                                       WITH ORDINALITY AS t(a, ord)
+                               WHERE r.policy_id = p.id AND r.revision = p.current_revision),
+                             '{}'::text[])
+               FROM mesh_policies p
+              WHERE p.deployment_ns = $1 AND p.deployment = $2 ORDER BY p.name",
             &[&dep.deployment_ns, &dep.deployment],
         )
         .await?
@@ -338,6 +351,7 @@ pub async fn list_policies(pg: &Client, dep: &DeploymentRef) -> Result<Vec<Polic
             name: r.get(1),
             current_revision: r.get::<_, i64>(2) as u64,
             updated_at: r.get::<_, i64>(3) as u64,
+            integrations: r.get(4),
         })
         .collect())
 }

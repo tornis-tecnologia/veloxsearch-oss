@@ -114,10 +114,93 @@ pub struct PolicyDraft {
     /// Per-integration variables (schema 1.1), keyed by integration id.
     #[serde(default)]
     pub vars: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// The deployment's Mesh settings (ADR-072 §5): facts about how hosts reach
+/// *this* deployment, kept on its CR like every other intent the core must
+/// re-derive after a restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MeshSettings {
     /// Published OpenSearch endpoint for agents outside the cluster; unset
-    /// means the in-cluster service name.
+    /// means the in-cluster service name. One per deployment, because one
+    /// deployment has one published address and every policy against it
+    /// compiles with the same one.
     #[serde(default)]
     pub os_host: Option<String>,
+}
+
+/// The body every Mesh call starts from: the deployment pair the Mesh
+/// partitions on. Built from a `Deployment` — the capability the caller's
+/// scope minted — and from nothing else, which is what makes "the Mesh only
+/// answers about deployments the caller owns" true by construction.
+fn dep_body(dep: &crate::scope::Deployment) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("deployment_ns".into(), dep.namespace().into());
+    m.insert("deployment".into(), dep.name().into());
+    m
+}
+
+/// The request body for a call about `dep`: the pair, then `extra`'s fields —
+/// except the pair itself, which is the scope's to set, never the request's.
+/// A console body that carried `deployment_ns` would otherwise reach the Mesh
+/// as a different deployment's, with the scope check already behind it.
+fn body_for(dep: &crate::scope::Deployment, extra: serde_json::Value) -> serde_json::Value {
+    let mut body = dep_body(dep);
+    if let serde_json::Value::Object(m) = extra {
+        for (k, v) in m {
+            if k != "deployment_ns" && k != "deployment" {
+                body.insert(k, v);
+            }
+        }
+    }
+    serde_json::Value::Object(body)
+}
+
+/// POST `path` about this deployment, with `extra` fields merged into the
+/// body. Every console-face call goes through here.
+pub async fn call_for<T: serde::de::DeserializeOwned>(
+    dep: &crate::scope::Deployment,
+    path: &str,
+    extra: serde_json::Value,
+) -> anyhow::Result<T> {
+    call_mesh(path, &body_for(dep, extra)).await
+}
+
+/// Which of the deployment's policies activate this integration. Empty when
+/// no Mesh is configured: without a fleet nothing writes through the agent
+/// path, so there is nothing to protect. A configured Mesh that cannot be
+/// reached is an error, not an empty answer — the caller is about to delete
+/// what hosts may be writing through, and must not do it blind.
+pub async fn policies_using(
+    dep: &crate::scope::Deployment,
+    integration: &str,
+) -> anyhow::Result<Vec<String>> {
+    if configured_url().is_none() {
+        return Ok(vec![]);
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        id: String,
+        #[serde(default)]
+        integrations: Vec<String>,
+    }
+    let rows: Vec<Row> = call_for(dep, "policies", serde_json::json!({})).await?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| r.integrations.iter().any(|i| i == integration))
+        .map(|r| r.id)
+        .collect())
+}
+
+/// The deployment is being deleted (ADR-072 §4). `Ok(None)` when no Mesh is
+/// configured; otherwise what the Mesh forgot, for the log.
+pub async fn forget(dep: &crate::scope::Deployment) -> anyhow::Result<Option<serde_json::Value>> {
+    if configured_url().is_none() {
+        return Ok(None);
+    }
+    call_for(dep, "forget_deployment", serde_json::json!({}))
+        .await
+        .map(Some)
 }
 
 /// A `PackageStore` over packages this process fetched and verified. Borrows
@@ -141,8 +224,16 @@ impl velox_policy::PackageStore for Verified<'_> {
 pub async fn save_policy(
     draft: &PolicyDraft,
     dep: &crate::scope::Deployment,
+    tenant_id: Option<&str>,
 ) -> anyhow::Result<u64> {
     use anyhow::Context as _;
+
+    // The deployment's published endpoint, read here rather than carried by
+    // the draft (ADR-072 §5): every policy against this deployment compiles
+    // against the same address, and the operator sets it once.
+    let settings = crate::k8s::mesh_settings(dep)
+        .await
+        .with_context(|| format!("reading the Mesh settings of {}", dep.name()))?;
 
     let mut packages = BTreeMap::new();
     let mut activations = Vec::new();
@@ -181,7 +272,7 @@ pub async fn save_policy(
         target: velox_policy::Target {
             deployment: draft.deployment.clone(),
             namespace: dep.namespace().to_string(),
-            os_host: draft.os_host.clone(),
+            os_host: settings.os_host.clone(),
         },
     };
     let compiled = velox_policy::compile(&policy, &renderer)
@@ -229,9 +320,11 @@ pub async fn save_policy(
             })?;
     }
 
-    let out: serde_json::Value = call_mesh(
+    let out: serde_json::Value = call_for(
+        dep,
         "put_policy",
-        &serde_json::json!({
+        serde_json::json!({
+            "tenant_id": tenant_id,
             "id": draft.id,
             "name": draft.name,
             "body": policy,
@@ -258,9 +351,10 @@ pub async fn save_policy(
     // the row is missing is the first save of a brand-new policy, which by
     // definition has no agents yet. A later save reuses the same account, so
     // agents already running are unaffected.
-    let _: serde_json::Value = call_mesh(
+    let _: serde_json::Value = call_for(
+        dep,
         "put_policy_credential",
-        &serde_json::json!({
+        serde_json::json!({
             "policy_id": draft.id,
             "username": os_user,
             "password": os_password,
@@ -294,22 +388,6 @@ pub async fn call_mesh<T: serde::de::DeserializeOwned>(
     read_mesh(res).await
 }
 
-/// GET the same way.
-pub async fn get_mesh<T: serde::de::DeserializeOwned>(path: &str) -> anyhow::Result<T> {
-    let url = configured_url()
-        .ok_or_else(|| anyhow::anyhow!("no Velox Mesh is configured (VELOX_MESH_URL is unset)"))?;
-    let token = service_token()
-        .ok_or_else(|| anyhow::anyhow!("VELOX_MESH_SERVICE_TOKEN is unset on the control plane"))?;
-    let res = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?
-        .get(format!("{url}/api/mesh/{path}"))
-        .bearer_auth(token)
-        .send()
-        .await?;
-    read_mesh(res).await
-}
-
 async fn read_mesh<T: serde::de::DeserializeOwned>(res: reqwest::Response) -> anyhow::Result<T> {
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
@@ -336,6 +414,55 @@ pub fn service_token() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every Mesh call is about the deployment the scope minted (ADR-072 §2):
+    /// the pair comes off the `Deployment`, and a request body that tries to
+    /// name another one — `deployment_ns` smuggled in beside `policy_id` — is
+    /// overwritten, not forwarded. This is the one place the console's
+    /// `deployment` string and the Mesh's partition key meet.
+    #[test]
+    fn the_pair_is_the_scopes_and_cannot_be_overridden_by_the_request() {
+        let dep = crate::scope::Deployment::for_test("tornis-096o", "veloxsearch-system", None);
+        let body = body_for(
+            &dep,
+            serde_json::json!({
+                "deployment_ns": "someone-elses-ns",
+                "deployment": "someone-elses-deployment",
+                "policy_id": "host-ssh",
+            }),
+        );
+        assert_eq!(body["deployment_ns"], "veloxsearch-system");
+        assert_eq!(body["deployment"], "tornis-096o");
+        assert_eq!(body["policy_id"], "host-ssh");
+        assert_eq!(body.as_object().unwrap().len(), 3);
+    }
+
+    /// `null` for the tenant is what the admin sends; the Mesh defaults it.
+    /// A non-object `extra` adds nothing rather than panicking.
+    #[test]
+    fn a_bare_call_carries_exactly_the_pair() {
+        let dep = crate::scope::Deployment::for_test("a", "ns", Some("t1"));
+        let body = body_for(&dep, serde_json::Value::Null);
+        assert_eq!(
+            body,
+            serde_json::json!({ "deployment_ns": "ns", "deployment": "a" })
+        );
+    }
+
+    /// The draft no longer carries the published endpoint (ADR-072 §5): a
+    /// body that still sends `os_host` deserialises — older consoles keep
+    /// working — and the field is simply not there to be read.
+    #[test]
+    fn the_draft_ignores_a_per_policy_endpoint() {
+        let d: PolicyDraft = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "deployment": "tornis-096o",
+            "integrations": ["ssh"], "os_host": "1.2.3.4:9200"
+        }))
+        .unwrap();
+        assert_eq!(d.integrations, vec!["ssh"]);
+        let s: MeshSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(s, MeshSettings::default());
+    }
 
     /// Unset is "not installed", and that is the state a fresh install is in.
     /// The three fields must agree, because the console branches on them.
