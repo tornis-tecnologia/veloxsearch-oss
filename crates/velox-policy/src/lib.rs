@@ -298,14 +298,11 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
         let resolved = velox_integrations::resolve_variables(&pkg.manifest, &activation.vars)
             .map_err(|e| e.to_string())?;
         self.target(outputs)?;
-        // The index the agent writes to is NOT the one the package declares.
-        // On this path every artifact is named
-        // `veloxagent-<integration>-<signal>-v<major>` (ADR-071): the prefix
-        // says which side wrote the data, the version keeps a mapping change
-        // from having to be made in place, and one pattern describes
-        // everything the collector account may touch. The in-cluster
-        // DaemonSet path keeps the package's own name — it has data and
-        // dashboards under it already.
+        // The index the agent writes to is NOT the one the package declares:
+        // every artifact either collection path creates is named
+        // `veloxagent-<integration>-<signal>-v<major>` (ADR-071). The prefix
+        // is what the collector account is granted, and the version keeps a
+        // mapping change from having to be made in place.
         let index = velox_integrations::agent_artifact_name(
             &pkg.manifest.id,
             &pkg.manifest.index,

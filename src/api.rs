@@ -2586,7 +2586,7 @@ mod server {
         } else {
             let pattern = monitors
                 .iter()
-                .map(|m| crate::recipes::recipe_index(m))
+                .map(|m| crate::recipes::recipe_pattern(m))
                 .collect::<Vec<_>>()
                 .join(",");
             Some(

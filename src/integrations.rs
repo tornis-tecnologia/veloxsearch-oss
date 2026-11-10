@@ -54,139 +54,35 @@ pub fn vars(
     )
 }
 
-/// Resolve the variable set for a live deployment: its admin credentials
-/// (from the per-cluster Secret) and its own namespace.
-async fn resolve_vars(deployment: &Deployment, manifest: &Manifest) -> Vars {
-    let (u, p) = crate::k8s::admin_creds(deployment).await;
-    vars(deployment, &manifest.index, &manifest.id, &u, &p)
-}
-
 // ---------------------------------------------------------------------------
-// Apply / uninstall executors — reuse the recipe plumbing verbatim.
+// Apply / uninstall executors.
+//
+// Both collection paths install through here, under the same names (ADR-071):
+// every artifact is `veloxagent-<integration>-<signal>-v<major>`, and every
+// collector writes with `veloxagent-user` (ADR-070). The admin login is the
+// core's, used for the writes below and never handed to a collector.
 // ---------------------------------------------------------------------------
 
-/// Install a package end-to-end (the generalized `recipes::apply` sequence):
-///  1. render + interpolation-check every asset (foreign token ⇒ abort before
-///     anything touches the cluster);
-///  2. PUT the ingest pipeline (if present);
-///  3. PUT the index template (if present);
-///  4. `_bulk_create` the saved objects into the deployment's Dashboards tenant;
-///  5. deploy the agent from the rendered config.
-pub async fn apply_package(deployment: &Deployment, pkg: &Package) -> Result<()> {
-    let vars = resolve_vars(deployment, &pkg.manifest).await;
-
-    // Interpolation safety first: render (⇒ validate) EVERY asset up front so a
-    // foreign `{token}` fails the whole install before a single write.
-    let pipeline = match &pkg.pipeline {
-        Some(s) => Some(render(s, &vars)?),
-        None => None,
-    };
-    let index_template = match &pkg.index_template {
-        Some(s) => Some(render(s, &vars)?),
-        None => None,
-    };
-    let saved_objects = render(&pkg.saved_objects, &vars)?;
-    // Schema 1.1 variables on the DaemonSet path: defaults only (there is no
-    // policy here); a `required` variable without a default refuses the
-    // install by name, before anything is written.
-    let declared = resolve_variables(&pkg.manifest, &BTreeMap::new())?;
-    let agent_config = render(&apply_variables(&pkg.agent_config, &declared), &vars)?;
-
-    let base = crate::recipes::os_base(deployment);
-    let c = crate::recipes::http()?;
-    let (u, p) = crate::k8s::admin_creds(deployment).await;
-
-    // 2. Ingest pipeline (hard-fail like configure_*): PUT under the package id.
-    if let Some(body) = &pipeline {
-        let json: serde_json::Value =
-            serde_json::from_str(body).context("pipeline.json is not valid JSON")?;
-        c.put(format!("{base}/_ingest/pipeline/{}", pkg.manifest.id))
-            .basic_auth(&u, Some(&p))
-            .json(&json)
-            .send()
-            .await
-            .context("creating ingest pipeline")?
-            .error_for_status()
-            .context("ingest pipeline rejected")?;
-    }
-
-    // 3. Index template (hard-fail): PUT under the index name.
-    if let Some(body) = &index_template {
-        let json: serde_json::Value =
-            serde_json::from_str(body).context("index-template.json is not valid JSON")?;
-        c.put(format!("{base}/_index_template/{}", pkg.manifest.index))
-            .basic_auth(&u, Some(&p))
-            .json(&json)
-            .send()
-            .await
-            .context("creating index template")?
-            .error_for_status()
-            .context("index template rejected")?;
-    }
-
-    // 4. Saved objects into the deployment's own Dashboards tenant (best-effort,
-    //    exactly like ensure_tenant/ensure_dashboard: a cluster without
-    //    multitenancy still gets the data, it just lands in Global). When the
-    //    ADR-049 stack owns the Dashboards, scoping is by workspace instead and
-    //    there is no tenant to create or name (see `recipes::tenant_scope`).
-    let scope = crate::recipes::tenant_scope(deployment).await;
-    if scope.is_some() {
-        crate::recipes::ensure_tenant(deployment).await;
-    }
-    let objs = saved_objects_bulk(&saved_objects)?;
-    let dash = crate::recipes::dashboards_base(deployment);
-    let mut req = c
-        .post(format!(
-            "{dash}/api/saved_objects/_bulk_create?overwrite=true"
-        ))
-        .basic_auth(&u, Some(&p))
-        .header("osd-xsrf", "true");
-    if let Some(t) = &scope {
-        req = req.header("securitytenant", t);
-    }
-    let _ = req.json(&objs).send().await;
-
-    // 5. Agent from the rendered config. A config that tails host files uses the
-    //    Fluent Bit `tail` input (DaemonSet); an API-server watcher
-    //    (`kubernetes_events`) does not (single-replica Deployment) — the same
-    //    split `deploy_agent` makes for `k8s-events`, here read off the config.
-    let tails_logs = agent_config.contains("Name tail");
-    crate::agents::deploy_rendered_agent(deployment, &pkg.manifest.id, &agent_config, tails_logs)
-        .await?;
-    Ok(())
-}
-
-/// Install the **backend half** of an activation on the agent path: the ingest
-/// pipeline, the index template, the index pattern and the dashboards, all
-/// under the `veloxagent-<integration>-<signal>-v<major>` names (ADR-071), and
-/// no agent at all.
+/// Install the backend half of a package — ingest pipeline, index template,
+/// index pattern, dashboards — under the renamed ids, and return the renaming
+/// so the caller's collector config points at the same index.
 ///
-/// Two differences from [`apply_package`], and both are the point:
-///
-///  * **No collector is deployed.** The edge half of this activation runs on a
-///    host, under a policy, from the compiled configuration the Mesh serves.
-///    Deploying a DaemonSet here would collect everything twice.
-///  * **Every artifact is renamed.** Both paths can be active on one
-///    deployment, and the packages carry fixed saved-object ids. Installing
-///    under those ids would repoint the DaemonSet install's panels at the
-///    agent's index — the kind of breakage nobody attributes to the right
-///    cause.
-///
-/// `{index}` renders to the renamed index, so the dashboards and the template
-/// describe the index the agent actually writes to, and the collector
-/// account's grant covers exactly that name.
-pub async fn apply_package_for_agent(
+/// Every asset is rendered (and therefore interpolation-checked) before the
+/// first write: a foreign `{token}` aborts the whole install with nothing
+/// half-applied.
+async fn install_backend(
     deployment: &Deployment,
     pkg: &Package,
     version: &str,
-) -> Result<()> {
+) -> Result<velox_integrations::AgentRenaming> {
     let renaming = velox_integrations::agent_renaming(pkg, version)?;
+    // Backend assets carry no credential tokens that reach a collector — the
+    // admin login renders only into requests this process makes — but the
+    // closed set is rendered in full so a package cannot smuggle a token past
+    // the check by putting it in a file the collector never reads.
     let (u, p) = crate::k8s::admin_creds(deployment).await;
     let vars = vars(deployment, &renaming.name, &pkg.manifest.id, &u, &p);
 
-    // Interpolation safety first, exactly as on the DaemonSet path: render
-    // every asset before a single write, so a foreign `{token}` aborts the
-    // whole install.
     let pipeline = match &pkg.pipeline {
         Some(s) => Some(render(s, &vars)?),
         None => None,
@@ -230,9 +126,11 @@ pub async fn apply_package_for_agent(
             .context("index template rejected")?;
     }
 
-    // Saved objects into the deployment's own Dashboards tenant, best-effort
-    // for the same reason as the DaemonSet path: a cluster without
-    // multitenancy still gets them, in Global.
+    // Saved objects into the deployment's own Dashboards tenant (best-effort,
+    // exactly like ensure_tenant/ensure_dashboard: a cluster without
+    // multitenancy still gets the data, it just lands in Global). When the
+    // ADR-049 stack owns the Dashboards, scoping is by workspace instead and
+    // there is no tenant to create or name (see `recipes::tenant_scope`).
     let scope = crate::recipes::tenant_scope(deployment).await;
     if scope.is_some() {
         crate::recipes::ensure_tenant(deployment).await;
@@ -249,20 +147,118 @@ pub async fn apply_package_for_agent(
         req = req.header("securitytenant", t);
     }
     let _ = req.json(&objs).send().await;
+    Ok(renaming)
+}
+
+/// The collector config a package renders to on the in-cluster path: the
+/// renamed index, `veloxagent-user`, and the password as the `${VAR}` reference
+/// the pod resolves from its Secret — the value is never rendered into text
+/// that could reach a ConfigMap.
+pub(crate) fn collector_config(
+    deployment: &Deployment,
+    pkg: &Package,
+    version: &str,
+) -> Result<String> {
+    let name =
+        velox_integrations::agent_artifact_name(&pkg.manifest.id, &pkg.manifest.index, version);
+    let vars = vars(
+        deployment,
+        &name,
+        &pkg.manifest.id,
+        crate::os_agent_user::AGENT_USER,
+        crate::agents::PASSWORD_REF,
+    );
+    // Schema 1.1 variables on the DaemonSet path: defaults only (there is no
+    // policy here); a `required` variable without a default refuses the
+    // install by name, before anything is written.
+    let declared = resolve_variables(&pkg.manifest, &BTreeMap::new())?;
+    Ok(render(
+        &apply_variables(&pkg.agent_config, &declared),
+        &vars,
+    )?)
+}
+
+/// Install a package end-to-end on the in-cluster path: the backend half under
+/// the `veloxagent-` names, then the collector, writing with `veloxagent-user`.
+pub async fn apply_package(deployment: &Deployment, pkg: &Package, version: &str) -> Result<()> {
+    // The collector config first, so a package that cannot render fails
+    // before the backend half is touched.
+    let agent_config = collector_config(deployment, pkg, version)?;
+    // The account before the collector that logs in with it.
+    crate::os_agent_user::ensure(deployment).await?;
+    install_backend(deployment, pkg, version).await?;
+
+    // A config that tails host files uses the Fluent Bit `tail` input
+    // (DaemonSet); an API-server watcher (`kubernetes_events`) does not
+    // (single-replica Deployment) — read off the config.
+    let tails_logs = agent_config.contains("Name tail");
+    crate::agents::deploy_rendered_agent(deployment, &pkg.manifest.id, &agent_config, tails_logs)
+        .await?;
     Ok(())
 }
 
-/// Uninstall a package: remove its agent, then delete exactly the manifest's
-/// `teardown` set from the deployment's OpenSearch — the fix for the historical
-/// `disable()` leak (ADR-039). Saved-object *types* (needed by the Dashboards
-/// DELETE API) are recovered from the package's own ndjson.
-pub async fn uninstall_package(deployment: &Deployment, pkg: &Package) -> Result<()> {
+/// Install the **backend half** of an activation for a Velox Mesh policy: the
+/// same artifacts as [`apply_package`], and no collector — the edge half runs
+/// on a host, from the compiled policy the Mesh serves. Deploying a DaemonSet
+/// here would collect everything twice.
+pub async fn apply_package_for_agent(
+    deployment: &Deployment,
+    pkg: &Package,
+    version: &str,
+) -> Result<()> {
+    install_backend(deployment, pkg, version).await.map(|_| ())
+}
+
+/// What installing `pkg` at `version` put in OpenSearch, as a teardown set
+/// under the renamed ids, with each saved object's type for the Dashboards
+/// DELETE API.
+fn renamed_teardown(pkg: &Package, version: &str) -> Result<(Teardown, BTreeMap<String, String>)> {
+    let r = velox_integrations::agent_renaming(pkg, version)?;
+    let mut kinds = BTreeMap::new();
+    let mut saved = Vec::new();
+    for o in parse_saved_objects(&pkg.saved_objects)? {
+        let id = r.map.get(&o.id).cloned().unwrap_or(o.id);
+        if o.kind != "index-pattern" {
+            saved.push(id.clone());
+        }
+        kinds.insert(id, o.kind);
+    }
+    Ok((
+        Teardown {
+            ingest_pipeline: pkg.pipeline.as_ref().map(|_| r.name.clone()),
+            index_template: pkg.index_template.as_ref().map(|_| r.name.clone()),
+            index_pattern: r.name.clone(),
+            index_patterns: Vec::new(),
+            saved_objects: saved,
+            ism_policies: Vec::new(),
+            datasources: Vec::new(),
+        },
+        kinds,
+    ))
+}
+
+/// Uninstall a package: remove its collector, then delete what it created.
+///
+/// Two teardown sets, and both run: the renamed one this core installs, and
+/// the package's **declared** one, which is what a deployment installed before
+/// ADR-071 still carries (`nginx` pipeline, `nginx-logs` template,
+/// `velox-nginx-*` dashboards). Deleting only the new set would leave the old
+/// one behind forever; best-effort per object means the set that is absent
+/// costs a 404 and nothing else. Indices are never deleted — they are data,
+/// and retention owns them.
+pub async fn uninstall_package(
+    deployment: &Deployment,
+    pkg: &Package,
+    version: &str,
+) -> Result<()> {
     let _ = crate::agents::remove_agent(deployment, &pkg.manifest.id).await;
-    let kinds: BTreeMap<String, String> = parse_saved_objects(&pkg.saved_objects)?
+    let (renamed, renamed_kinds) = renamed_teardown(pkg, version)?;
+    teardown_os(deployment, &renamed, &renamed_kinds).await;
+    let legacy_kinds: BTreeMap<String, String> = parse_saved_objects(&pkg.saved_objects)?
         .into_iter()
         .map(|o| (o.id, o.kind))
         .collect();
-    teardown_os(deployment, &pkg.manifest.teardown, &kinds).await;
+    teardown_os(deployment, &pkg.manifest.teardown, &legacy_kinds).await;
     Ok(())
 }
 
@@ -361,6 +357,46 @@ pub(crate) async fn teardown_os(
 
 #[cfg(test)]
 mod tests {
+
+    /// What an in-cluster collector is configured with: the collector account,
+    /// the password as a reference the pod resolves, and the renamed index.
+    /// The admin login appearing here is the bug this exists to prevent.
+    #[test]
+    fn the_in_cluster_collector_never_sees_the_admin_login() {
+        let dep = Deployment::for_test("logs-a1b2", "veloxsearch", None);
+        for r in crate::recipes::RECIPES {
+            let pkg = crate::recipes::bootstrap_package(r).unwrap();
+            let conf = collector_config(&dep, &pkg, "1.0.0").unwrap();
+            assert!(conf.contains("HTTP_User veloxagent-user"), "{r}: {conf}");
+            assert!(
+                conf.contains("HTTP_Passwd ${VELOX_OS_PASSWORD}"),
+                "{r}: {conf}"
+            );
+            assert!(!conf.contains("HTTP_User admin"), "{r}: {conf}");
+            let want = velox_integrations::agent_artifact_name(r, &pkg.manifest.index, "1.0.0");
+            assert!(conf.contains(&format!("Index {want}")), "{r}: {conf}");
+        }
+    }
+
+    /// Uninstall removes the renamed set, and the renamed set is the same size
+    /// as what the package declares — a rename that dropped an object would
+    /// leave it behind forever.
+    #[test]
+    fn the_renamed_teardown_covers_everything_installed() {
+        for r in crate::recipes::RECIPES {
+            let pkg = crate::recipes::bootstrap_package(r).unwrap();
+            let (t, kinds) = renamed_teardown(&pkg, "1.0.0").unwrap();
+            let got = teardown_resources(&t);
+            let want = velox_integrations::agent_created_resources(&pkg, "1.0.0").unwrap();
+            assert_eq!(got, want, "{r}: teardown != install");
+            for id in &t.saved_objects {
+                assert!(
+                    kinds.contains_key(id),
+                    "{r}: {id} has no type for the DELETE API"
+                );
+            }
+        }
+    }
     use super::*;
 
     /// Path to the CANONICAL nginx registry package (#74) — the frozen

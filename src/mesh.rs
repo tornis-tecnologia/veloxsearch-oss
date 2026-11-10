@@ -199,35 +199,18 @@ pub async fn save_policy(
         })
         .collect();
 
-    // The names this policy's artifacts take — `veloxagent-<integration>-
-    // <signal>-v<major>` (ADR-071) — read off what the compiler produced
-    // rather than derived again here, so the index in the collector's config,
-    // the artifacts in OpenSearch and the account's grant are one decision.
-    let artifact_names: Vec<String> = compiled
-        .backend
-        .iter()
-        .map(|b| b.artifact_name.clone())
-        .collect();
-
-    // The collector account, before the policy that needs it exists.
-    //
-    // Order is the whole point: an agent picks up a new revision on its next
-    // check-in, and a revision whose indices the account cannot write yet
-    // means a flush rejected with a 403 and an operator reading a 401-shaped
-    // error. The account is created (or widened to cover a newly added
-    // integration) first, then the policy is stored, then agents converge.
-    //
-    // The indices come from the packages we just verified, so the role grants
-    // exactly what the policy's integrations declare and nothing else.
-    let (os_user, os_password) = crate::os_agent_user::ensure(dep, &artifact_names)
-        .await
-        .with_context(|| {
-            format!(
-                "preparing the collector account on {} for policy {}",
-                dep.name(),
-                draft.id
-            )
-        })?;
+    // The collector account, before the policy that needs it exists: an agent
+    // picks up a new revision on its next check-in, and a flush the account
+    // cannot make is a 403 an operator reads as a bad password. `ensure` is
+    // idempotent and grants `veloxagent-*` — every name this compiler emits
+    // carries the prefix (ADR-071), so a new integration needs no new grant.
+    let (os_user, os_password) = crate::os_agent_user::ensure(dep).await.with_context(|| {
+        format!(
+            "preparing the collector account on {} for policy {}",
+            dep.name(),
+            draft.id
+        )
+    })?;
     // The backend half of every activation, under this path's names: ingest
     // pipeline, index template, index pattern and dashboards. Before the
     // policy is stored, because the agent starts writing on its next check-in

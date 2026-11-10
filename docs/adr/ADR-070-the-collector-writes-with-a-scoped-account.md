@@ -1,4 +1,4 @@
-# ADR-070 — A host agent's collector writes with a scoped OpenSearch account, handed to it by the Mesh
+# ADR-070 — Every collector writes with a scoped OpenSearch account; only the core holds the admin login
 
 **Status:** proposed
 **Date:** 2026-11-09
@@ -53,7 +53,13 @@ Three further constraints shaped the answer:
    be talked into reaching the DaemonSet path's data by a caller that passes
    the wrong list.
 
-2. **The account is shared by the agents of a deployment, not per host.**
+2. **The account is shared by every collector of a deployment** — the
+   in-cluster DaemonSet and every host agent alike, and it is the only login
+   either is given. The core keeps the admin login, because creating an
+   internal user and a role is a privileged call; it never leaves the core's
+   process. The OTel stack (ADR-053) is not a Fluent Bit collector, owns
+   indices outside `veloxagent-*`, and stays on the admin login for now.
+   It is not per host.
    Per-agent accounts are the stronger model and are not ruled out, but they
    mean a security-plugin write per host and a rotation path that does not
    exist yet. What limits the damage today is the role, not the number of
@@ -103,9 +109,12 @@ Three further constraints shaped the answer:
   `/var/log/auth.log` land in `ssh-logs`, and deleting the Secret and saving
   again rotates the password, updates the account, reaches the agent, restarts
   the engine and keeps collecting with no failed flush.
-- The in-cluster DaemonSet path still uses the admin login. Moving it onto this
-  account is the obvious follow-up and is deliberately not in this ADR: it
-  changes a path that works today, and it should change on its own evidence.
+- The in-cluster DaemonSet uses this account too. Its Secret in `velox-agents`
+  holds `veloxagent-user`, collectors installed before the change are moved by
+  the sampler's reconcile (ADR-071 decision 7), and a stored password that
+  OpenSearch refuses is re-written rather than silently skipped. The names
+  this ADR first shipped with (`velox_mesh_agent`, `velox_mesh_writer`, Secret
+  `<deployment>-velox-mesh-agent`) are deleted on every `ensure`.
 - Per-agent accounts, and revoking one host's write access without touching
   the fleet, remain open.
 - The Mesh's database now holds a password. It is scoped to appending into

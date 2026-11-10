@@ -248,6 +248,55 @@ fn packages_load_and_carry_the_catalog_identity() {
     }
 }
 
+/// The egress-less fallback (`recipes::bootstrap_package`) installs what the
+/// registry would have served, under the same `veloxagent-` names: identical
+/// collector template and saved objects, JSON-identical pipeline and
+/// template, the same teardown, and therefore the same renamed inventory. If
+/// this drifts, a deployment installed offline and one installed online end up
+/// with different artifacts under the same names.
+#[test]
+fn the_bootstrap_package_is_the_registry_package() {
+    let Some(dir) = registry_dir() else { return };
+    let json = |s: &Option<String>| {
+        s.as_deref()
+            .map(|t| serde_json::from_str::<serde_json::Value>(t).expect("asset JSON"))
+    };
+    for recipe in recipes::RECIPES {
+        let reg = Package::load_from_dir(&dir.join(recipe)).expect(recipe);
+        let boot = recipes::bootstrap_package(recipe).expect(recipe);
+        assert_eq!(boot.manifest.id, reg.manifest.id, "{recipe}: id");
+        assert_eq!(boot.manifest.index, reg.manifest.index, "{recipe}: index");
+        assert_eq!(
+            boot.agent_config, reg.agent_config,
+            "{recipe}: agent.conf.tmpl"
+        );
+        assert_eq!(
+            boot.saved_objects, reg.saved_objects,
+            "{recipe}: saved objects"
+        );
+        assert_eq!(
+            json(&boot.pipeline),
+            json(&reg.pipeline),
+            "{recipe}: pipeline"
+        );
+        assert_eq!(
+            json(&boot.index_template),
+            json(&reg.index_template),
+            "{recipe}: index template"
+        );
+        assert_eq!(
+            integrations::teardown_resources(&boot.manifest.teardown),
+            integrations::teardown_resources(&reg.manifest.teardown),
+            "{recipe}: teardown"
+        );
+        assert_eq!(
+            velox_integrations::agent_created_resources(&boot, "1.0.0").unwrap(),
+            velox_integrations::agent_created_resources(&reg, "1.0.0").unwrap(),
+            "{recipe}: renamed inventory"
+        );
+    }
+}
+
 /// ADR-039 golden gate: each package's `pipeline.json` / `index-template.json`,
 /// rendered by the engine, is byte-equivalent (canonical serde serialization —
 /// the exact bytes PUT on the wire) to the pre-extraction Rust output.

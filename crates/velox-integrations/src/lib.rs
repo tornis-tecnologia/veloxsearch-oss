@@ -556,10 +556,11 @@ pub fn major_of(version: &str) -> u64 {
 /// `veloxagent-nginx-logs-v2` and leaves v1 to retention, instead of a
 /// deployment where half the documents disagree with the template.
 ///
-/// Deliberately NOT applied to the in-cluster DaemonSet path, whose indices
-/// (`nginx-logs`, …) are named by the packages themselves and already carry
-/// years of data and dashboards. The prefix marks the agent's artifacts; it
-/// does not rename anyone else's.
+/// Applied on BOTH collection paths — the in-cluster DaemonSet and Velox
+/// Agent on a host — so an integration has one set of artifacts whichever way
+/// it is collected. The packages keep declaring their own names (`nginx-logs`);
+/// the rename happens at install, so the registry needs no change and no
+/// package is re-signed.
 pub fn agent_artifact_name(package_id: &str, index: &str, version: &str) -> String {
     format!(
         "{AGENT_ARTIFACT_PREFIX}-{package_id}-{}-v{}",
@@ -571,12 +572,11 @@ pub fn agent_artifact_name(package_id: &str, index: &str, version: &str) -> Stri
 /// Every id this package's artifacts take on the agent path, keyed by the id
 /// the package itself declares.
 ///
-/// Renaming is not cosmetic here: both paths can be active on the same
-/// deployment, and the packages' saved objects carry fixed ids
-/// (`velox-nginx-overview`, …). Installing an integration twice under one set
-/// of ids means the second install silently repoints the first one's panels at
-/// a different index. Separate names are what let a DaemonSet install and a
-/// policy coexist.
+/// Renaming is not cosmetic: a deployment collected before ADR-071 still
+/// holds the packages' fixed ids (`velox-nginx-overview`, …) pointing at the
+/// old indices, and installing under those same ids would repoint its panels
+/// at an index with none of that history. New ids leave the old dashboards
+/// reading the old data until retention ages it out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRenaming {
     /// The shared name: index, index template, ingest pipeline, index pattern.
@@ -743,6 +743,33 @@ pub fn agent_created_resources(pkg: &Package, version: &str) -> Result<BTreeSet<
     Ok(set)
 }
 
+/// An integration's artifact name without its version:
+/// `veloxagent-<integration>-<signal>`. What a reader that must not care which
+/// version is installed keys on — retention, the security detectors, "is data
+/// arriving" — through [`agent_family_pattern`].
+pub fn agent_artifact_family(package_id: &str, index: &str) -> String {
+    format!("{AGENT_ARTIFACT_PREFIX}-{package_id}-{}", signal_of(index))
+}
+
+/// Every version of one integration's index: `veloxagent-nginx-logs-v*`.
+///
+/// Version-agnostic on purpose. Retention must keep ageing `-v1` out after
+/// `-v2` ships, a detector must keep reading both while both hold data, and a
+/// "receiving" check must not report silence the day an upgrade starts a new
+/// index. The `-v` is in the pattern so `veloxagent-nginx-logs-*` cannot match
+/// an integration whose id happens to extend this one's.
+pub fn agent_family_pattern(package_id: &str, index: &str) -> String {
+    format!("{}-v*", agent_artifact_family(package_id, index))
+}
+
+/// The one pattern the collector account is granted (ADR-070, ADR-071): every
+/// artifact either collection path creates carries the prefix, so the prefix
+/// IS the boundary. Static rather than computed per policy, because both paths
+/// share one account per deployment and a per-policy grant would have to be
+/// the union of every policy and every in-cluster install — a list that is
+/// wrong the moment one of them changes.
+pub const AGENT_GRANT_PATTERN: &str = "veloxagent-*";
+
 /// The index pattern the collector account is granted, for one artifact name.
 /// A trailing `*` so a rolled-over or dated index (`...-v1-000001`) is covered
 /// by the same grant.
@@ -853,6 +880,32 @@ pub fn saved_objects_bulk(ndjson: &str) -> Result<Vec<serde_json::Value>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The family pattern spans versions but not neighbours: `nginx` must not
+    /// read an integration called `nginx-plus`.
+    #[test]
+    fn a_family_pattern_spans_versions_and_nothing_else() {
+        let p = agent_family_pattern("nginx", "nginx-logs");
+        assert_eq!(p, "veloxagent-nginx-logs-v*");
+        let stem = p.trim_end_matches('*');
+        assert!(agent_artifact_name("nginx", "nginx-logs", "1.0.0").starts_with(stem));
+        assert!(agent_artifact_name("nginx", "nginx-logs", "3.2.0").starts_with(stem));
+        assert!(!agent_artifact_name("nginx-plus", "nginx-plus-logs", "1.0.0").starts_with(stem));
+    }
+
+    /// Every name either path produces falls under the one grant.
+    #[test]
+    fn every_artifact_falls_under_the_grant() {
+        let stem = AGENT_GRANT_PATTERN.trim_end_matches('*');
+        for (id, idx) in [
+            ("nginx", "nginx-logs"),
+            ("k8s-events", "k8s-events"),
+            ("ssh", "ssh-logs"),
+        ] {
+            assert!(agent_artifact_name(id, idx, "1.0.0").starts_with(stem));
+            assert!(agent_family_pattern(id, idx).starts_with(stem));
+        }
+    }
 
     /// A package shaped like the real nginx one: an index pattern named after
     /// the index, a dashboard that references a visualization, and a

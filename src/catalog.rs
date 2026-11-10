@@ -1073,7 +1073,7 @@ pub async fn install(deployment: &Deployment, id: &str, version: Option<&str>) -
                     pkg.manifest.id
                 );
             }
-            crate::integrations::apply_package(deployment, &pkg).await?;
+            crate::integrations::apply_package(deployment, &pkg, &resolved).await?;
         }
         Err(e) if BOOTSTRAP_IDS.contains(&id) => {
             tracing::warn!(
@@ -1124,8 +1124,19 @@ pub async fn uninstall(deployment: &Deployment, id: &str) -> Result<()> {
             // act on.
             verify_package(&fetched.manifest_yaml, &fetched.assets)
                 .with_context(|| format!("refusing to uninstall integration {id}"))?;
+            // The version decides the names (`...-v<major>`, ADR-071), so it
+            // is the one this deployment RECORDED at install, not whatever the
+            // registry offers now: uninstalling a v1 install with the v2 names
+            // would delete nothing and report success.
+            let fetched_version =
+                manifest_field(&fetched.manifest_yaml, "version").unwrap_or_default();
+            let installed = crate::k8s::integration_versions(deployment)
+                .await
+                .ok()
+                .and_then(|m| m.get(id).cloned())
+                .unwrap_or(fetched_version);
             let pkg = fetched.into_package()?;
-            crate::integrations::uninstall_package(deployment, &pkg).await?;
+            crate::integrations::uninstall_package(deployment, &pkg, &installed).await?;
         }
         Err(e) if crate::recipes::RECIPES.contains(&id) => {
             tracing::warn!(
