@@ -1,0 +1,118 @@
+# ADR-072 — Velox Mesh is a deployment's, not the installation's
+
+**Status:** proposed
+**Date:** 2026-11-10
+
+## Context
+
+ADR-068 shipped Velox Mesh as one controller behind one URL, and the console
+gave it one screen: `/mesh`, beside *Deployments* in the sidebar. Every list
+on that screen — policies, agents, enrollment tokens, the onboarding step,
+each policy's rollout — was the installation's. The deployment a policy
+delivered data to appeared only inside the policy document
+(`outputs[].deployment`); no table in the Mesh carried it, and no query
+filtered on it.
+
+That shape has three faults a second deployment exposes at once:
+
+- **Ownership stops at the save.** `mesh_save_policy` was the only Mesh
+  handler that went through `Scope::require`. Minting a token, moving an
+  agent and reading the fleet were `AdminOnly` and never asked which
+  deployment a policy or an agent belonged to, so an agent could be assigned
+  to a policy that writes into another deployment's indices — a cross-tenant
+  write path, and one the type-level ownership rule (`scope.rs`) exists to
+  make impossible.
+- **The Data tab and the Mesh disagree about the same artifacts.** Both paths
+  install `veloxagent-<id>-…` pipelines and templates (ADR-071). The Data tab
+  could uninstall an integration while a policy's hosts were writing through
+  it; nothing told the tab that a policy depended on them.
+- **The screen has no deployment to be about.** Onboarding, the published
+  OpenSearch endpoint for off-cluster agents (`os_host`), the "receiving
+  data" check — each is a fact about one deployment, and a page with no
+  deployment in its URL had to carry a target picker on every form instead.
+
+The user's decision (2026-11-10): the Mesh is configured **per deployment**
+and shown **under** the deployment, with its policies and agents attached to
+it and tied to the integrations that deployment already has.
+
+## Decision
+
+1. **One Mesh service, data partitioned by deployment.** The controller stays
+   one binary, one Postgres and one enrollment URL — like the Fleet Server,
+   the service is infrastructure and the *data* is what is scoped. Every
+   policy and every agent row carries `(deployment_ns, deployment)`, the same
+   pair the core's `Deployment` capability is built from. A Mesh per
+   deployment (one pod and one database each) was considered and rejected:
+   N times the resources and the licence, and no isolation the scope does not
+   already give.
+
+2. **Every console call to the Mesh names a deployment and is filtered by
+   it.** The core turns the caller's string into a `Deployment` with
+   `Scope::require` before the call leaves the process, exactly as the
+   OpenSearch and Kubernetes layers already demand; the Mesh then refuses to
+   answer about rows outside that pair. `overview` becomes the deployment's
+   overview — its onboarding step, its policies, its fleet, its rollouts.
+   Only the licence and the seat count stay global: the free tier is ten
+   agents per installation, not per deployment.
+
+3. **An agent belongs to the deployment it enrolled under, for life.** The
+   agent row copies the pair from the policy at enrollment rather than
+   deriving it through `policy_id`, so deleting a policy (`policy_id` becomes
+   NULL) does not orphan the agent. `assign_policy` refuses a policy of
+   another deployment; moving a host to another deployment is a new
+   enrollment, with that deployment's token. A credential issued for one
+   deployment's data path must never start writing to another's.
+
+4. **Deleting a deployment forgets its Mesh.** `delete_cluster` tells the
+   Mesh to drop the deployment's policies, tokens and credentials and to mark
+   its agents `unenrolled`. The agents stop receiving configuration; Fluent
+   Bit stays installed on the host with its last config, which is the
+   operator's to remove. Blocking the delete while agents exist was
+   considered and rejected: a deployment is deleted precisely when its data
+   path is gone, and a fleet that can block that is a fleet holding the
+   platform hostage.
+
+5. **The published endpoint is the deployment's setting, not the policy's.**
+   `os_host` — where a host outside the cluster reaches this deployment's
+   OpenSearch — moves from a per-policy field to an annotation on the
+   deployment's CR, read at compile time. One deployment has one published
+   address; every policy against it compiles against the same one.
+
+6. **Integrations and policies know about each other.** The Data tab shows,
+   per integration, whether hosts collect it too and under which policies;
+   uninstalling an integration a policy still activates is refused (400,
+   naming the policy). Installing the backend half for a policy records the
+   integration on the deployment like the in-cluster path does, so one
+   version is pinned for both paths.
+
+7. **Tenants operate the Mesh of their own deployments.** The routes move
+   from `AdminOnly` to `TenantScoped`; `Scope::resolve`'s anti-enumeration
+   property (not found ≡ not yours) carries over unchanged because the Mesh
+   is only ever asked about a deployment the scope already minted.
+   `mesh_status` stays global and tells a tenant only *configured* and
+   *reachable* — the Mesh URL is infrastructure.
+
+8. **The console moves the screen under the deployment:**
+   `/deployments/:id/mesh/:sub` with `overview | agents | policies`. The
+   sidebar entry goes; `/mesh/*` redirects to `/deployments`. The install
+   guide (no Mesh configured) and the reachability error move to *Settings*,
+   admin-only, because they are about the installation, not a deployment.
+
+## Consequences
+
+- One schema migration (`003_deployment_scope.sql`) adds the pair to
+  `mesh_policies` and `mesh_agents`, back-fills the deployment name from
+  `body->outputs`, and leaves the namespace for the core to fill on its first
+  reconcile. Rows that cannot be resolved are hidden, not deleted. The Mesh
+  has not been released, so this touches development databases only.
+- The Mesh grows one console route (`forget_deployment`) and every existing
+  console route gains a required `deployment` pair. The agent protocol
+  (OpAMP + the declared extensions) is untouched: the enrollment token points
+  at a policy and the policy at a deployment, which is all the agent needs.
+- The core's `api::ROUTES` table changes policy for the Mesh routes; the
+  startup check that every route has an entry makes a forgotten one a panic.
+- `tests/mesh_check.py` is rewritten for the new URL and asserts the
+  redirect from the old one. The `data-testid` hooks of the three panels are
+  kept; the deployment tab adds `dep-tab-mesh`.
+- Supersedes the global `/mesh` screen described in ADR-068's consequences
+  and the `os_host` field of `PolicyDraft` introduced with ADR-070.

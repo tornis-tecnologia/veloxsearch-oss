@@ -119,6 +119,8 @@ Discussion happens on that PR. See [GOVERNANCE.md](../../GOVERNANCE.md).
 
 | ADR-071 | *(proposed)* Every collection artifact on both paths is named `veloxagent-<integration>-<signal>-v<major>` — one string for the index, the index template, the ingest pipeline and the index pattern (saved objects suffixed off it); the signal from a closed list, the major in the name so a mapping change ships as `-v2`; readers key on the version-agnostic `-v*` family. The rename is a parsed-JSON transformation at install (the registry and its signatures are untouched), the built-in recipes install through the same function, and existing deployments migrate themselves on the next sampler tick, keeping their old indices as history. [ADR-071](ADR-071-agent-artifacts-are-named-veloxagent.md) |
 
+| ADR-072 | *(proposed)* Velox Mesh is a deployment's, not the installation's: one controller, data partitioned by `(namespace, deployment)` on every policy and agent row; every console call names a deployment the core minted through `Scope::require`, agents belong to the deployment they enrolled under (moving means re-enrolling), deleting a deployment forgets its policies, tokens and agents, `os_host` is a deployment annotation, uninstalling an integration a policy activates is refused, tenants operate the Mesh of their own deployments, and the screen moves to `/deployments/:id/mesh`. [ADR-072](ADR-072-the-mesh-is-scoped-to-a-deployment.md) |
+
 Numbers absent from this table (ADR-004, 006–013, 021, 029, 033, 037) were
 either withdrawn before implementation or superseded by a later decision, and
 are not cited anywhere in the source.

@@ -36,6 +36,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "002_policy_credentials",
         include_str!("../../../migrations/002_policy_credentials.sql"),
     ),
+    (
+        "003_deployment_scope",
+        include_str!("../../../migrations/003_deployment_scope.sql"),
+    ),
 ];
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -124,6 +128,104 @@ pub fn hash(secret: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// The deployment every row belongs to (ADR-072)
+// ---------------------------------------------------------------------------
+
+/// The pair the core's `Deployment` capability is built from. Every console
+/// request carries one, and every query here filters on it: the Mesh is one
+/// service, but what it stores is a deployment's.
+///
+/// The Mesh does not — cannot — check that the caller owns this pair. The
+/// core does, with `Scope::require`, before the request leaves it, and the
+/// service token is what says the caller *is* the core. Two layers, one
+/// decision each.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct DeploymentRef {
+    pub deployment_ns: String,
+    pub deployment: String,
+}
+
+impl DeploymentRef {
+    fn check(&self) -> Result<()> {
+        if self.deployment_ns.is_empty() || self.deployment.is_empty() {
+            return Err(Error::Refused(
+                "a deployment is a namespace and a name; both are required".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Does this policy belong to this deployment? `NotFound` otherwise — the
+/// same answer as "no such policy", on purpose: a caller asking about another
+/// deployment's policy learns nothing from the shape of the refusal, which is
+/// the anti-enumeration property the core's `Scope::resolve` has.
+async fn policy_belongs(pg: &Client, dep: &DeploymentRef, policy_id: &str) -> Result<()> {
+    pg.query_opt(
+        "SELECT 1 FROM mesh_policies WHERE id = $1 AND deployment_ns = $2 AND deployment = $3",
+        &[&policy_id, &dep.deployment_ns, &dep.deployment],
+    )
+    .await?
+    .map(|_| ())
+    .ok_or(Error::NotFound)
+}
+
+/// Adopt rows the back-fill could not finish (`003_deployment_scope.sql`):
+/// policies and agents of this deployment NAME whose namespace is still
+/// unknown. Only the core knows the namespace, and it tells us the first time
+/// it asks about the deployment. Idempotent and a no-op forever after the
+/// first call; a development-database convenience that a released Mesh never
+/// exercises.
+pub async fn adopt_legacy(pg: &Client, dep: &DeploymentRef) -> Result<u64> {
+    dep.check()?;
+    let a = pg
+        .execute(
+            "UPDATE mesh_policies SET deployment_ns = $1 WHERE deployment_ns = '' AND deployment = $2",
+            &[&dep.deployment_ns, &dep.deployment],
+        )
+        .await?;
+    let b = pg
+        .execute(
+            "UPDATE mesh_agents SET deployment_ns = $1 WHERE deployment_ns = '' AND deployment = $2",
+            &[&dep.deployment_ns, &dep.deployment],
+        )
+        .await?;
+    Ok(a + b)
+}
+
+/// What forgetting a deployment touched, for the core's log line.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Forgotten {
+    pub policies: u64,
+    pub agents: u64,
+}
+
+/// The deployment is being deleted: drop its policies (revisions, tokens and
+/// credentials cascade) and mark its agents unenrolled. The agents stop
+/// receiving configuration on their next check-in; Fluent Bit stays on the
+/// host with its last config, which is the operator's to remove (ADR-072 §4).
+///
+/// Agents first, so an agent checking in between the two statements is
+/// refused rather than handed a configuration for a policy about to vanish.
+pub async fn forget_deployment(pg: &Client, dep: &DeploymentRef) -> Result<Forgotten> {
+    dep.check()?;
+    let agents = pg
+        .execute(
+            "UPDATE mesh_agents SET unenrolled = true, policy_id = NULL
+              WHERE deployment_ns = $1 AND deployment = $2 AND NOT unenrolled",
+            &[&dep.deployment_ns, &dep.deployment],
+        )
+        .await?;
+    let policies = pg
+        .execute(
+            "DELETE FROM mesh_policies WHERE deployment_ns = $1 AND deployment = $2",
+            &[&dep.deployment_ns, &dep.deployment],
+        )
+        .await?;
+    Ok(Forgotten { policies, agents })
+}
+
+// ---------------------------------------------------------------------------
 // Policies
 // ---------------------------------------------------------------------------
 
@@ -141,33 +243,58 @@ pub struct PolicyRow {
 /// and a rollback a pointer move.
 ///
 /// `compiled` is engine name → configuration body, compiled by the core.
+///
+/// A policy belongs to one deployment for life: a second save naming another
+/// deployment is refused, not moved. Policy ids are global (they are what an
+/// enrollment token points at), so the refusal also closes the door on one
+/// deployment taking over another's policy by reusing its id.
 pub async fn put_policy(
     pg: &Client,
+    dep: &DeploymentRef,
+    tenant_id: &str,
     id: &str,
     name: &str,
     body: &serde_json::Value,
     compiled: &serde_json::Value,
     compiled_hash: &str,
 ) -> Result<u64> {
+    dep.check()?;
     let t = now() as i64;
-    let existing: Option<i64> = pg
+    let existing = pg
         .query_opt(
-            "SELECT current_revision FROM mesh_policies WHERE id = $1",
+            "SELECT current_revision, deployment_ns, deployment FROM mesh_policies WHERE id = $1",
             &[&id],
         )
         .await?
-        .map(|r| r.get(0));
+        .map(|r| {
+            (
+                r.get::<_, i64>(0),
+                DeploymentRef {
+                    deployment_ns: r.get(1),
+                    deployment: r.get(2),
+                },
+            )
+        });
     let revision = match existing {
         None => {
             pg.execute(
-                "INSERT INTO mesh_policies (id, name, current_revision, created_at, updated_at)
-                 VALUES ($1, $2, 1, $3, $3)",
-                &[&id, &name, &t],
+                "INSERT INTO mesh_policies
+                     (id, tenant_id, deployment_ns, deployment, name, current_revision, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, 1, $6, $6)",
+                &[&id, &tenant_id, &dep.deployment_ns, &dep.deployment, &name, &t],
             )
             .await?;
             1i64
         }
-        Some(current) => {
+        Some((_, owner)) if owner != *dep => {
+            // Not `NotFound`: the caller is about to CREATE, and "created
+            // nothing, here is why" is the honest answer. The owner is not
+            // named — that would be enumeration.
+            return Err(Error::Refused(format!(
+                "policy {id} already exists on another deployment; pick another id"
+            )));
+        }
+        Some((current, _)) => {
             let next = current + 1;
             pg.execute(
                 "UPDATE mesh_policies SET current_revision = $2, name = $3, updated_at = $4 WHERE id = $1",
@@ -179,19 +306,30 @@ pub async fn put_policy(
     };
     pg.execute(
         "INSERT INTO mesh_policy_revisions
-             (policy_id, revision, body, compiled, compiled_hash, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
-        &[&id, &revision, body, compiled, &compiled_hash, &t],
+             (policy_id, revision, tenant_id, body, compiled, compiled_hash, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        &[
+            &id,
+            &revision,
+            &tenant_id,
+            body,
+            compiled,
+            &compiled_hash,
+            &t,
+        ],
     )
     .await?;
     Ok(revision as u64)
 }
 
-pub async fn list_policies(pg: &Client) -> Result<Vec<PolicyRow>> {
+/// The deployment's policies, by name.
+pub async fn list_policies(pg: &Client, dep: &DeploymentRef) -> Result<Vec<PolicyRow>> {
+    dep.check()?;
     Ok(pg
         .query(
-            "SELECT id, name, current_revision, updated_at FROM mesh_policies ORDER BY name",
-            &[],
+            "SELECT id, name, current_revision, updated_at FROM mesh_policies
+              WHERE deployment_ns = $1 AND deployment = $2 ORDER BY name",
+            &[&dep.deployment_ns, &dep.deployment],
         )
         .await?
         .into_iter()
@@ -205,14 +343,19 @@ pub async fn list_policies(pg: &Client) -> Result<Vec<PolicyRow>> {
 }
 
 /// The policy document of the current revision, for the editor.
-pub async fn policy_body(pg: &Client, id: &str) -> Result<(u64, serde_json::Value)> {
+pub async fn policy_body(
+    pg: &Client,
+    dep: &DeploymentRef,
+    id: &str,
+) -> Result<(u64, serde_json::Value)> {
+    dep.check()?;
     let row = pg
         .query_opt(
             "SELECT r.revision, r.body
                FROM mesh_policy_revisions r
                JOIN mesh_policies p ON p.id = r.policy_id AND p.current_revision = r.revision
-              WHERE p.id = $1",
-            &[&id],
+              WHERE p.id = $1 AND p.deployment_ns = $2 AND p.deployment = $3",
+            &[&id, &dep.deployment_ns, &dep.deployment],
         )
         .await?
         .ok_or(Error::NotFound)?;
@@ -242,6 +385,7 @@ pub async fn current_config(
 /// ones would mean keeping passwords that nothing can use.
 pub async fn put_policy_credential(
     pg: &Client,
+    dep: &DeploymentRef,
     policy_id: &str,
     username: &str,
     password: &str,
@@ -251,6 +395,8 @@ pub async fn put_policy_credential(
             "a collector credential needs both a username and a password".into(),
         ));
     }
+    dep.check()?;
+    policy_belongs(pg, dep, policy_id).await?;
     pg.execute(
         "INSERT INTO mesh_policy_credentials (policy_id, username, password, updated_at)
          VALUES ($1, $2, $3, $4)
@@ -286,9 +432,12 @@ pub async fn policy_credential(pg: &Client, policy_id: &str) -> Result<Option<(S
 /// is kept, so a lost token is reissued rather than recovered.
 pub async fn mint_enrollment_token(
     pg: &Client,
+    dep: &DeploymentRef,
     policy_id: &str,
     expires_at: Option<u64>,
 ) -> Result<String> {
+    dep.check()?;
+    policy_belongs(pg, dep, policy_id).await?;
     let secret = mint_secret();
     let id = mint_secret();
     pg.execute(
@@ -324,9 +473,16 @@ pub async fn enrol(
     attributes: &serde_json::Value,
 ) -> Result<Enrolled> {
     let refused = || Error::Refused("enrollment token is not valid".into());
+    // The agent inherits the policy's deployment HERE and keeps it for life
+    // (ADR-072 §3): the pair is copied, not derived, so a deleted policy does
+    // not orphan the agent out of its deployment's fleet.
     let row = pg
         .query_opt(
-            "SELECT policy_id, expires_at, revoked FROM mesh_enrollment_tokens WHERE token_hash = $1",
+            "SELECT t.policy_id, t.expires_at, t.revoked,
+                    p.tenant_id, p.deployment_ns, p.deployment
+               FROM mesh_enrollment_tokens t
+               JOIN mesh_policies p ON p.id = t.policy_id
+              WHERE t.token_hash = $1",
             &[&hash(token)],
         )
         .await?
@@ -336,16 +492,23 @@ pub async fn enrol(
     if row.get::<_, bool>(2) || expires_at.is_some_and(|e| (e as u64) < now()) {
         return Err(refused());
     }
+    let tenant_id: String = row.get(3);
+    let deployment_ns: String = row.get(4);
+    let deployment: String = row.get(5);
 
     let instance_uid = mint_secret();
     let credential = mint_secret();
     let t = now() as i64;
     pg.execute(
         "INSERT INTO mesh_agents
-            (instance_uid, policy_id, credential_hash, hostname, attributes, enrolled_at, last_seen)
-         VALUES ($1, $2, $3, $4, $5, $6, $6)",
+            (instance_uid, tenant_id, deployment_ns, deployment, policy_id, credential_hash,
+             hostname, attributes, enrolled_at, last_seen)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)",
         &[
             &instance_uid,
+            &tenant_id,
+            &deployment_ns,
+            &deployment,
             &policy_id,
             &hash(&credential),
             &hostname,
@@ -449,11 +612,16 @@ pub async fn checkin(
     Ok(())
 }
 
-pub async fn list_agents(pg: &Client) -> Result<Vec<AgentRow>> {
+/// The deployment's fleet, most recent check-in first.
+pub async fn list_agents(pg: &Client, dep: &DeploymentRef) -> Result<Vec<AgentRow>> {
+    dep.check()?;
     Ok(pg
         .query(
-            &format!("SELECT {AGENT_COLS} FROM mesh_agents ORDER BY last_seen DESC"),
-            &[],
+            &format!(
+                "SELECT {AGENT_COLS} FROM mesh_agents
+                  WHERE deployment_ns = $1 AND deployment = $2 ORDER BY last_seen DESC"
+            ),
+            &[&dep.deployment_ns, &dep.deployment],
         )
         .await?
         .iter()
@@ -461,37 +629,76 @@ pub async fn list_agents(pg: &Client) -> Result<Vec<AgentRow>> {
         .collect())
 }
 
-/// The current revision of every policy, for deriving each agent's status
-/// without a query per row.
-pub async fn current_revisions(pg: &Client) -> Result<BTreeMap<String, u64>> {
+/// The current revision of each of the deployment's policies, for deriving
+/// each agent's status without a query per row.
+pub async fn current_revisions(pg: &Client, dep: &DeploymentRef) -> Result<BTreeMap<String, u64>> {
+    dep.check()?;
     Ok(pg
-        .query("SELECT id, current_revision FROM mesh_policies", &[])
+        .query(
+            "SELECT id, current_revision FROM mesh_policies WHERE deployment_ns = $1 AND deployment = $2",
+            &[&dep.deployment_ns, &dep.deployment],
+        )
         .await?
         .into_iter()
         .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1) as u64))
         .collect())
 }
 
-/// Move an agent to another policy. The next check-in sees a different hash
-/// and applies it — there is no push, and no re-enrollment.
-pub async fn assign_policy(pg: &Client, instance_uid: &str, policy_id: &str) -> Result<()> {
-    let n = pg
-        .execute(
-            "UPDATE mesh_agents SET policy_id = $2 WHERE instance_uid = $1 AND NOT unenrolled",
-            &[&instance_uid, &policy_id],
-        )
-        .await?;
-    if n == 0 {
-        return Err(Error::NotFound);
+/// How many agents the installation manages, across every deployment: the
+/// seat count is the installation's (ADR-068 §5), not a deployment's.
+pub async fn enrolled_total(pg: &Client) -> Result<u64> {
+    let n: i64 = pg
+        .query_one("SELECT count(*) FROM mesh_agents WHERE NOT unenrolled", &[])
+        .await?
+        .get(0);
+    Ok(n as u64)
+}
+
+/// Move an agent to another policy **of the same deployment**. The next
+/// check-in sees a different hash and applies it — there is no push, and no
+/// re-enrollment.
+///
+/// A policy of another deployment is refused, by name: a credential issued
+/// for one deployment's data path must never start writing into another's,
+/// and the way to put a host on another deployment is to enrol it there
+/// (ADR-072 §3). The agent is looked up first so "no such agent" and "wrong
+/// deployment" stay distinct errors the operator can act on.
+pub async fn assign_policy(
+    pg: &Client,
+    dep: &DeploymentRef,
+    instance_uid: &str,
+    policy_id: &str,
+) -> Result<()> {
+    dep.check()?;
+    pg.query_opt(
+        "SELECT 1 FROM mesh_agents
+          WHERE instance_uid = $1 AND deployment_ns = $2 AND deployment = $3 AND NOT unenrolled",
+        &[&instance_uid, &dep.deployment_ns, &dep.deployment],
+    )
+    .await?
+    .ok_or(Error::NotFound)?;
+    if policy_belongs(pg, dep, policy_id).await.is_err() {
+        return Err(Error::Refused(format!(
+            "policy {policy_id} is not a policy of deployment {}; to move a host to another \
+             deployment, enrol it there",
+            dep.deployment
+        )));
     }
+    pg.execute(
+        "UPDATE mesh_agents SET policy_id = $2 WHERE instance_uid = $1",
+        &[&instance_uid, &policy_id],
+    )
+    .await?;
     Ok(())
 }
 
-pub async fn unenrol(pg: &Client, instance_uid: &str) -> Result<()> {
+pub async fn unenrol(pg: &Client, dep: &DeploymentRef, instance_uid: &str) -> Result<()> {
+    dep.check()?;
     let n = pg
         .execute(
-            "UPDATE mesh_agents SET unenrolled = true WHERE instance_uid = $1",
-            &[&instance_uid],
+            "UPDATE mesh_agents SET unenrolled = true
+              WHERE instance_uid = $1 AND deployment_ns = $2 AND deployment = $3",
+            &[&instance_uid, &dep.deployment_ns, &dep.deployment],
         )
         .await?;
     if n == 0 {
@@ -537,7 +744,10 @@ mod tests {
     #[test]
     fn the_schema_is_embedded_in_the_binary() {
         let versions: Vec<&str> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
-        assert_eq!(versions, vec!["001_mesh", "002_policy_credentials"]);
+        assert_eq!(
+            versions,
+            vec!["001_mesh", "002_policy_credentials", "003_deployment_scope"]
+        );
         let sql: String = MIGRATIONS.iter().map(|(_, s)| *s).collect();
         for table in [
             "mesh_policies",
@@ -571,5 +781,49 @@ mod tests {
             sql.contains("hand") && sql.contains("hash"),
             "the migration must say WHY this one is not hashed"
         );
+    }
+
+    /// Every row the console can see carries the deployment pair, on BOTH
+    /// tables (ADR-072): an agent derives nothing through its policy, because
+    /// the policy can be deleted under it. The back-fill reads the name out of
+    /// the revision body — the only place it was stored before.
+    #[test]
+    fn policies_and_agents_both_carry_the_deployment_pair() {
+        let (_, sql) = MIGRATIONS[2];
+        for table in ["mesh_policies", "mesh_agents"] {
+            let alter = format!("ALTER TABLE {table}");
+            let i = sql
+                .find(&alter)
+                .unwrap_or_else(|| panic!("{table} is not altered"));
+            let block = &sql[i..sql[i..].find(';').map(|j| i + j).unwrap()];
+            assert!(block.contains("deployment_ns"), "{table}: no deployment_ns");
+            assert!(
+                block.contains("deployment    text"),
+                "{table}: no deployment"
+            );
+        }
+        assert!(
+            sql.contains("body->'outputs'->0->>'deployment'"),
+            "the back-fill must recover the name from the revision body"
+        );
+    }
+
+    /// An empty half of the pair is refused before any SQL runs: a query
+    /// filtered on `deployment_ns = ''` would match exactly the rows the
+    /// back-fill left unadopted, which is how a scope check turns into a leak.
+    #[test]
+    fn an_incomplete_pair_is_refused() {
+        for (ns, name) in [("", "a"), ("ns", ""), ("", "")] {
+            let d = DeploymentRef {
+                deployment_ns: ns.into(),
+                deployment: name.into(),
+            };
+            assert!(matches!(d.check(), Err(Error::Refused(_))), "{d:?} passed");
+        }
+        let ok = DeploymentRef {
+            deployment_ns: "legacy".into(),
+            deployment: "tornis-096o".into(),
+        };
+        assert!(ok.check().is_ok());
     }
 }

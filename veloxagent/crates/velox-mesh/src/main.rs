@@ -11,7 +11,10 @@
 //! * **Console-facing** (`/api/mesh/*`): what an operator does. The core owns
 //!   the login, so this side trusts a service token the operator configures
 //!   on both ends (`VELOX_MESH_SERVICE_TOKEN`); the Mesh never sees a user
-//!   password and never issues a session.
+//!   password and never issues a session. Every call names a **deployment**
+//!   (ADR-072): the Mesh is one service, but its policies, agents and tokens
+//!   are a deployment's, and the core has already checked the caller owns the
+//!   one it names before the request gets here.
 //!
 //! Stateless: Postgres holds everything (`store.rs`), so replicas are
 //! interchangeable behind a Service. Same licence as the core
@@ -245,9 +248,27 @@ struct AgentView {
     up: bool,
 }
 
-async fn agent_views(pg: &Client) -> store::Result<Vec<AgentView>> {
-    let rows = store::list_agents(pg).await?;
-    let revisions = store::current_revisions(pg).await?;
+/// The deployment a console request is about. Flattened into every request
+/// body as `deployment_ns` + `deployment`, so a call that forgets it fails to
+/// deserialise rather than silently answering for everything.
+#[derive(Deserialize)]
+struct DepReq {
+    #[serde(flatten)]
+    dep: store::DeploymentRef,
+}
+
+/// `store::Error` → the console's status codes, in one place.
+fn store_err(e: store::Error) -> (StatusCode, Json<serde_json::Value>) {
+    match e {
+        store::Error::Refused(m) => err(StatusCode::BAD_REQUEST, m),
+        store::Error::NotFound => err(StatusCode::NOT_FOUND, "not found"),
+        other => err(StatusCode::INTERNAL_SERVER_ERROR, other),
+    }
+}
+
+async fn agent_views(pg: &Client, dep: &store::DeploymentRef) -> store::Result<Vec<AgentView>> {
+    let rows = store::list_agents(pg, dep).await?;
+    let revisions = store::current_revisions(pg, dep).await?;
     let now = store::now();
     Ok(rows
         .into_iter()
@@ -290,12 +311,16 @@ async fn agent_views(pg: &Client) -> store::Result<Vec<AgentView>> {
         .collect())
 }
 
-async fn agents(State(st): App, headers: HeaderMap) -> ApiResult<Json<Vec<AgentView>>> {
+async fn agents(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<DepReq>,
+) -> ApiResult<Json<Vec<AgentView>>> {
     console_auth(&st, &headers)?;
-    agent_views(&st.pg)
+    agent_views(&st.pg, &req.dep)
         .await
         .map(Json)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(store_err)
 }
 
 #[derive(Serialize)]
@@ -304,18 +329,30 @@ struct Overview {
     policies: Vec<store::PolicyRow>,
     agents: Vec<AgentView>,
     rollout: std::collections::BTreeMap<String, fleet::Rollout>,
+    /// The installation's seats, and how many of them the whole fleet uses —
+    /// across every deployment, because the free tier is per installation.
     seats: u32,
+    enrolled_total: u64,
     tier: &'static str,
 }
 
-/// Everything the console's first paint needs, in one call: where the
-/// operator is in the guided onboarding, the policies, the fleet and each
-/// policy's rollout.
-async fn overview(State(st): App, headers: HeaderMap) -> ApiResult<Json<Overview>> {
+/// Everything the deployment's Mesh tab needs on first paint, in one call:
+/// where the operator is in the guided onboarding, the deployment's policies,
+/// its fleet and each policy's rollout.
+async fn overview(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<DepReq>,
+) -> ApiResult<Json<Overview>> {
     console_auth(&st, &headers)?;
-    let fail = |e| err(StatusCode::INTERNAL_SERVER_ERROR, e);
-    let policies = store::list_policies(&st.pg).await.map_err(fail)?;
-    let agents = agent_views(&st.pg).await.map_err(fail)?;
+    let dep = &req.dep;
+    // Development databases from before ADR-072 hold rows with the name and
+    // no namespace; the first time the core asks about this deployment it
+    // tells us the namespace, and from then on this is a no-op UPDATE.
+    store::adopt_legacy(&st.pg, dep).await.map_err(store_err)?;
+    let policies = store::list_policies(&st.pg, dep).await.map_err(store_err)?;
+    let agents = agent_views(&st.pg, dep).await.map_err(store_err)?;
+    let enrolled_total = store::enrolled_total(&st.pg).await.map_err(store_err)?;
 
     let mut rollout = std::collections::BTreeMap::new();
     for p in &policies {
@@ -339,6 +376,7 @@ async fn overview(State(st): App, headers: HeaderMap) -> ApiResult<Json<Overview
         policies,
         agents,
         seats: ent.seats,
+        enrolled_total,
         tier: match ent.tier {
             Tier::Free => "free",
             Tier::Licensed => "licensed",
@@ -350,6 +388,12 @@ async fn overview(State(st): App, headers: HeaderMap) -> ApiResult<Json<Overview
 
 #[derive(Deserialize)]
 struct PutPolicyReq {
+    #[serde(flatten)]
+    dep: store::DeploymentRef,
+    /// The core's tenant for this deployment; the admin's deployments carry
+    /// the schema default.
+    #[serde(default)]
+    tenant_id: Option<String>,
     id: String,
     name: String,
     /// The policy document, as `velox_policy::Policy` serialises it.
@@ -370,6 +414,8 @@ async fn put_policy(
     console_auth(&st, &headers)?;
     let revision = store::put_policy(
         &st.pg,
+        &req.dep,
+        req.tenant_id.as_deref().unwrap_or("default"),
         &req.id,
         &req.name,
         &req.body,
@@ -377,12 +423,14 @@ async fn put_policy(
         &req.compiled_hash,
     )
     .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(store_err)?;
     Ok(Json(serde_json::json!({ "revision": revision })))
 }
 
 #[derive(Deserialize)]
 struct PutCredentialReq {
+    #[serde(flatten)]
+    dep: store::DeploymentRef,
     policy_id: String,
     username: String,
     password: String,
@@ -400,13 +448,31 @@ async fn put_policy_credential(
     Json(req): Json<PutCredentialReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     console_auth(&st, &headers)?;
-    store::put_policy_credential(&st.pg, &req.policy_id, &req.username, &req.password)
-        .await
-        .map_err(|e| match e {
-            store::Error::Refused(m) => err(StatusCode::BAD_REQUEST, m),
-            other => err(StatusCode::INTERNAL_SERVER_ERROR, other),
-        })?;
+    store::put_policy_credential(
+        &st.pg,
+        &req.dep,
+        &req.policy_id,
+        &req.username,
+        &req.password,
+    )
+    .await
+    .map_err(store_err)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// The deployment is gone: drop its policies and tokens, unenrol its agents
+/// (ADR-072 §4). Called by the core from `delete_cluster`, best-effort there,
+/// so this must be idempotent — a second call finds nothing and says so.
+async fn forget_deployment(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<DepReq>,
+) -> ApiResult<Json<store::Forgotten>> {
+    console_auth(&st, &headers)?;
+    store::forget_deployment(&st.pg, &req.dep)
+        .await
+        .map(Json)
+        .map_err(store_err)
 }
 
 /// The policy document of the current revision, for the editor. The console
@@ -417,28 +483,30 @@ async fn policy(
     Json(req): Json<PolicyIdReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     console_auth(&st, &headers)?;
-    let (revision, body) =
-        store::policy_body(&st.pg, &req.policy_id)
-            .await
-            .map_err(|e| match e {
-                store::Error::NotFound => err(StatusCode::NOT_FOUND, "no such policy"),
-                other => err(StatusCode::INTERNAL_SERVER_ERROR, other),
-            })?;
+    let (revision, body) = store::policy_body(&st.pg, &req.dep, &req.policy_id)
+        .await
+        .map_err(store_err)?;
     Ok(Json(
         serde_json::json!({ "revision": revision, "body": body }),
     ))
 }
 
-async fn policies(State(st): App, headers: HeaderMap) -> ApiResult<Json<Vec<store::PolicyRow>>> {
+async fn policies(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<DepReq>,
+) -> ApiResult<Json<Vec<store::PolicyRow>>> {
     console_auth(&st, &headers)?;
-    store::list_policies(&st.pg)
+    store::list_policies(&st.pg, &req.dep)
         .await
         .map(Json)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(store_err)
 }
 
 #[derive(Deserialize)]
 struct PolicyIdReq {
+    #[serde(flatten)]
+    dep: store::DeploymentRef,
     policy_id: String,
     #[serde(default)]
     expires_at: Option<u64>,
@@ -450,38 +518,40 @@ async fn mint_token(
     Json(req): Json<PolicyIdReq>,
 ) -> ApiResult<Json<serde_json::Value>> {
     console_auth(&st, &headers)?;
-    let token = store::mint_enrollment_token(&st.pg, &req.policy_id, req.expires_at)
+    let token = store::mint_enrollment_token(&st.pg, &req.dep, &req.policy_id, req.expires_at)
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(store_err)?;
     // Shown once. Only the hash is stored, so a lost token is reissued.
     Ok(Json(serde_json::json!({ "token": token })))
 }
 
 #[derive(Deserialize)]
 struct AssignReq {
+    #[serde(flatten)]
+    dep: store::DeploymentRef,
     instance_uid: String,
     policy_id: String,
 }
 
-/// Move an agent to another policy. There is no push: the next check-in sees
-/// a different hash and applies it.
+/// Move an agent to another policy of its deployment. There is no push: the
+/// next check-in sees a different hash and applies it. Another deployment's
+/// policy is a 400 that says to re-enrol (ADR-072 §3).
 async fn assign(
     State(st): App,
     headers: HeaderMap,
     Json(req): Json<AssignReq>,
 ) -> ApiResult<StatusCode> {
     console_auth(&st, &headers)?;
-    store::assign_policy(&st.pg, &req.instance_uid, &req.policy_id)
+    store::assign_policy(&st.pg, &req.dep, &req.instance_uid, &req.policy_id)
         .await
         .map(|_| StatusCode::OK)
-        .map_err(|e| match e {
-            store::Error::NotFound => err(StatusCode::NOT_FOUND, "no such agent"),
-            other => err(StatusCode::INTERNAL_SERVER_ERROR, other),
-        })
+        .map_err(store_err)
 }
 
 #[derive(Deserialize)]
 struct AgentIdReq {
+    #[serde(flatten)]
+    dep: store::DeploymentRef,
     instance_uid: String,
 }
 
@@ -491,13 +561,10 @@ async fn unenrol(
     Json(req): Json<AgentIdReq>,
 ) -> ApiResult<StatusCode> {
     console_auth(&st, &headers)?;
-    store::unenrol(&st.pg, &req.instance_uid)
+    store::unenrol(&st.pg, &req.dep, &req.instance_uid)
         .await
         .map(|_| StatusCode::OK)
-        .map_err(|e| match e {
-            store::Error::NotFound => err(StatusCode::NOT_FOUND, "no such agent"),
-            other => err(StatusCode::INTERNAL_SERVER_ERROR, other),
-        })
+        .map_err(store_err)
 }
 
 #[tokio::main]
@@ -548,9 +615,12 @@ async fn main() {
         .route("/v1/enroll", post(enrol))
         .route(velox_opamp::DEFAULT_PATH, post(opamp))
         // console face
-        .route("/api/mesh/overview", get(overview))
-        .route("/api/mesh/agents", get(agents))
-        .route("/api/mesh/policies", get(policies))
+        // Every console route is a POST with the deployment pair in the body
+        // (ADR-072) — there is no "all deployments" read on this face.
+        .route("/api/mesh/overview", post(overview))
+        .route("/api/mesh/agents", post(agents))
+        .route("/api/mesh/policies", post(policies))
+        .route("/api/mesh/forget_deployment", post(forget_deployment))
         .route("/api/mesh/policy", post(policy))
         .route("/api/mesh/put_policy", post(put_policy))
         .route(
