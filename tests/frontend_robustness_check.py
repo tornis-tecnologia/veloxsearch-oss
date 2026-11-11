@@ -138,6 +138,10 @@ def open_page(browser, *, lang="en", answers=None, init=(), render_error=None):
         # 404s are the unstubbed endpoints above, by design.
         if "status of 404" in text:
             tolerated.append("404 from an unstubbed endpoint")
+        elif "ERR_NETWORK_CHANGED" in text:
+            # The browser lost an interface mid-run (a container network
+            # coming or going on the dev box); not the app's doing.
+            tolerated.append("ERR_NETWORK_CHANGED from the host network")
         elif render_error and re.search(render_error, text):
             tolerated.append(text.splitlines()[0])
         else:
@@ -283,6 +287,40 @@ with sync_playwright() as p:
             fail(f"[{lang}] copy tooltip {copy_tip!r}, expected {COPY_TIP[lang]!r}")
         print(f"  [{lang}] tooltips: theme {theme_tip!r}, language {lang_tip!r}, copy {copy_tip!r}")
         ctx.close()
+
+    # 6. the alert tray: a standing alert is a popup in the corner, muting it
+    #    is remembered across a reload, and the bell brings it back.
+    DRIFT = {"ready": True, "operator_drift": True,
+             "operator_image_running": "opensearchproject/opensearch-operator:9.9.9",
+             "operator_image_vendored": "opensearchproject/opensearch-operator:3.0.0"}
+    ctx, page = open_page(browser, answers={"bootstrap_status": DRIFT})
+    page.wait_for_selector('[data-testid="alert-tray"] [data-testid="operator-drift"]', timeout=20000)
+    if page.locator("main .banner[data-testid='operator-drift']").count():
+        fail("operator drift still renders in the page flow")
+    box = page.locator('[data-testid="alert-tray"]').bounding_box()
+    vw = page.evaluate("window.innerWidth")
+    if not box or box["x"] + box["width"] < vw - 40 or box["y"] > 40:
+        fail(f"the tray is not in the top-right corner: {box}")
+    page.click('[data-testid="mute-operator-drift"]')
+    page.wait_for_selector('[data-testid="operator-drift"]', state="detached", timeout=5000)
+    if page.locator('[data-testid="alert-bell-count"]').inner_text() != "1":
+        fail("the bell does not count the muted alert")
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_selector('[data-testid="alert-bell"]', timeout=20000)
+    if page.locator('[data-testid="operator-drift"]').count():
+        fail("a muted alert came back after a reload")
+    page.click('[data-testid="alert-bell"]')
+    page.wait_for_selector('[data-testid="alert-muted-list"]', timeout=5000)
+    page.click('[data-testid^="unmute-operator-drift"]')
+    page.wait_for_selector('[data-testid="operator-drift"]', timeout=5000)
+    if page.locator('[data-testid="alert-bell"]').count():
+        fail("the bell stays after the last alert is unmuted")
+    stored = page.evaluate("localStorage.getItem('velox-muted-alerts')")
+    if stored not in (None, "{}"):
+        fail(f"unmute left {stored!r} in localStorage")
+    shot(page, "alert-tray")
+    print("  alert tray -> popup top-right, mute persists across reload, bell unmutes")
+    ctx.close()
 
     browser.close()
 

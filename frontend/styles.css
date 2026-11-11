@@ -993,11 +993,57 @@ button.badge { cursor: pointer; }
 .hr { height: 1px; background: var(--border); border: none; margin: 26px 0; }
 
 /* ============================================================
-   Toast
+   Alert tray (top-right): persistent alerts as popups, the bell for the
+   muted ones, then the toast — one column, newest at the bottom.
+   ============================================================ */
+.alert-tray {
+  position: fixed; top: 14px; right: 16px; z-index: 200;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  width: min(440px, calc(100vw - 32px)); pointer-events: none;
+}
+.alert-tray > * { pointer-events: auto; }
+.alert-stack { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.alert-stack:empty { display: none; }
+@keyframes popup-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+.popup {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: start;
+  width: 100%; padding: 11px 10px 11px 13px; font-size: 13px;
+  background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: var(--shadow-lg); color: var(--text); animation: popup-in .22s cubic-bezier(.2,.7,.2,1);
+}
+.popup .popup-ic { display: grid; place-items: center; margin-top: 1px; color: var(--text-3); }
+.popup .popup-title { font-weight: 600; }
+.popup .popup-text { color: var(--text-2); margin-top: 2px; overflow-wrap: anywhere; }
+.popup .popup-text pre { margin: 6px 0 0; font-size: 11.5px; white-space: pre-wrap; }
+.popup .popup-action { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.popup.warn { border-color: color-mix(in oklab, var(--warn) 55%, var(--border)); }
+.popup.warn .popup-ic, .popup.warn .popup-title { color: var(--warn-text); }
+.popup.danger { border-color: var(--danger-border); background: color-mix(in oklab, var(--surface-3) 85%, var(--danger)); }
+.popup.danger .popup-ic, .popup.danger .popup-title { color: var(--danger-text); }
+.popup.info .popup-ic { color: var(--info-text); }
+.popup-mute {
+  background: none; border: none; color: var(--text-3); padding: 3px; border-radius: 4px;
+  display: grid; place-items: center; cursor: pointer;
+}
+.popup-mute:hover { color: var(--text); background: var(--surface-2); }
+.alert-bell-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; width: 100%; }
+.alert-bell {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; cursor: pointer;
+  background: var(--surface-3); border: 1px solid var(--border-strong); border-radius: 99px;
+  color: var(--text-3); font-size: 12px; box-shadow: var(--shadow-lg);
+}
+.alert-bell:hover, .alert-bell.on { color: var(--text); border-color: var(--text-3); }
+.alert-bell .n { font-family: var(--font-mono); color: var(--text); }
+.popup.muted-list { grid-template-columns: minmax(0, 1fr); }
+.muted-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid var(--border); }
+.muted-row:first-of-type { border-top: none; }
+
+/* ============================================================
+   Toast — in the tray's column, under the alerts.
    ============================================================ */
 .toast {
-  position: fixed; bottom: 22px; left: 50%;
-  transform: translateX(-50%) translateY(80px);
+  position: static; width: 100%;
+  transform: translateY(-8px);
   background: var(--surface-3);
   border: 1px solid var(--border-strong);
   color: var(--text);
@@ -1009,7 +1055,8 @@ button.badge { cursor: pointer; }
   z-index: 200; max-width: min(560px, calc(100vw - 32px));
   pointer-events: none;
 }
-.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+.toast:not(.show) { display: none; }
+.toast.show { opacity: 1; transform: none; pointer-events: auto; animation: popup-in .22s cubic-bezier(.2,.7,.2,1); }
 .toast .ok { color: var(--accent); flex-shrink: 0; }
 .toast .bad { color: var(--danger); flex-shrink: 0; }
 .toast .mid { color: var(--warn); flex-shrink: 0; }

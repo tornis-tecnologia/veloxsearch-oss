@@ -28,6 +28,7 @@ import { Logo, Icon, Toast, ErrorBoundary, Menu } from "./ui.jsx";
 import { useRouter, nextAfterLogin } from "./router.jsx";
 import { AuthView } from "./views_auth.jsx";
 import { BootstrapView, OperatorDriftNotice, TenantIsolationNotice } from "./views_bootstrap.jsx";
+import { AlertTray } from "./alerts.jsx";
 import { StatusView } from "./views_status.jsx";
 import { CreateView } from "./views_create.jsx";
 import { CapacityView } from "./views_capacity.jsx";
@@ -384,8 +385,9 @@ function App() {
         </header>
 
         <main className="page">
-          <OperatorDriftNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
-          <TenantIsolationNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
+          {/* Installation-wide alerts: popups in the tray, mutable. */}
+          <OperatorDriftNotice status={bootStatus} t={tr} />
+          <TenantIsolationNotice status={bootStatus} t={tr} />
 
           {/* A view that throws while rendering takes only itself down (#141):
               the shell stays, and navigating away resets it. */}
@@ -423,7 +425,10 @@ function App() {
         </main>
       </div>
 
-      <Toast msg={toast.msg} show={toast.show} kind={toast.kind} onClose={closeToast} t={tr} />
+      {/* The corner: persistent alerts (popups, mutable), then the toast. */}
+      <AlertTray t={tr}>
+        <Toast msg={toast.msg} show={toast.show} kind={toast.kind} onClose={closeToast} t={tr} />
+      </AlertTray>
 
       {DevTweaks && <Suspense fallback={null}><DevTweaks lang={lang} /></Suspense>}
     </div>

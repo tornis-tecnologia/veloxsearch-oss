@@ -584,7 +584,7 @@ function SettingsTab({ t, d, status, settings, onSettings, onToast }) {
         </Field>
         <p className="hint" style={{ margin: "0 0 12px" }}>{t.mesh_set_ctrl_p}</p>
 
-        {err && <Banner tone="danger" title={t.mesh_save_err} style={{ marginBottom: 10 }}>{err}</Banner>}
+        {err && <Banner tone="danger" title={t.mesh_settings_err} style={{ marginBottom: 10 }}>{err}</Banner>}
         <Btn variant="primary" size="sm" disabled={!dirty || saving} data-testid="mesh-settings-save" onClick={save}>
           {saving ? t.mesh_saving : t.save}
         </Btn>

@@ -34,6 +34,7 @@ import { MeshTab } from "./views_mesh.jsx";
 import { AddIntegrationDialog, CLUSTER_TARGET } from "./views_integration_add.jsx";
 import { ActivityPanel, ActivityDetails, lockReason, LockNotice } from "./views_activity.jsx";
 import { relAge } from "./views_status.jsx";
+import { Popup } from "./alerts.jsx";
 
 function fmt(s, ...args) {
   return args.reduce((acc, v, i) => acc.replaceAll(`{${i}}`, v), s || "");
@@ -265,7 +266,9 @@ function UpgradeControl({ d, lang, onToast, openUpgrade }) {
   );
 }
 
-/* --- #47: a spent provisioning schedule says so, in place, with the way out. --- */
+/* --- #47: a spent provisioning schedule says so — an alert in the tray, on
+   every tab, with the way out. Muted per deployment; a later failure of the
+   same schedule is the same fact, and the retry button is on the popup. --- */
 function ProvisioningBanner({ d, lang, onToast }) {
   const t = STR[lang];
   const p = d.provisioning;
@@ -283,16 +286,17 @@ function ProvisioningBanner({ d, lang, onToast }) {
     }
   };
   return (
-    <Banner tone="warn" title={t.prov_failed_title} testid="prov-banner"
-      action={<Btn data-testid="prov-retry" onClick={retry} disabled={busy}>{busy ? t.prov_retrying : t.prov_retry}</Btn>}>
+    <Popup id={`provisioning-failed:${d.id}`} tone="warn" title={t.prov_failed_title} testid="prov-banner" t={t}
+      action={<Btn size="sm" data-testid="prov-retry" onClick={retry} disabled={busy}>{busy ? t.prov_retrying : t.prov_retry}</Btn>}>
       {fmt(t.prov_failed_body, p.attempts)}
       {p.last_error ? <pre data-testid="prov-last-error">{p.last_error}</pre> : null}
-    </Banner>
+    </Popup>
   );
 }
 
-/* --- #26: one copy per volume on a sub-3-node host cluster. Said next to the
-   thing that mitigates it (the backup), with the way to it. --- */
+/* --- #26: one copy per volume on a sub-3-node host cluster. An alert in the
+   tray with the way to the thing that mitigates it (the backup); muted per
+   deployment, because the operator who read it once has decided. --- */
 function SingleCopyBanner({ d, lang, hostNodes, onTab }) {
   const t = STR[lang];
   if (!(hostNodes.length > 0 && hostNodes.length < 3)) return null;
@@ -301,10 +305,10 @@ function SingleCopyBanner({ d, lang, hostNodes, onTab }) {
     ? (snap.schedule ? fmt(t.single_copy_bak_sched, snap.schedule) : fmt(t.single_copy_bak, t.snap_chip_on))
     : t.single_copy_nobak;
   return (
-    <Banner tone="warn" title={t.single_copy_h} testid="single-copy"
+    <Popup id={`single-copy:${d.id}`} tone="warn" title={t.single_copy_h} testid="single-copy" t={t}
       action={<Btn variant="outline" size="sm" onClick={() => onTab("backup")}>{t.single_copy_cta}</Btn>}>
       {fmt(t.single_copy_p, hostNodes.length)} {bak}
-    </Banner>
+    </Popup>
   );
 }
 
@@ -1640,8 +1644,9 @@ function DeploymentView({ d, lang, hostNodes = [], tab, sub, integration, policy
           ]} />
         </>} />
 
+      {/* The deployment's standing alerts: popups in the corner, on every
+          tab (#26, #47), each mutable. */}
       <SingleCopyBanner d={d} lang={lang} hostNodes={hostNodes} onTab={onTab} />
-      {/* #47: above the tabs, on every tab. */}
       <ProvisioningBanner d={d} lang={lang} onToast={onToast} />
 
       <Tabs items={tabs} value={tab} onChange={onTab} label={t.dep_tabs_label} testidPrefix="dep-tab" />
