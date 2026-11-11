@@ -211,19 +211,33 @@ const API = {
     call("mesh_assign_policy", { deployment, instance_uid, policy_id }),
   meshUnenrol: (deployment, instance_uid) =>
     call("mesh_unenrol", { deployment, instance_uid }),
-  // An empty policy (ADR-073): the thing integrations are then added to from
-  // the Data tab. -> { revision }
-  meshCreatePolicy: (deployment, id, name) =>
-    call("mesh_create_policy", { deployment, id, name }),
-  // The stored document of one policy: its activations and their inputs.
-  // -> { revision, body: { activations: [{package_id, package_version, inputs}], ... } }
+  // An empty policy (ADR-073): the thing integrations are then added to —
+  // bound to one OpenSearch and one Mesh endpoint of the deployment's
+  // settings, both required (ADR-072 amendment 2). -> { revision }
+  meshCreatePolicy: (deployment, id, name, os_endpoint, mesh_endpoint) =>
+    call("mesh_create_policy", { deployment, id, name, os_endpoint, mesh_endpoint }),
+  // Rebind a policy to other configured endpoints: a new revision, because
+  // the OpenSearch address is baked into every collector stanza. -> { revision }
+  meshPolicyEndpoints: (deployment, policy_id, opensearch, mesh) =>
+    call("mesh_policy_endpoints", { deployment, policy_id, opensearch, mesh }),
+  // The stored document of one policy: its activations and their inputs, and
+  // the endpoint ids it is bound to.
+  // -> { revision, body: { activations: [{package_id, package_version, inputs}],
+  //      endpoints: { opensearch, mesh }, ... } }
   meshPolicy: (deployment, policy_id) => call("mesh_policy", { deployment, policy_id }),
-  // The deployment's Mesh settings, off its CR. -> { os_host, mesh_url }
+  // The deployment's Mesh settings, off its CR: the named endpoints its
+  // policies bind to, plus the in-cluster OpenSearch address in endpoint
+  // shape (offered on the screen, never assumed).
+  // -> { os_endpoints: [{id, name, host}], mesh_endpoints: [{id, name, url}],
+  //      in_cluster_os_host }
   meshSettings: (deployment) => call("mesh_settings", { deployment }),
-  // `os_host` null clears it (= the in-cluster service name); `mesh_url`
-  // null clears it (= the `MESH_URL` placeholder in the enrol commands).
-  meshSaveSettings: (deployment, { os_host, mesh_url }) =>
-    call("mesh_save_settings", { deployment, os_host: os_host || null, mesh_url: mesh_url || null }),
+  // The whole document; an endpoint a policy still names cannot be removed
+  // (400 naming the policy).
+  meshSaveSettings: (deployment, { os_endpoints, mesh_endpoints }) =>
+    call("mesh_save_settings", { deployment, os_endpoints: os_endpoints || [], mesh_endpoints: mesh_endpoints || [] }),
+  // Can the control plane reach each configured Mesh endpoint? Coarse on
+  // purpose. -> [{ id, reachable, error, latency_ms }]
+  meshEndpointsStatus: (deployment) => call("mesh_endpoints_status", { deployment }),
   // ── OTel observability stack (ADR-053) ───────────────────────
   // The SECOND collection option, additive to the recipes above: it ships OTLP
   // traces + metrics, which is what fills the Trace Analytics, service-map and

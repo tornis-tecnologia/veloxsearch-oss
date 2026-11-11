@@ -118,6 +118,51 @@ it and tied to the integrations that deployment already has.
   and values, read off the stored document) before *Deploy*; the row itself
   has no picker.
 
+## Amendment 2 (2026-11-11): named endpoints, bound per policy, required
+
+Supersedes the first amendment's two scalar addresses and §5's "one published
+address per deployment".
+
+- **The deployment's settings hold named endpoints**, as one JSON document
+  on the CR (`veloxsearch.ai/mesh-settings`): `os_endpoints` (`id`, `name`,
+  `host[:port]`) and `mesh_endpoints` (`id`, `name`, http(s) base URL). Ids
+  are slugs, unique per list. The two pre-amendment annotations are read as
+  one endpoint each under the id `published` and cleared by the next save.
+  The in-cluster service name is **offered** on the screen as a one-click
+  endpoint and never assumed: a host that cannot resolve it fails silently,
+  and the symptom ("healthy agent, no data") is found on the host hours
+  later. One deployment is reached by different addresses from different
+  networks, so the list, not a scalar.
+- **Every policy is bound to one endpoint of each kind**, by id, in its
+  document (`endpoints.opensearch`, `endpoints.mesh`; the Mesh's policy rows
+  carry them as `os_endpoint`/`mesh_endpoint`). The OpenSearch address is
+  what the compiler puts in every collector output; the Mesh address is the
+  `--mesh` of the policy's enrolment command. **Both are required**:
+  `save_policy` refuses a draft that names none or names one the settings no
+  longer hold (400), so a policy cannot exist without somewhere to send.
+  Rebinding (`mesh_policy_endpoints`) is a new revision. A settings save that
+  would remove an endpoint a policy still names is refused with the policy's
+  name; changing an address in place is allowed and takes effect on the
+  policy's next save. Revisions written before this parse with both unset
+  and show as *incomplete*; they cannot gain an integration or an agent until
+  bound.
+- **Every agent runs a policy.** The enrolment token is the policy's, so an
+  agent is never without one; the console's *Add agent* dialog starts with
+  the policy, mints its token and completes the enrol command from the
+  policy's Mesh endpoint. The agent's editor shows the policy's endpoints
+  with its integrations as the dependencies, and cannot deploy an unbound
+  policy to a host.
+- **The settings sub-tab is also where the Mesh's state lives**: the "Mesh
+  ready" banner, the guided first run and a *daemons* table — the controller
+  this console uses plus each configured Mesh address, each probed from the
+  control plane (`mesh_endpoints_status`: `GET /healthz`, a coarse result,
+  the response body never returned — a tenant's settings must not become a
+  fetch-anything oracle). The overview is the fleet alone and raises only
+  what blocks it (no Mesh, Mesh down, endpoints missing).
+- Two console routes are added (`mesh_endpoints_status`,
+  `mesh_policy_endpoints`), `mesh_create_policy` takes the two ids, and
+  `mesh_settings` answers the lists plus `in_cluster_os_host`.
+
 ## Consequences
 
 - One schema migration (`003_deployment_scope.sql`) adds the pair to

@@ -1864,11 +1864,15 @@ pub async fn delete_cluster(dep: &Deployment) -> Result<()> {
     Ok(())
 }
 
-/// Where a host OUTSIDE the cluster reaches this deployment's OpenSearch
-/// (ADR-072 §5). Absent = the in-cluster service name.
+/// The deployment's Mesh settings (ADR-072 §5, amendment 2): the named
+/// OpenSearch and Mesh endpoints its policies bind to, as one JSON document.
+/// One annotation rather than one per endpoint because the lists are edited
+/// and validated as a whole, and a merge patch replaces the whole value.
+const LABEL_MESH_SETTINGS: &str = "veloxsearch.ai/mesh-settings";
+/// The pre-amendment scalars: one published OpenSearch host and one Mesh
+/// URL. Read when the document is absent, so a deployment configured before
+/// the lists existed keeps its addresses; cleared by the next save.
 const LABEL_MESH_OS_HOST: &str = "veloxsearch.ai/mesh-os-host";
-/// Where a host OUTSIDE the cluster reaches the Mesh, for the enrolment
-/// commands the console shows. Absent = the `MESH_URL` placeholder.
 const LABEL_MESH_AGENT_URL: &str = "veloxsearch.ai/mesh-agent-url";
 
 fn annotation_value(obj: &DynamicObject, key: &str) -> Option<String> {
@@ -1887,7 +1891,11 @@ fn annotation_patch_value(v: Option<&str>) -> serde_json::Value {
     }
 }
 
-/// The deployment's Mesh settings, off its CR.
+/// The deployment's Mesh settings, off its CR: the JSON document when there
+/// is one, else the pre-amendment scalars read as one endpoint each. A
+/// document that does not parse is an error, not an empty settings — an
+/// empty answer would let a policy save fail with "no endpoint configured"
+/// while the operator sees two on the screen.
 pub async fn mesh_settings(dep: &Deployment) -> Result<crate::mesh::MeshSettings> {
     let name = dep.name();
     validate_name(name)?;
@@ -1896,22 +1904,37 @@ pub async fn mesh_settings(dep: &Deployment) -> Result<crate::mesh::MeshSettings
         .get(name)
         .await
         .context("fetching cluster for mesh settings")?;
-    Ok(crate::mesh::MeshSettings {
-        os_host: annotation_value(&obj, LABEL_MESH_OS_HOST),
-        mesh_url: annotation_value(&obj, LABEL_MESH_AGENT_URL),
-    })
+    match annotation_value(&obj, LABEL_MESH_SETTINGS) {
+        Some(doc) => serde_json::from_str(&doc)
+            .with_context(|| format!("the {LABEL_MESH_SETTINGS} annotation does not parse")),
+        None => Ok(crate::mesh::MeshSettings::from_legacy(
+            annotation_value(&obj, LABEL_MESH_OS_HOST),
+            annotation_value(&obj, LABEL_MESH_AGENT_URL),
+        )),
+    }
 }
 
-/// Write the deployment's Mesh settings. An unset value removes its
-/// annotation. A merge patch on `metadata` alone, like `set_otel_stack`, so
-/// it can never move a version or clobber the spec.
+/// The in-cluster address of the deployment's OpenSearch, in the shape an
+/// endpoint takes — what the settings screen offers as a one-click endpoint
+/// for hosts on a network that routes to the cluster. Not a default:
+/// offered, never assumed (ADR-072 amendment 2).
+pub fn in_cluster_os_host(dep: &Deployment) -> String {
+    format!("{}.{}.svc", dep.name(), dep.namespace())
+}
+
+/// Write the deployment's Mesh settings: the document, and the two legacy
+/// annotations removed so a later read cannot resurrect them. A merge patch
+/// on `metadata` alone, like `set_otel_stack`, so it can never move a
+/// version or clobber the spec.
 pub async fn set_mesh_settings(dep: &Deployment, s: &crate::mesh::MeshSettings) -> Result<()> {
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
+    let doc = serde_json::to_string(s).context("serialising the Mesh settings")?;
     let patch = serde_json::json!({ "metadata": { "annotations": {
-        LABEL_MESH_OS_HOST: annotation_patch_value(s.os_host.as_deref()),
-        LABEL_MESH_AGENT_URL: annotation_patch_value(s.mesh_url.as_deref()),
+        LABEL_MESH_SETTINGS: doc,
+        LABEL_MESH_OS_HOST: annotation_patch_value(None),
+        LABEL_MESH_AGENT_URL: annotation_patch_value(None),
     } } });
     os_api(&client, dep)
         .patch(name, &PatchParams::default(), &Patch::Merge(&patch))

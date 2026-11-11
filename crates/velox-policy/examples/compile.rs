@@ -112,6 +112,13 @@ fn main() {
             deployment: "logs-a1b2".into(),
         }],
         agent: AgentSettings::default(),
+        // The console binds a policy to the deployment's named endpoints and
+        // the core resolves them; here the address comes straight from
+        // `--host`, so the ids are illustrative.
+        endpoints: velox_policy::PolicyEndpoints {
+            opensearch: Some("published".into()),
+            mesh: Some("published".into()),
+        },
     };
 
     let renderer = PackageRenderer {

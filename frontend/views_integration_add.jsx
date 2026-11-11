@@ -79,6 +79,13 @@ function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshRead
   const [errors, setErrors] = useState({});
   const [busy, setBusy] = useState(false);
   const [saveErr, setSaveErr] = useState(null);
+  // A new policy is bound to one OpenSearch and one Mesh endpoint of the
+  // deployment's settings (ADR-072 amendment 2), both required. Read here so
+  // "new policy" can offer them — one of each is picked silently, more are a
+  // choice, none disables the option and says where to configure them.
+  const [settings, setSettings] = useState(null);
+  const [newOs, setNewOs] = useState("");
+  const [newMesh, setNewMesh] = useState("");
 
   // A fixed target skips "where". It is an EDIT when the caller says so (or,
   // by default, whenever the target is fixed): the Policies tab fixes the
@@ -95,6 +102,18 @@ function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshRead
     API.integrationArtifacts(item.id)
       .then(s => { if (alive) { setSchema(s); setForm(initialState(s, fixedTarget || initialTarget || CLUSTER, initial)); } })
       .catch(e => { if (alive) setSchemaErr(e.message); });
+    if (meshReady && !fixedTarget) {
+      API.meshSettings(d.id)
+        .then(s => {
+          if (!alive) return;
+          setSettings(s || {});
+          const os = (s && s.os_endpoints) || [];
+          const mesh = (s && s.mesh_endpoints) || [];
+          setNewOs(os.length === 1 ? os[0].id : "");
+          setNewMesh(mesh.length === 1 ? mesh[0].id : "");
+        })
+        .catch(() => { if (alive) setSettings({}); });
+    }
     return () => { alive = false; };
     // The dialog re-reads the package each time it opens on an item.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -105,6 +124,10 @@ function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshRead
   if (!open || !item) return null;
 
   const policyLabel = (id) => id === CLUSTER ? t.add_integ_cluster : id;
+  const osEps = (settings && settings.os_endpoints) || [];
+  const meshEps = (settings && settings.mesh_endpoints) || [];
+  const canNew = !!settings && osEps.length > 0 && meshEps.length > 0;
+  const newReady = target !== NEW_POLICY || (!!newName.trim() && !!newOs && !!newMesh);
 
   function validate() {
     const errs = {};
@@ -144,7 +167,7 @@ function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshRead
       let policy = target;
       if (target === NEW_POLICY) {
         const id = slug(newName);
-        await API.meshCreatePolicy(d.id, id, newName.trim() || id);
+        await API.meshCreatePolicy(d.id, id, newName.trim() || id, newOs, newMesh);
         policy = id;
       }
       const r = await API.addIntegration(d.id, item.id, policy, selection());
@@ -188,13 +211,35 @@ function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshRead
               </label>
             ))}
             {meshReady && (
-              <label className={`mesh-card${target === NEW_POLICY ? " on" : ""}`} style={{ display: "block", cursor: "pointer" }} data-testid="add-target-new">
-                <input type="radio" name="target" checked={target === NEW_POLICY} onChange={() => setTarget(NEW_POLICY)} style={{ marginRight: 8 }} />
+              <label className={`mesh-card${target === NEW_POLICY ? " on" : ""}`} style={{ display: "block", cursor: canNew ? "pointer" : "not-allowed", opacity: settings && !canNew ? 0.7 : 1 }} data-testid="add-target-new">
+                <input type="radio" name="target" checked={target === NEW_POLICY} disabled={!canNew} onChange={() => setTarget(NEW_POLICY)} style={{ marginRight: 8 }} />
                 <b>{t.add_integ_new_policy}</b>
+                {settings && !canNew && (
+                  <div className="hint" style={{ marginLeft: 22 }} data-testid="add-new-policy-need-endpoints">{t.add_integ_new_policy_need_ep}</div>
+                )}
                 {target === NEW_POLICY && (
-                  <input className="input" value={newName} onChange={e => setNewName(e.target.value)}
-                    placeholder={t.add_integ_new_policy_ph} aria-label={t.add_integ_new_policy_ph}
-                    data-testid="add-new-policy-name" style={{ marginTop: 8, maxWidth: 300 }} />
+                  <div style={{ display: "grid", gap: 8, marginTop: 8, maxWidth: 360 }}>
+                    <input className="input" value={newName} onChange={e => setNewName(e.target.value)}
+                      placeholder={t.add_integ_new_policy_ph} aria-label={t.add_integ_new_policy_ph}
+                      data-testid="add-new-policy-name" />
+                    {osEps.length > 1 && (
+                      <select className="select" value={newOs} aria-label={t.mesh_pol_os_endpoint} data-testid="add-new-policy-os"
+                        onChange={e => setNewOs(e.target.value)}>
+                        <option value="" disabled>{t.mesh_pol_os_endpoint}</option>
+                        {osEps.map(e => <option key={e.id} value={e.id}>{e.name} · {e.host}</option>)}
+                      </select>
+                    )}
+                    {meshEps.length > 1 && (
+                      <select className="select" value={newMesh} aria-label={t.mesh_pol_mesh_endpoint} data-testid="add-new-policy-mesh"
+                        onChange={e => setNewMesh(e.target.value)}>
+                        <option value="" disabled>{t.mesh_pol_mesh_endpoint}</option>
+                        {meshEps.map(e => <option key={e.id} value={e.id}>{e.name} · {e.url}</option>)}
+                      </select>
+                    )}
+                    {osEps.length === 1 && meshEps.length === 1 && (
+                      <span className="hint mono" style={{ fontSize: 12 }}>{osEps[0].host} · {meshEps[0].url}</span>
+                    )}
+                  </div>
                 )}
               </label>
             )}
@@ -203,7 +248,7 @@ function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshRead
           <div className="dialog-actions">
             <Btn variant="ghost" onClick={onClose}>{t.cancel}</Btn>
             <Btn variant="primary" data-testid="add-integration-next"
-              disabled={target === NEW_POLICY && !newName.trim()}
+              disabled={!newReady}
               onClick={() => { setForm(initialState(schema, target, initial)); setErrors({}); setStep(2); }}>
               {t.add_integ_next}
             </Btn>

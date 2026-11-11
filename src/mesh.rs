@@ -119,11 +119,17 @@ pub struct PolicyDraft {
     /// An integration listed without one gets the package's defaults.
     #[serde(default)]
     pub inputs: BTreeMap<String, velox_integrations::InputSelection>,
+    /// The deployment's configured endpoints this policy is bound to (ADR-072
+    /// amendment 2), by id. Both are required to save: `save_policy` refuses
+    /// a draft that names none or names one the settings no longer hold.
+    #[serde(default)]
+    pub endpoints: velox_policy::PolicyEndpoints,
 }
 
 impl PolicyDraft {
     /// The draft a stored policy document edits as: its integrations in
-    /// order, each with the selection its activation carries.
+    /// order, each with the selection its activation carries, bound to the
+    /// endpoints the document names.
     fn from_policy(deployment: &str, p: &velox_policy::Policy) -> PolicyDraft {
         PolicyDraft {
             id: p.id.clone(),
@@ -136,8 +142,48 @@ impl PolicyDraft {
                 .iter()
                 .map(|a| (a.package_id.clone(), a.selection()))
                 .collect(),
+            endpoints: p.endpoints.clone(),
         }
     }
+}
+
+/// Resolve the draft's endpoint ids against the deployment's settings: the
+/// OpenSearch host the collectors ship to, and the Mesh URL the policy's
+/// agents enrol against. A policy is refused — not compiled against a
+/// fallback — when either is missing or names an endpoint the operator has
+/// since removed. The in-cluster service name used to be the silent default
+/// here; it no longer is, because the symptom of a wrong default is a healthy
+/// agent that delivers nothing, found on the host hours later. The operator
+/// names the address once, in Settings, and every policy says which one.
+fn resolve_endpoints<'s>(
+    settings: &'s MeshSettings,
+    e: &velox_policy::PolicyEndpoints,
+) -> anyhow::Result<(&'s OsEndpoint, &'s MeshEndpoint)> {
+    let os_id = e
+        .opensearch
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("the policy names no OpenSearch endpoint; pick one of the deployment's configured endpoints"))?;
+    let mesh_id = e
+        .mesh
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("the policy names no Velox Mesh endpoint; pick one of the deployment's configured endpoints"))?;
+    let os = settings
+        .os_endpoints
+        .iter()
+        .find(|x| x.id == os_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("OpenSearch endpoint `{os_id}` is not configured on this deployment")
+        })?;
+    let mesh = settings
+        .mesh_endpoints
+        .iter()
+        .find(|x| x.id == mesh_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Velox Mesh endpoint `{mesh_id}` is not configured on this deployment")
+        })?;
+    Ok((os, mesh))
 }
 
 /// The current document of one of the deployment's policies.
@@ -155,13 +201,15 @@ pub async fn policy_doc(
     serde_json::from_value(body).context("the stored policy does not parse")
 }
 
-/// Create an empty policy (ADR-073): a name the operator can then add
-/// integrations to from the Data tab. Refused when it exists — a second
-/// create is not an edit.
+/// Create an empty policy (ADR-073): a name, bound to one OpenSearch and one
+/// Mesh endpoint of the deployment (ADR-072 amendment 2), that the operator
+/// then adds integrations to. Refused when it exists — a second create is not
+/// an edit — and refused without both endpoints, by `save_policy`.
 pub async fn create_policy(
     dep: &crate::scope::Deployment,
     id: &str,
     name: &str,
+    endpoints: velox_policy::PolicyEndpoints,
     tenant_id: Option<&str>,
 ) -> anyhow::Result<u64> {
     if policy_doc(dep, id).await.is_ok() {
@@ -174,7 +222,25 @@ pub async fn create_policy(
         integrations: vec![],
         vars: BTreeMap::new(),
         inputs: BTreeMap::new(),
+        endpoints,
     };
+    save_policy(&draft, dep, tenant_id).await
+}
+
+/// Rebind one of the deployment's policies to other endpoints: the stored
+/// document with the new ids, recompiled and saved as the next revision —
+/// the OpenSearch host is baked into every collector stanza, so a change of
+/// endpoint is a change of configuration the agents must pick up, never a
+/// pointer edit on the current revision.
+pub async fn set_endpoints(
+    dep: &crate::scope::Deployment,
+    policy_id: &str,
+    endpoints: velox_policy::PolicyEndpoints,
+    tenant_id: Option<&str>,
+) -> anyhow::Result<u64> {
+    let doc = policy_doc(dep, policy_id).await?;
+    let mut draft = PolicyDraft::from_policy(dep.name(), &doc);
+    draft.endpoints = endpoints;
     save_policy(&draft, dep, tenant_id).await
 }
 
@@ -219,55 +285,243 @@ pub async fn unset_activation(
     save_policy(&draft, dep, tenant_id).await
 }
 
-/// The deployment's Mesh settings (ADR-072 §5): facts about how hosts reach
-/// *this* deployment, kept on its CR like every other intent the core must
-/// re-derive after a restart.
+/// One address at which hosts reach this deployment's OpenSearch: a bare
+/// `host[:port]`, because that is what the collector's output stanza takes
+/// (`Host`, with the port fixed by the template). Named, because one
+/// deployment is reached by different addresses from different networks —
+/// the ClusterIP from a VM on the node network, a load balancer from
+/// outside — and a policy says which of them its hosts use.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OsEndpoint {
+    /// Stable, slug-shaped; what a policy references.
+    pub id: String,
+    pub name: String,
+    pub host: String,
+}
+
+/// One address at which hosts reach the Mesh: the `--mesh` of `velox-agent
+/// enroll`, an http(s) base URL. The core itself talks to the controller over
+/// `VELOX_MESH_URL`, an in-cluster name a VM cannot resolve; these are the
+/// addresses the operator published, and they are the deployment's because
+/// that is where the enrolment commands are shown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MeshEndpoint {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+}
+
+/// The deployment's Mesh settings (ADR-072 §5, amendment 2): the endpoints
+/// its policies bind to, kept on its CR like every other intent the core
+/// must re-derive after a restart. Lists, not one value each: a policy
+/// *chooses* an OpenSearch endpoint and a Mesh endpoint from here, and both
+/// are required — the in-cluster service name is no longer an implicit
+/// default, because a host that cannot resolve it fails silently.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MeshSettings {
-    /// Published OpenSearch endpoint for agents outside the cluster; unset
-    /// means the in-cluster service name. One per deployment, because one
-    /// deployment has one published address and every policy against it
-    /// compiles with the same one.
     #[serde(default)]
-    pub os_host: Option<String>,
-    /// Where a host OUTSIDE the cluster reaches the Mesh itself — the `--mesh`
-    /// of `velox-agent enroll`. The core talks to the controller over
-    /// `VELOX_MESH_URL` (an in-cluster name); the address an agent on a VM
-    /// uses is whatever the operator published, and it is a fact of the
-    /// deployment because that is where the enrolment commands are shown.
-    /// Unset = the console prints the `MESH_URL` placeholder.
+    pub os_endpoints: Vec<OsEndpoint>,
     #[serde(default)]
-    pub mesh_url: Option<String>,
+    pub mesh_endpoints: Vec<MeshEndpoint>,
+}
+
+impl MeshSettings {
+    /// The settings a deployment configured before the lists existed — one
+    /// `os_host`, one `mesh_url` on their own annotations — as one endpoint
+    /// each, under a fixed id. Read-side only: the next save writes the list
+    /// form and clears the old annotations.
+    pub fn from_legacy(os_host: Option<String>, mesh_url: Option<String>) -> MeshSettings {
+        MeshSettings {
+            os_endpoints: os_host
+                .filter(|h| !h.trim().is_empty())
+                .map(|h| OsEndpoint {
+                    id: LEGACY_ENDPOINT_ID.into(),
+                    name: "Published".into(),
+                    host: h.trim().to_string(),
+                })
+                .into_iter()
+                .collect(),
+            mesh_endpoints: mesh_url
+                .filter(|u| !u.trim().is_empty())
+                .map(|u| MeshEndpoint {
+                    id: LEGACY_ENDPOINT_ID.into(),
+                    name: "Published".into(),
+                    url: u.trim().trim_end_matches('/').to_string(),
+                })
+                .into_iter()
+                .collect(),
+        }
+    }
+}
+
+/// The id the pre-list `os_host`/`mesh_url` values are read under.
+pub const LEGACY_ENDPOINT_ID: &str = "published";
+
+/// An endpoint id is a slug: it travels in JSON on a CR annotation and in a
+/// policy document, and is matched by equality. Same shape as a component id.
+fn valid_endpoint_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 40
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !id.starts_with('-')
+        && !id.ends_with('-')
 }
 
 /// What a setting may hold, before it lands verbatim somewhere an operator
-/// would only meet the mistake later: `os_host` in a collector's output
-/// stanza ("healthy agent, no data"), `mesh_url` in a shell command on the
-/// screen. Empty strings are "unset" to the CR layer and pass.
-pub fn validate_settings(s: &MeshSettings) -> Result<(), &'static str> {
-    if let Some(h) = s
-        .os_host
-        .as_deref()
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-    {
-        if h.contains("://") || h.contains('/') || h.chars().any(char::is_whitespace) {
-            return Err("os_host is a host or host:port, without scheme or path");
+/// would only meet the mistake later: a host in a collector's output stanza
+/// ("healthy agent, no data"), a URL in a shell command on the screen. Ids
+/// must be slugs and unique within their list; names must not be blank.
+pub fn validate_settings(s: &MeshSettings) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for e in &s.os_endpoints {
+        if !valid_endpoint_id(&e.id) {
+            return Err(format!("OpenSearch endpoint id {:?} is not a slug", e.id));
+        }
+        if !seen.insert(e.id.as_str()) {
+            return Err(format!("OpenSearch endpoint id {:?} is repeated", e.id));
+        }
+        if e.name.trim().is_empty() {
+            return Err(format!("OpenSearch endpoint {} needs a name", e.id));
+        }
+        let h = e.host.trim();
+        if h.is_empty()
+            || h.contains("://")
+            || h.contains('/')
+            || h.chars().any(char::is_whitespace)
+        {
+            return Err(format!(
+                "OpenSearch endpoint {}: the address is a host or host:port, without scheme or path",
+                e.id
+            ));
         }
     }
-    if let Some(u) = s
-        .mesh_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-    {
+    seen.clear();
+    for e in &s.mesh_endpoints {
+        if !valid_endpoint_id(&e.id) {
+            return Err(format!("Velox Mesh endpoint id {:?} is not a slug", e.id));
+        }
+        if !seen.insert(e.id.as_str()) {
+            return Err(format!("Velox Mesh endpoint id {:?} is repeated", e.id));
+        }
+        if e.name.trim().is_empty() {
+            return Err(format!("Velox Mesh endpoint {} needs a name", e.id));
+        }
+        let u = e.url.trim();
         let scheme_ok = u.starts_with("http://") || u.starts_with("https://");
         let host = u.split("://").nth(1).unwrap_or("");
         if !scheme_ok || host.is_empty() || u.chars().any(char::is_whitespace) {
-            return Err("mesh_url is a base URL such as https://mesh.example.com:4320");
+            return Err(format!(
+                "Velox Mesh endpoint {}: the address is a base URL such as https://mesh.example.com:4320",
+                e.id
+            ));
         }
     }
     Ok(())
+}
+
+/// The endpoints a new settings document would take away from policies that
+/// still name them: `(policy id, endpoint id)` for each. The caller refuses
+/// the save and names them — a policy pointing at a removed endpoint would
+/// fail at its next compile with a message about settings, far from the
+/// screen that caused it. Changing an endpoint's *address* in place is fine
+/// and intended: it takes effect on the policy's next save.
+pub fn removed_endpoints_in_use(
+    current: &MeshSettings,
+    next: &MeshSettings,
+    policies: &[(String, Option<String>, Option<String>)],
+) -> Vec<(String, String)> {
+    let gone_os: Vec<&str> = current
+        .os_endpoints
+        .iter()
+        .filter(|e| !next.os_endpoints.iter().any(|n| n.id == e.id))
+        .map(|e| e.id.as_str())
+        .collect();
+    let gone_mesh: Vec<&str> = current
+        .mesh_endpoints
+        .iter()
+        .filter(|e| !next.mesh_endpoints.iter().any(|n| n.id == e.id))
+        .map(|e| e.id.as_str())
+        .collect();
+    let mut out = Vec::new();
+    for (pid, os, mesh) in policies {
+        if let Some(o) = os.as_deref().filter(|o| gone_os.contains(o)) {
+            out.push((pid.clone(), o.to_string()));
+        }
+        if let Some(m) = mesh.as_deref().filter(|m| gone_mesh.contains(m)) {
+            out.push((pid.clone(), m.to_string()));
+        }
+    }
+    out
+}
+
+/// What the console shows per configured Mesh endpoint on the settings
+/// screen: can the control plane reach it? A coarse answer on purpose. The
+/// URL is operator data, so the probe is a `GET /healthz` with a short
+/// timeout and the response body is never returned — a tenant must not get
+/// a fetch-anything oracle out of a settings screen — and the error is the
+/// category, not reqwest's text.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EndpointProbe {
+    pub id: String,
+    pub reachable: bool,
+    /// `None` when reachable; otherwise one of `timeout`, `refused`,
+    /// `status <code>`.
+    pub error: Option<String>,
+    pub latency_ms: u64,
+}
+
+/// Probe every configured Mesh endpoint, in parallel. The controller the
+/// core itself uses is `status()`; this is about the addresses hosts use.
+pub async fn probe_endpoints(s: &MeshSettings) -> Vec<EndpointProbe> {
+    let client = reqwest::Client::builder()
+        .timeout(PROBE_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build();
+    let Ok(client) = client else {
+        return s
+            .mesh_endpoints
+            .iter()
+            .map(|e| EndpointProbe {
+                id: e.id.clone(),
+                reachable: false,
+                error: Some("client".into()),
+                latency_ms: 0,
+            })
+            .collect();
+    };
+    let probes = s.mesh_endpoints.iter().map(|e| {
+        let client = client.clone();
+        let id = e.id.clone();
+        let url = format!("{}/healthz", e.url.trim_end_matches('/'));
+        async move {
+            let started = std::time::Instant::now();
+            let res = client.get(url).send().await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            match res {
+                Ok(r) if r.status().is_success() => EndpointProbe {
+                    id,
+                    reachable: true,
+                    error: None,
+                    latency_ms,
+                },
+                Ok(r) => EndpointProbe {
+                    id,
+                    reachable: false,
+                    error: Some(format!("status {}", r.status().as_u16())),
+                    latency_ms,
+                },
+                Err(e) => EndpointProbe {
+                    id,
+                    reachable: false,
+                    error: Some(if e.is_timeout() { "timeout" } else { "refused" }.into()),
+                    latency_ms,
+                },
+            }
+        }
+    });
+    futures::future::join_all(probes).await
 }
 
 /// The body every Mesh call starts from: the deployment pair the Mesh
@@ -333,6 +587,32 @@ pub async fn policies_using(
         .collect())
 }
 
+/// `(policy id, OpenSearch endpoint id, Mesh endpoint id)` for each of the
+/// deployment's policies — what a settings save checks before removing an
+/// endpoint. Empty when no Mesh is configured (no policy can exist); a
+/// configured Mesh that does not answer is an error, for the same reason as
+/// `policies_using`.
+pub async fn policy_endpoint_rows(
+    dep: &crate::scope::Deployment,
+) -> anyhow::Result<Vec<(String, Option<String>, Option<String>)>> {
+    if configured_url().is_none() {
+        return Ok(vec![]);
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        id: String,
+        #[serde(default)]
+        os_endpoint: Option<String>,
+        #[serde(default)]
+        mesh_endpoint: Option<String>,
+    }
+    let rows: Vec<Row> = call_for(dep, "policies", serde_json::json!({})).await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.id, r.os_endpoint, r.mesh_endpoint))
+        .collect())
+}
+
 /// The deployment is being deleted (ADR-072 §4). `Ok(None)` when no Mesh is
 /// configured; otherwise what the Mesh forgot, for the log.
 pub async fn forget(dep: &crate::scope::Deployment) -> anyhow::Result<Option<serde_json::Value>> {
@@ -369,12 +649,16 @@ pub async fn save_policy(
 ) -> anyhow::Result<u64> {
     use anyhow::Context as _;
 
-    // The deployment's published endpoint, read here rather than carried by
-    // the draft (ADR-072 §5): every policy against this deployment compiles
-    // against the same address, and the operator sets it once.
+    // The endpoints the draft names, resolved against the deployment's
+    // settings (ADR-072 §5, amendment 2): the operator maintains the
+    // addresses once, every policy says which ones it uses, and a policy
+    // that names none — or one that has been removed — is refused here,
+    // before anything is compiled or installed.
     let settings = crate::k8s::mesh_settings(dep)
         .await
         .with_context(|| format!("reading the Mesh settings of {}", dep.name()))?;
+    let (os_endpoint, _mesh_endpoint) = resolve_endpoints(&settings, &draft.endpoints)
+        .with_context(|| format!("policy {} cannot be saved", draft.id))?;
 
     let mut packages = BTreeMap::new();
     let mut activations = Vec::new();
@@ -412,13 +696,16 @@ pub async fn save_policy(
             deployment: draft.deployment.clone(),
         }],
         agent: velox_policy::AgentSettings::default(),
+        endpoints: draft.endpoints.clone(),
     };
     let renderer = velox_policy::PackageRenderer {
         store: &Verified(&packages),
         target: velox_policy::Target {
             deployment: draft.deployment.clone(),
             namespace: dep.namespace().to_string(),
-            os_host: settings.os_host.clone(),
+            // Always the named endpoint's address: the renderer's in-cluster
+            // fallback is for the DaemonSet path, never for a host.
+            os_host: Some(os_endpoint.host.trim().to_string()),
         },
     };
     let compiled = velox_policy::compile(&policy, &renderer)
@@ -601,59 +888,163 @@ mod tests {
         );
     }
 
-    /// The draft no longer carries the published endpoint (ADR-072 §5): a
-    /// body that still sends `os_host` deserialises — older consoles keep
-    /// working — and the field is simply not there to be read.
+    /// The draft carries endpoint IDS (ADR-072 amendment 2), never an address:
+    /// a body that still sends the pre-amendment `os_host` deserialises —
+    /// older consoles keep working — and the field is simply not there to be
+    /// read. A draft that names no endpoints parses too; `save_policy` is
+    /// where it is refused.
     #[test]
-    fn the_draft_ignores_a_per_policy_endpoint() {
+    fn the_draft_names_endpoints_by_id_and_ignores_an_inline_address() {
         let d: PolicyDraft = serde_json::from_value(serde_json::json!({
             "id": "p", "name": "P", "deployment": "tornis-096o",
-            "integrations": ["ssh"], "os_host": "1.2.3.4:9200"
+            "integrations": ["ssh"], "os_host": "1.2.3.4:9200",
+            "endpoints": { "opensearch": "lan", "mesh": "lan" }
         }))
         .unwrap();
         assert_eq!(d.integrations, vec!["ssh"]);
+        assert_eq!(d.endpoints.opensearch.as_deref(), Some("lan"));
+        let bare: PolicyDraft = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "deployment": "d", "integrations": []
+        }))
+        .unwrap();
+        assert!(!bare.endpoints.complete());
         let s: MeshSettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(s, MeshSettings::default());
     }
 
-    /// The two addresses an agent outside the cluster needs, each in the
-    /// shape its consumer expects: a bare host[:port] for the collector's
-    /// output, a base URL for `velox-agent enroll --mesh`.
+    fn settings(os: &[(&str, &str)], mesh: &[(&str, &str)]) -> MeshSettings {
+        MeshSettings {
+            os_endpoints: os
+                .iter()
+                .map(|(id, host)| OsEndpoint {
+                    id: id.to_string(),
+                    name: id.to_uppercase(),
+                    host: host.to_string(),
+                })
+                .collect(),
+            mesh_endpoints: mesh
+                .iter()
+                .map(|(id, url)| MeshEndpoint {
+                    id: id.to_string(),
+                    name: id.to_uppercase(),
+                    url: url.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Each address in the shape its consumer expects — a bare host[:port]
+    /// for the collector's output, a base URL for `velox-agent enroll
+    /// --mesh` — under a slug id that is unique in its list.
     #[test]
     fn settings_are_validated_in_the_shape_their_consumer_expects() {
-        let ok = |os: Option<&str>, mesh: Option<&str>| {
-            validate_settings(&MeshSettings {
-                os_host: os.map(String::from),
-                mesh_url: mesh.map(String::from),
-            })
-        };
-        assert!(ok(None, None).is_ok());
-        assert!(ok(Some(""), Some("  ")).is_ok(), "empty is unset");
-        assert!(ok(
-            Some("os.example.com:9200"),
-            Some("https://mesh.example.com:4320")
-        )
+        assert!(validate_settings(&MeshSettings::default()).is_ok());
+        assert!(validate_settings(&settings(
+            &[("lan", "10.43.207.250"), ("lb", "os.example.com:9200")],
+            &[
+                ("lan", "http://192.168.1.200:4320"),
+                ("pub", "https://mesh.example.com:4320")
+            ]
+        ))
         .is_ok());
-        assert!(
-            ok(Some("http://os.example.com"), None).is_err(),
-            "no scheme on os_host"
+        let err = |s: MeshSettings| validate_settings(&s).unwrap_err();
+        assert!(err(settings(&[("lan", "http://os.example.com")], &[])).contains("scheme"));
+        assert!(err(settings(&[("lan", "os.example.com/path")], &[])).contains("path"));
+        assert!(err(settings(&[("lan", "")], &[])).contains("address"));
+        assert!(err(settings(&[], &[("lan", "mesh.example.com:4320")])).contains("base URL"));
+        assert!(err(settings(&[], &[("lan", "https://")])).contains("base URL"));
+        assert!(err(settings(&[], &[("lan", "https://mesh example.com")])).contains("base URL"));
+        assert!(err(settings(&[], &[("lan", "ftp://mesh.example.com")])).contains("base URL"));
+        // Ids: slugs, unique per list (the same id in BOTH lists is fine —
+        // they are different namespaces).
+        assert!(err(settings(&[("LAN", "h")], &[])).contains("slug"));
+        assert!(err(settings(&[("-lan", "h")], &[])).contains("slug"));
+        assert!(err(settings(&[("", "h")], &[])).contains("slug"));
+        assert!(err(settings(&[("a", "h"), ("a", "h2")], &[])).contains("repeated"));
+        assert!(validate_settings(&settings(&[("a", "h")], &[("a", "http://x")])).is_ok());
+        let mut blank = settings(&[("a", "h")], &[]);
+        blank.os_endpoints[0].name = "  ".into();
+        assert!(err(blank).contains("name"));
+    }
+
+    /// A policy compiles against the endpoint it NAMES, and only that: no
+    /// endpoint, half an endpoint, or a removed one is a refusal that says
+    /// which — never the in-cluster default the DaemonSet path uses.
+    #[test]
+    fn a_policy_resolves_both_endpoints_or_is_refused_by_name() {
+        let s = settings(&[("lan", "10.0.0.1")], &[("lan", "http://10.0.0.1:4320")]);
+        let ep = |os: Option<&str>, mesh: Option<&str>| velox_policy::PolicyEndpoints {
+            opensearch: os.map(String::from),
+            mesh: mesh.map(String::from),
+        };
+        let (o, m) = resolve_endpoints(&s, &ep(Some("lan"), Some("lan"))).unwrap();
+        assert_eq!(o.host, "10.0.0.1");
+        assert_eq!(m.url, "http://10.0.0.1:4320");
+        let msg = |e: velox_policy::PolicyEndpoints| {
+            format!("{:#}", resolve_endpoints(&s, &e).unwrap_err())
+        };
+        assert!(msg(ep(None, None)).contains("no OpenSearch endpoint"));
+        assert!(msg(ep(Some(""), Some("lan"))).contains("no OpenSearch endpoint"));
+        assert!(msg(ep(Some("lan"), None)).contains("no Velox Mesh endpoint"));
+        assert!(msg(ep(Some("gone"), Some("lan"))).contains("`gone` is not configured"));
+        assert!(msg(ep(Some("lan"), Some("gone"))).contains("`gone` is not configured"));
+    }
+
+    /// Taking an endpoint out of the settings while a policy still names it
+    /// is refused with the policy's name; renaming or re-addressing one in
+    /// place is not a removal.
+    #[test]
+    fn removing_an_endpoint_a_policy_uses_is_caught_before_the_save() {
+        let cur = settings(
+            &[("lan", "a"), ("lb", "b")],
+            &[("lan", "http://a"), ("pub", "http://b")],
         );
-        assert!(
-            ok(Some("os.example.com/path"), None).is_err(),
-            "no path on os_host"
+        let policies = vec![
+            (
+                "web".to_string(),
+                Some("lb".to_string()),
+                Some("pub".to_string()),
+            ),
+            (
+                "db".to_string(),
+                Some("lan".to_string()),
+                Some("lan".to_string()),
+            ),
+            ("old".to_string(), None, None),
+        ];
+        let next = settings(
+            &[("lan", "a-moved")],
+            &[("lan", "http://a"), ("pub", "http://b")],
         );
-        assert!(
-            ok(None, Some("mesh.example.com:4320")).is_err(),
-            "mesh_url needs a scheme"
+        assert_eq!(
+            removed_endpoints_in_use(&cur, &next, &policies),
+            vec![("web".to_string(), "lb".to_string())]
         );
-        assert!(ok(None, Some("https://")).is_err(), "mesh_url needs a host");
-        assert!(
-            ok(None, Some("https://mesh example.com")).is_err(),
-            "no whitespace"
+        let next = settings(&[("lan", "a"), ("lb", "b")], &[("lan", "http://a")]);
+        assert_eq!(
+            removed_endpoints_in_use(&cur, &next, &policies),
+            vec![("web".to_string(), "pub".to_string())]
         );
-        assert!(
-            ok(None, Some("ftp://mesh.example.com")).is_err(),
-            "http(s) only"
+        assert!(removed_endpoints_in_use(&cur, &cur, &policies).is_empty());
+    }
+
+    /// The pre-list settings — one `os_host`, one `mesh_url` — read as one
+    /// endpoint each under a fixed id, so a deployment configured before the
+    /// amendment loses nothing; blanks read as no endpoint.
+    #[test]
+    fn legacy_scalar_settings_become_one_named_endpoint_each() {
+        let s = MeshSettings::from_legacy(
+            Some(" 10.43.207.250 ".into()),
+            Some("http://192.168.1.200:4320/".into()),
+        );
+        assert_eq!(s.os_endpoints.len(), 1);
+        assert_eq!(s.os_endpoints[0].id, LEGACY_ENDPOINT_ID);
+        assert_eq!(s.os_endpoints[0].host, "10.43.207.250");
+        assert_eq!(s.mesh_endpoints[0].url, "http://192.168.1.200:4320");
+        assert!(validate_settings(&s).is_ok());
+        assert_eq!(
+            MeshSettings::from_legacy(Some("  ".into()), None),
+            MeshSettings::default()
         );
     }
 

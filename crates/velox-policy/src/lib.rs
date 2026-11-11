@@ -142,6 +142,31 @@ impl Default for AgentSettings {
     }
 }
 
+/// Which of the deployment's configured endpoints this policy is bound to
+/// (ADR-072 amendment 2): the OpenSearch address its collectors ship to and
+/// the Mesh address its agents enrol against. **Ids**, not values — the
+/// values live in the deployment's settings, where the operator maintains
+/// them once; the compiler resolves the OpenSearch id to a host at save time
+/// and the console resolves both for display. Both are required for a policy
+/// to compile: an agent whose policy names no endpoint has nowhere to send
+/// and the console must not let that be discovered on the host.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyEndpoints {
+    #[serde(default)]
+    pub opensearch: Option<String>,
+    #[serde(default)]
+    pub mesh: Option<String>,
+}
+
+impl PolicyEndpoints {
+    /// Both halves named. The console treats anything else as "incomplete"
+    /// and the compiler refuses it.
+    pub fn complete(&self) -> bool {
+        self.opensearch.as_deref().is_some_and(|s| !s.is_empty())
+            && self.mesh.as_deref().is_some_and(|s| !s.is_empty())
+    }
+}
+
 /// One immutable revision of a policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Policy {
@@ -152,6 +177,11 @@ pub struct Policy {
     pub outputs: Vec<Output>,
     #[serde(default)]
     pub agent: AgentSettings,
+    /// Revisions written before endpoints existed deserialise with both
+    /// unset; the console shows them as incomplete and the next save
+    /// requires them.
+    #[serde(default)]
+    pub endpoints: PolicyEndpoints,
 }
 
 /// A rendered piece of collector configuration for one engine.
@@ -547,7 +577,35 @@ mod tests {
                 deployment: "logs-a1b2".into(),
             }],
             agent: AgentSettings::default(),
+            endpoints: PolicyEndpoints::default(),
         }
+    }
+
+    /// A revision stored before endpoints existed still parses — with both
+    /// unset, which is what the console calls incomplete — and a revision
+    /// that names them round-trips. Half an answer is not complete.
+    #[test]
+    fn endpoints_default_to_unset_and_are_complete_only_as_a_pair() {
+        let old: Policy = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "revision": 3, "activations": [],
+            "outputs": [{ "kind": "open_search", "deployment": "d" }]
+        }))
+        .unwrap();
+        assert_eq!(old.endpoints, PolicyEndpoints::default());
+        assert!(!old.endpoints.complete());
+        let half = PolicyEndpoints {
+            opensearch: Some("published".into()),
+            mesh: None,
+        };
+        assert!(!half.complete());
+        let both = PolicyEndpoints {
+            opensearch: Some("published".into()),
+            mesh: Some("lan".into()),
+        };
+        assert!(both.complete());
+        let v = serde_json::to_value(&both).unwrap();
+        assert_eq!(v["opensearch"], "published");
+        assert_eq!(v["mesh"], "lan");
     }
 
     #[test]

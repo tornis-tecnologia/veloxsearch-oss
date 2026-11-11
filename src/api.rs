@@ -2493,10 +2493,15 @@ mod server {
         // Error::{Variable, Input}`: an input the package does not declare, a
         // required value missing, a host-only variable given for the cluster)
         // are the caller's to fix, not ours.
+        // ...and so is a policy that names no endpoint, or one the settings no
+        // longer hold (`mesh::resolve_endpoints`, ADR-072 amendment 2).
         if msg.contains("the Mesh answered 400")
             || msg.contains("the Mesh answered 404")
             || msg.contains("variable `")
             || msg.contains("input `")
+            || msg.contains("names no OpenSearch endpoint")
+            || msg.contains("names no Velox Mesh endpoint")
+            || msg.contains("is not configured on this deployment")
         {
             ApiError::bad_request(msg)
         } else {
@@ -2568,16 +2573,30 @@ mod server {
         mesh_forward(&scope, req, "unenrol").await
     }
 
-    /// The deployment's Mesh settings (ADR-072 §5), off its CR.
+    #[derive(Serialize)]
+    struct MeshSettingsView {
+        #[serde(flatten)]
+        settings: crate::mesh::MeshSettings,
+        /// The in-cluster OpenSearch address in endpoint shape, for the
+        /// settings screen to offer as a one-click endpoint. Offered, never
+        /// assumed (ADR-072 amendment 2).
+        in_cluster_os_host: String,
+    }
+
+    /// The deployment's Mesh settings (ADR-072 §5, amendment 2), off its CR:
+    /// the named endpoints its policies bind to.
     async fn mesh_settings(
         scope: Scope,
         Json(req): Json<MeshDepReq>,
-    ) -> Result<Json<crate::mesh::MeshSettings>, ApiError> {
+    ) -> Result<Json<MeshSettingsView>, ApiError> {
         let dep = scope.require(&req.deployment).await?;
-        crate::k8s::mesh_settings(&dep)
+        let settings = crate::k8s::mesh_settings(&dep)
             .await
-            .map(Json)
-            .map_err(ApiError::internal)
+            .map_err(ApiError::internal)?;
+        Ok(Json(MeshSettingsView {
+            in_cluster_os_host: crate::k8s::in_cluster_os_host(&dep),
+            settings,
+        }))
     }
 
     #[derive(Deserialize)]
@@ -2587,19 +2606,85 @@ mod server {
         settings: crate::mesh::MeshSettings,
     }
 
-    /// Write the deployment's Mesh settings. Takes effect on the next policy
-    /// save — a compiled revision is immutable, and agents on the old address
-    /// keep it until the operator saves the policy again.
+    /// Write the deployment's Mesh settings. An endpoint a policy still names
+    /// cannot be removed (400 naming the policy): the policy would otherwise
+    /// fail at its next compile, far from the screen that caused it. A
+    /// changed address takes effect on the policy's next save — a compiled
+    /// revision is immutable, and agents on the old address keep it until the
+    /// operator saves the policy again.
     async fn mesh_save_settings(
         scope: Scope,
         Json(req): Json<MeshSaveSettingsReq>,
     ) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
         crate::mesh::validate_settings(&req.settings).map_err(ApiError::bad_request)?;
+        let current = crate::k8s::mesh_settings(&dep)
+            .await
+            .map_err(ApiError::internal)?;
+        // Only when a Mesh holds policies to check against; without one no
+        // policy can exist. A configured Mesh that does not answer is an
+        // error here — removing an endpoint blind is the thing this guards.
+        let rows = crate::mesh::policy_endpoint_rows(&dep)
+            .await
+            .map_err(mesh_err)?;
+        let in_use = crate::mesh::removed_endpoints_in_use(&current, &req.settings, &rows);
+        if let Some((policy, endpoint)) = in_use.first() {
+            return Err(ApiError::bad_request(format!(
+                "endpoint `{endpoint}` is still used by policy {policy}; rebind the policy first"
+            )));
+        }
         crate::k8s::set_mesh_settings(&dep, &req.settings)
             .await
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)
+    }
+
+    /// Can the control plane reach each of the deployment's configured Mesh
+    /// endpoints? The settings screen's daemon list. Coarse by design (see
+    /// `mesh::probe_endpoints`): reachable or not, and why in one word.
+    async fn mesh_endpoints_status(
+        scope: Scope,
+        Json(req): Json<MeshDepReq>,
+    ) -> Result<Json<Vec<crate::mesh::EndpointProbe>>, ApiError> {
+        let dep = scope.require(&req.deployment).await?;
+        let settings = crate::k8s::mesh_settings(&dep)
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(Json(crate::mesh::probe_endpoints(&settings).await))
+    }
+
+    #[derive(Deserialize)]
+    struct MeshPolicyEndpointsReq {
+        deployment: String,
+        policy_id: String,
+        #[serde(flatten)]
+        endpoints: velox_policy::PolicyEndpoints,
+    }
+
+    /// Rebind one of the deployment's policies to other configured endpoints
+    /// (ADR-072 amendment 2): a new revision, because the OpenSearch address
+    /// is baked into every collector stanza.
+    async fn mesh_policy_endpoints(
+        scope: Scope,
+        Json(req): Json<MeshPolicyEndpointsReq>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        let dep = scope.require(&req.deployment).await?;
+        if !crate::catalog::valid_component(&req.policy_id) {
+            return Err(ApiError::bad_request(format!(
+                "invalid policy id: {:?}",
+                req.policy_id
+            )));
+        }
+        if !req.endpoints.complete() {
+            return Err(ApiError::bad_request(
+                "a policy needs both an OpenSearch endpoint and a Velox Mesh endpoint",
+            ));
+        }
+        let revision =
+            crate::mesh::set_endpoints(&dep, &req.policy_id, req.endpoints, scope.tenant_id())
+                .await
+                .map_err(mesh_err)?;
+        Ok(Json(serde_json::json!({ "revision": revision })))
     }
 
     // -- integrations tab support (#76) ---------------------------------
@@ -2699,10 +2784,17 @@ mod server {
         deployment: String,
         id: String,
         name: String,
+        /// Both required (ADR-072 amendment 2): `os_endpoint` and
+        /// `mesh_endpoint` as the console sends them.
+        #[serde(default)]
+        os_endpoint: Option<String>,
+        #[serde(default)]
+        mesh_endpoint: Option<String>,
     }
 
     /// Create an empty policy on the deployment (ADR-073): the thing an
-    /// integration is then added to.
+    /// integration is then added to — bound to one OpenSearch and one Mesh
+    /// endpoint from the deployment's settings, both required.
     async fn mesh_create_policy(
         scope: Scope,
         Json(req): Json<MeshCreatePolicyReq>,
@@ -2718,9 +2810,19 @@ mod server {
         if name.is_empty() {
             return Err(ApiError::bad_request("a policy needs a name"));
         }
-        let revision = crate::mesh::create_policy(&dep, &req.id, name, scope.tenant_id())
-            .await
-            .map_err(mesh_err)?;
+        let endpoints = velox_policy::PolicyEndpoints {
+            opensearch: req.os_endpoint.filter(|s| !s.trim().is_empty()),
+            mesh: req.mesh_endpoint.filter(|s| !s.trim().is_empty()),
+        };
+        if !endpoints.complete() {
+            return Err(ApiError::bad_request(
+                "a policy needs both an OpenSearch endpoint and a Velox Mesh endpoint; configure them on the Mesh settings first",
+            ));
+        }
+        let revision =
+            crate::mesh::create_policy(&dep, &req.id, name, endpoints, scope.tenant_id())
+                .await
+                .map_err(mesh_err)?;
         Ok(Json(serde_json::json!({ "revision": revision })))
     }
 
@@ -3376,8 +3478,10 @@ mod server {
         RoutePolicy { path: "/mesh_assign_policy", policy: TenantScoped, note: "moves one of the deployment's hosts between its policies; another deployment's policy is refused — re-enrol instead (ADR-072 §3)." },
         RoutePolicy { path: "/mesh_unenrol", policy: TenantScoped, note: "unenrols one of the deployment's hosts; the agent is refused on its next check-in." },
         RoutePolicy { path: "/mesh_policy", policy: TenantScoped, note: "the current document of one of the deployment's policies (its activations and their inputs, ADR-073); resolve-before-read." },
-        RoutePolicy { path: "/mesh_settings", policy: TenantScoped, note: "the deployment's Mesh settings (published OpenSearch endpoint), off its CR (ADR-072 §5)." },
-        RoutePolicy { path: "/mesh_save_settings", policy: TenantScoped, note: "writes them — a merge patch on the CR's metadata; resolve-before-mutate." },
+        RoutePolicy { path: "/mesh_settings", policy: TenantScoped, note: "the deployment's Mesh settings — its named OpenSearch and Mesh endpoints — off its CR (ADR-072 §5, amendment 2)." },
+        RoutePolicy { path: "/mesh_save_settings", policy: TenantScoped, note: "writes them — a merge patch on the CR's metadata; resolve-before-mutate; an endpoint a policy still names cannot be removed (400)." },
+        RoutePolicy { path: "/mesh_endpoints_status", policy: TenantScoped, note: "probes the deployment's configured Mesh endpoints (GET /healthz, coarse result, body never returned): the settings screen's daemon list." },
+        RoutePolicy { path: "/mesh_policy_endpoints", policy: TenantScoped, note: "rebinds one of the deployment's policies to other configured endpoints — a new revision (ADR-072 amendment 2); resolve-before-mutate." },
         RoutePolicy { path: "/node_stats", policy: TenantScoped, note: "live cluster stats; unowned degrades to the empty snapshot." },
         RoutePolicy { path: "/metrics_series", policy: TenantScoped, note: "historical series out of the deployment's own index." },
         RoutePolicy { path: "/dashboard_credentials", policy: TenantScoped, note: "THE credential read — unowned is 404, never a password." },
@@ -3483,6 +3587,8 @@ mod server {
             .route(p("/mesh_policy"), post(mesh_policy))
             .route(p("/mesh_settings"), post(mesh_settings))
             .route(p("/mesh_save_settings"), post(mesh_save_settings))
+            .route(p("/mesh_endpoints_status"), post(mesh_endpoints_status))
+            .route(p("/mesh_policy_endpoints"), post(mesh_policy_endpoints))
             .route(p("/node_stats"), post(node_stats))
             .route(p("/metrics_series"), post(metrics_series))
             .route(p("/access_settings"), get(get_access_settings))

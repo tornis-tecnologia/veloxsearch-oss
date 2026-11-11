@@ -241,6 +241,12 @@ pub struct PolicyRow {
     /// integration a policy still writes through (ADR-072 §6) — without
     /// either side fetching every policy document.
     pub integrations: Vec<String>,
+    /// The endpoints the current revision is bound to (ADR-072 amendment 2),
+    /// by id, read off the body like `integrations`: the console shows them
+    /// on the card and the core refuses to remove an endpoint a policy still
+    /// names. `None` on a revision written before endpoints existed.
+    pub os_endpoint: Option<String>,
+    pub mesh_endpoint: Option<String>,
 }
 
 /// Create a policy at revision 1, or add revision N+1 to an existing one.
@@ -339,7 +345,13 @@ pub async fn list_policies(pg: &Client, dep: &DeploymentRef) -> Result<Vec<Polic
                                      jsonb_array_elements(r.body->'activations')
                                        WITH ORDINALITY AS t(a, ord)
                                WHERE r.policy_id = p.id AND r.revision = p.current_revision),
-                             '{}'::text[])
+                             '{}'::text[]),
+                    (SELECT NULLIF(r.body->'endpoints'->>'opensearch', '')
+                       FROM mesh_policy_revisions r
+                      WHERE r.policy_id = p.id AND r.revision = p.current_revision),
+                    (SELECT NULLIF(r.body->'endpoints'->>'mesh', '')
+                       FROM mesh_policy_revisions r
+                      WHERE r.policy_id = p.id AND r.revision = p.current_revision)
                FROM mesh_policies p
               WHERE p.deployment_ns = $1 AND p.deployment = $2 ORDER BY p.name",
             &[&dep.deployment_ns, &dep.deployment],
@@ -352,6 +364,8 @@ pub async fn list_policies(pg: &Client, dep: &DeploymentRef) -> Result<Vec<Polic
             current_revision: r.get::<_, i64>(2) as u64,
             updated_at: r.get::<_, i64>(3) as u64,
             integrations: r.get(4),
+            os_endpoint: r.get(5),
+            mesh_endpoint: r.get(6),
         })
         .collect())
 }

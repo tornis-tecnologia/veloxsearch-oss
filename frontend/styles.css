@@ -1254,6 +1254,12 @@ button.badge { cursor: pointer; }
 .onb-step.ok .onb-n { color: var(--ok-text); }
 .onb-label { flex: 1; }
 
+/* A policy's two endpoints on one line: the kind in muted text, then the
+   name and the address. `data-complete="0"` is read by the tests only. */
+.ep-line { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; }
+.ep-line .k { color: var(--text-3); margin-right: 4px; }
+.ep-line .k::after { content: ":"; }
+
 .kvrow {
   display: flex; justify-content: space-between; gap: 16px;
   padding: 9px 0;
