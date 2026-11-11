@@ -19,7 +19,9 @@
    renders as one toggle and nothing to fill.
 
    Editing an existing activation is the same dialog with the target fixed
-   and the recorded selection as the initial values.
+   and the recorded selection as the initial values. The Mesh tab's Policies
+   screen opens it too, with the policy as the fixed target (ADR-073: one
+   onboarding, two doors).
    ============================================================ */
 import { useEffect, useMemo, useState } from "react";
 import { STR } from "./i18n.jsx";
@@ -66,7 +68,7 @@ function collectableOn(i, target) {
   return (i.targets || []).includes(kind);
 }
 
-function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshReady, fixedTarget, initialTarget, initial, agentsByPolicy, onDone, onToast }) {
+function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshReady, fixedTarget, editing: editingProp, initialTarget, initial, agentsByPolicy, onDone, onToast }) {
   const t = STR[lang] || STR.pt;
   const [schema, setSchema] = useState(null);
   const [schemaErr, setSchemaErr] = useState(null);
@@ -78,7 +80,10 @@ function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshRead
   const [busy, setBusy] = useState(false);
   const [saveErr, setSaveErr] = useState(null);
 
-  const editing = !!fixedTarget;
+  // A fixed target skips "where". It is an EDIT when the caller says so (or,
+  // by default, whenever the target is fixed): the Policies tab fixes the
+  // target for a plain add too and passes `editing={false}`.
+  const editing = editingProp != null ? !!editingProp : !!fixedTarget;
   const title = (editing ? t.add_integ_edit_title : t.add_integ_title).replace("{name}", item ? loc(item.title, lang, item.id) : "");
 
   useEffect(() => {

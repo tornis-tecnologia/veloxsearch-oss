@@ -101,6 +101,23 @@ it and tied to the integrations that deployment already has.
    guide (no Mesh configured) and the reachability error move to *Settings*,
    admin-only, because they are about the installation, not a deployment.
 
+## Amendment (2026-11-11)
+
+- The deployment's Mesh settings (§5) are a **settings sub-tab** of the Mesh
+  tab, not a card on its overview, and carry a second address beside
+  `os_host`: `mesh_url` (annotation `veloxsearch.ai/mesh-agent-url`), where a
+  host outside the cluster reaches the Mesh. It fills the `--mesh` of every
+  enrolment command the console prints; unset prints the `MESH_URL`
+  placeholder. Validated as an http(s) base URL. The controller's own
+  installation stays the admin's, under Settings.
+- The overview is the fleet at a glance — one count per status word
+  (healthy, unhealthy, updating, offline, unenrolled), one stacked bar, the
+  configured agents with their policy, read-only — plus the guided first
+  run. An agent's policy is changed in the **agent's editor** on the Agents
+  tab, which shows what the chosen policy brings (its integrations, inputs
+  and values, read off the stored document) before *Deploy*; the row itself
+  has no picker.
+
 ## Consequences
 
 - One schema migration (`003_deployment_scope.sql`) adds the pair to

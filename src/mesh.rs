@@ -230,6 +230,44 @@ pub struct MeshSettings {
     /// compiles with the same one.
     #[serde(default)]
     pub os_host: Option<String>,
+    /// Where a host OUTSIDE the cluster reaches the Mesh itself — the `--mesh`
+    /// of `velox-agent enroll`. The core talks to the controller over
+    /// `VELOX_MESH_URL` (an in-cluster name); the address an agent on a VM
+    /// uses is whatever the operator published, and it is a fact of the
+    /// deployment because that is where the enrolment commands are shown.
+    /// Unset = the console prints the `MESH_URL` placeholder.
+    #[serde(default)]
+    pub mesh_url: Option<String>,
+}
+
+/// What a setting may hold, before it lands verbatim somewhere an operator
+/// would only meet the mistake later: `os_host` in a collector's output
+/// stanza ("healthy agent, no data"), `mesh_url` in a shell command on the
+/// screen. Empty strings are "unset" to the CR layer and pass.
+pub fn validate_settings(s: &MeshSettings) -> Result<(), &'static str> {
+    if let Some(h) = s
+        .os_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
+        if h.contains("://") || h.contains('/') || h.chars().any(char::is_whitespace) {
+            return Err("os_host is a host or host:port, without scheme or path");
+        }
+    }
+    if let Some(u) = s
+        .mesh_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
+        let scheme_ok = u.starts_with("http://") || u.starts_with("https://");
+        let host = u.split("://").nth(1).unwrap_or("");
+        if !scheme_ok || host.is_empty() || u.chars().any(char::is_whitespace) {
+            return Err("mesh_url is a base URL such as https://mesh.example.com:4320");
+        }
+    }
+    Ok(())
 }
 
 /// The body every Mesh call starts from: the deployment pair the Mesh
@@ -576,6 +614,47 @@ mod tests {
         assert_eq!(d.integrations, vec!["ssh"]);
         let s: MeshSettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(s, MeshSettings::default());
+    }
+
+    /// The two addresses an agent outside the cluster needs, each in the
+    /// shape its consumer expects: a bare host[:port] for the collector's
+    /// output, a base URL for `velox-agent enroll --mesh`.
+    #[test]
+    fn settings_are_validated_in_the_shape_their_consumer_expects() {
+        let ok = |os: Option<&str>, mesh: Option<&str>| {
+            validate_settings(&MeshSettings {
+                os_host: os.map(String::from),
+                mesh_url: mesh.map(String::from),
+            })
+        };
+        assert!(ok(None, None).is_ok());
+        assert!(ok(Some(""), Some("  ")).is_ok(), "empty is unset");
+        assert!(ok(
+            Some("os.example.com:9200"),
+            Some("https://mesh.example.com:4320")
+        )
+        .is_ok());
+        assert!(
+            ok(Some("http://os.example.com"), None).is_err(),
+            "no scheme on os_host"
+        );
+        assert!(
+            ok(Some("os.example.com/path"), None).is_err(),
+            "no path on os_host"
+        );
+        assert!(
+            ok(None, Some("mesh.example.com:4320")).is_err(),
+            "mesh_url needs a scheme"
+        );
+        assert!(ok(None, Some("https://")).is_err(), "mesh_url needs a host");
+        assert!(
+            ok(None, Some("https://mesh example.com")).is_err(),
+            "no whitespace"
+        );
+        assert!(
+            ok(None, Some("ftp://mesh.example.com")).is_err(),
+            "http(s) only"
+        );
     }
 
     /// Unset is "not installed", and that is the state a fresh install is in.

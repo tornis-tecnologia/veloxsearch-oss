@@ -1867,6 +1867,25 @@ pub async fn delete_cluster(dep: &Deployment) -> Result<()> {
 /// Where a host OUTSIDE the cluster reaches this deployment's OpenSearch
 /// (ADR-072 §5). Absent = the in-cluster service name.
 const LABEL_MESH_OS_HOST: &str = "veloxsearch.ai/mesh-os-host";
+/// Where a host OUTSIDE the cluster reaches the Mesh, for the enrolment
+/// commands the console shows. Absent = the `MESH_URL` placeholder.
+const LABEL_MESH_AGENT_URL: &str = "veloxsearch.ai/mesh-agent-url";
+
+fn annotation_value(obj: &DynamicObject, key: &str) -> Option<String> {
+    obj.metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(key))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn annotation_patch_value(v: Option<&str>) -> serde_json::Value {
+    match v.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => serde_json::Value::String(v.to_string()),
+        None => serde_json::Value::Null,
+    }
+}
 
 /// The deployment's Mesh settings, off its CR.
 pub async fn mesh_settings(dep: &Deployment) -> Result<crate::mesh::MeshSettings> {
@@ -1877,37 +1896,27 @@ pub async fn mesh_settings(dep: &Deployment) -> Result<crate::mesh::MeshSettings
         .get(name)
         .await
         .context("fetching cluster for mesh settings")?;
-    let os_host = obj
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(LABEL_MESH_OS_HOST))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    Ok(crate::mesh::MeshSettings { os_host })
+    Ok(crate::mesh::MeshSettings {
+        os_host: annotation_value(&obj, LABEL_MESH_OS_HOST),
+        mesh_url: annotation_value(&obj, LABEL_MESH_AGENT_URL),
+    })
 }
 
-/// Write the deployment's Mesh settings. An unset `os_host` removes the
+/// Write the deployment's Mesh settings. An unset value removes its
 /// annotation. A merge patch on `metadata` alone, like `set_otel_stack`, so
 /// it can never move a version or clobber the spec.
 pub async fn set_mesh_settings(dep: &Deployment, s: &crate::mesh::MeshSettings) -> Result<()> {
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
-    let value = match s
-        .os_host
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        Some(v) => serde_json::Value::String(v.to_string()),
-        None => serde_json::Value::Null,
-    };
-    let patch = serde_json::json!({ "metadata": { "annotations": { LABEL_MESH_OS_HOST: value } } });
+    let patch = serde_json::json!({ "metadata": { "annotations": {
+        LABEL_MESH_OS_HOST: annotation_patch_value(s.os_host.as_deref()),
+        LABEL_MESH_AGENT_URL: annotation_patch_value(s.mesh_url.as_deref()),
+    } } });
     os_api(&client, dep)
         .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
-        .context("patching mesh-os-host annotation")?;
+        .context("patching mesh settings annotations")?;
     Ok(())
 }
 

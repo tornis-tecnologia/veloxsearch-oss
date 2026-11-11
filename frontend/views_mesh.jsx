@@ -42,7 +42,8 @@
 import { useEffect, useState } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Banner, Btn, Icon, Tabs, copyText } from "./ui.jsx";
+import { Banner, Btn, Dialog, Field, Icon, Tabs, copyText } from "./ui.jsx";
+import { AddIntegrationDialog, locText } from "./views_integration_add.jsx";
 
 /* ADR-069 decision 3; `velox_agent::preflight::MIN_FLUENT_BIT` is the same
    number on the other side. */
@@ -170,62 +171,226 @@ function seenAgo(ts, t) {
   return t.mesh_seen_h.replace("{n}", Math.floor(d / 3600));
 }
 
-/* The deployment's fleet. The policy column is a picker over THIS
-   deployment's policies only: the Mesh refuses another deployment's policy
-   (ADR-072 §3), so the screen does not offer one. */
-function FleetTable({ t, agents, policies, onAssign, onUnenrol }) {
-  if (!agents || agents.length === 0) return <p className="hint">{t.mesh_fleet_empty}</p>;
-  const pols = policies || [];
+/* The fleet at a glance, Fleet-style: one count per status word and one
+   stacked bar. The buckets are the Mesh's status set folded the way an
+   operator reads it — degraded and failed are both "unhealthy" here, the
+   row below still says which. Counted on the client from the rows the
+   Mesh already returned; no second call. */
+const SUMMARY = [
+  { key: "healthy", tone: "green", of: s => s === "healthy" },
+  { key: "unhealthy", tone: "red", of: s => s === "degraded" || s === "failed" },
+  { key: "updating", tone: "yellow", of: s => s === "updating" },
+  { key: "offline", tone: "unknown", of: s => s === "offline" },
+  { key: "unenrolled", tone: "unknown", of: s => s === "unenrolled" },
+];
+
+function FleetSummary({ t, agents, policies }) {
+  const rows = agents || [];
+  const counts = SUMMARY.map(b => ({ ...b, n: rows.filter(a => b.of(a.status)).length }));
+  const total = rows.length;
   return (
-    <table className="fleet" data-testid="mesh-fleet">
+    <div className="card pad" data-testid="mesh-summary" style={{ marginBottom: 18 }}>
+      <div className="fleet-sum">
+        <span className="total" data-testid="mesh-summary-total">
+          {t.mesh_sum_total.replace("{n}", total).replace("{p}", (policies || []).length)}
+        </span>
+        {counts.map(b => (
+          <span key={b.key} className={`chip ${b.tone}`} data-testid={`mesh-sum-${b.key}`} data-n={b.n}>
+            <span className="dot" />{b.key === "unhealthy" ? t.mesh_sum_unhealthy : t[`mesh_st_${b.key}`]} <b>{b.n}</b>
+          </span>
+        ))}
+      </div>
+      <div className="fleet-bar" aria-hidden="true">
+        {total > 0 && counts.filter(b => b.n > 0).map(b => (
+          <span key={b.key} className={b.tone} style={{ width: `${(100 * b.n) / total}%` }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* The deployment's fleet. Read-only on the overview; on the Agents tab each
+   row opens the agent's editor (where the policy is picked) or unenrols.
+   The policy is a word here, never a picker: moving a host is a decision
+   with dependencies, and the editor shows them before "Deploy". */
+function FleetTable({ t, agents, onEdit, onUnenrol, testid = "mesh-fleet" }) {
+  if (!agents || agents.length === 0) return <p className="hint" data-testid={`${testid}-empty`}>{t.mesh_fleet_empty}</p>;
+  const actions = !!(onEdit || onUnenrol);
+  return (
+    <table className="fleet" data-testid={testid}>
       <thead>
         <tr>
           <th>{t.mesh_fleet_host}</th><th>{t.mesh_fleet_status}</th>
           <th>{t.mesh_fleet_policy}</th><th>{t.mesh_fleet_rev}</th>
           <th>{t.mesh_fleet_seen}</th>
-          {onUnenrol && <th>{t.mesh_fleet_actions}</th>}
+          {actions && <th>{t.mesh_fleet_actions}</th>}
         </tr>
       </thead>
       <tbody>
-        {agents.map(a => (
-          <tr key={a.instance_uid} data-testid={`fleet-row-${a.instance_uid.slice(0, 8)}`}
-            data-status={a.status} data-up={a.up ? "1" : "0"}>
-            <td className="mono">{a.hostname || a.instance_uid.slice(0, 12)}</td>
-            <td>
-              <AgentPill status={a.status} t={t} />
-              <span className="hint" style={{ marginLeft: 8 }}>{a.up ? t.mesh_up : t.mesh_down}</span>
-              {a.config_error && (
-                <div className="mono fleet-err" title={a.config_error}>{a.config_error}</div>
-              )}
-            </td>
-            <td className="mono">
-              {onAssign && !a.unenrolled && a.status !== "unenrolled" && pols.length > 0 ? (
-                <select className="select mono" value={a.policy_id || ""} aria-label={t.mesh_fleet_policy}
-                  data-testid={`fleet-policy-${a.instance_uid.slice(0, 8)}`}
-                  onChange={e => e.target.value && onAssign(a.instance_uid, e.target.value)}>
-                  {!a.policy_id && <option value="">—</option>}
-                  {pols.map(p => <option key={p.id} value={p.id}>{p.id}</option>)}
-                </select>
-              ) : (a.policy_id || "—")}
-            </td>
-            <td className="mono">
-              {a.applied_revision != null ? a.applied_revision : "—"}
-              {a.current_revision != null && a.applied_revision !== a.current_revision
-                && <span className="hint"> → {a.current_revision}</span>}
-            </td>
-            <td className="hint">{seenAgo(a.last_seen, t)}</td>
-            {onUnenrol && (
+        {agents.map(a => {
+          const short = a.instance_uid.slice(0, 8);
+          const live = a.status !== "unenrolled";
+          return (
+            <tr key={a.instance_uid} data-testid={`fleet-row-${short}`}
+              data-status={a.status} data-up={a.up ? "1" : "0"}>
+              <td className="mono">{a.hostname || a.instance_uid.slice(0, 12)}</td>
               <td>
-                {a.status !== "unenrolled" && (
-                  <Btn variant="ghost" size="sm" icon="trash" data-testid={`fleet-unenrol-${a.instance_uid.slice(0, 8)}`}
-                    onClick={() => onUnenrol(a.instance_uid)}>{t.mesh_fleet_unenrol}</Btn>
+                <AgentPill status={a.status} t={t} />
+                <span className="hint" style={{ marginLeft: 8 }}>{a.up ? t.mesh_up : t.mesh_down}</span>
+                {a.config_error && (
+                  <div className="mono fleet-err" title={a.config_error}>{a.config_error}</div>
                 )}
               </td>
-            )}
-          </tr>
-        ))}
+              <td className="mono" data-testid={`fleet-policy-${short}`}>{a.policy_id || "—"}</td>
+              <td className="mono">
+                {a.applied_revision != null ? a.applied_revision : "—"}
+                {a.current_revision != null && a.applied_revision !== a.current_revision
+                  && <span className="hint"> → {a.current_revision}</span>}
+              </td>
+              <td className="hint">{seenAgo(a.last_seen, t)}</td>
+              {actions && (
+                <td>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {onEdit && live && (
+                      <Btn variant="outline" size="sm" icon="sliders" data-testid={`fleet-edit-${short}`}
+                        onClick={() => onEdit(a)}>{t.mesh_fleet_edit}</Btn>
+                    )}
+                    {onUnenrol && live && (
+                      <Btn variant="ghost" size="sm" icon="trash" data-testid={`fleet-unenrol-${short}`}
+                        onClick={() => onUnenrol(a.instance_uid)}>{t.mesh_fleet_unenrol}</Btn>
+                    )}
+                  </div>
+                </td>
+              )}
+            </tr>
+          );
+        })}
       </tbody>
     </table>
+  );
+}
+
+function fmtTs(ts, lang) {
+  if (!ts) return "—";
+  try { return new Date(ts * 1000).toLocaleString(lang === "en" ? "en-GB" : lang === "es" ? "es" : "pt-BR"); }
+  catch { return String(ts); }
+}
+
+/* An agent's editor: the facts the host reported, the policy it runs (the
+   one place it is picked), and what that policy brings — integrations,
+   inputs, values — read off the stored policy document so the operator
+   sees the dependencies BEFORE deploying. "Deploy" records the assignment;
+   nothing is pushed, the agent applies on its next check-in (ADR-068). */
+function AgentDialog({ open, onClose, t, lang, d, agent, policies, onDone, onToast }) {
+  const [policy, setPolicy] = useState("");
+  const [doc, setDoc] = useState(null);
+  const [docErr, setDocErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    if (!open || !agent) return;
+    setPolicy(agent.policy_id || ""); setErr(null);
+  }, [open, agent && agent.instance_uid]);
+  useEffect(() => {
+    if (!open || !policy) { setDoc(null); setDocErr(null); return undefined; }
+    let alive = true;
+    setDoc(null); setDocErr(null);
+    API.meshPolicy(d.id, policy)
+      .then(x => { if (alive) setDoc(x); })
+      .catch(e => { if (alive) setDocErr(e.message); });
+    return () => { alive = false; };
+  }, [open, d.id, policy]);
+  if (!open || !agent) return null;
+  const attrs = agent.attributes || {};
+  const host = agent.hostname || agent.instance_uid.slice(0, 12);
+  const dirty = (policy || "") !== (agent.policy_id || "");
+  const acts = ((doc && doc.body) || {}).activations || [];
+  const kv = (k, v, testid) => (
+    <div className="kvrow"><span className="k">{k}</span><span className="v mono" data-testid={testid}>{v}</span></div>
+  );
+  async function deploy() {
+    setBusy(true); setErr(null);
+    try {
+      await API.meshAssignPolicy(d.id, agent.instance_uid, policy);
+      if (onToast) onToast(t.mesh_agent_deployed.replace("{policy}", policy).replace("{host}", host), true);
+      if (onDone) onDone();
+      if (onClose) onClose();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} width={600} busy={busy} testid="agent-dialog"
+      title={t.mesh_agent_dlg_title.replace("{host}", host)}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+        <AgentPill status={agent.status} t={t} />
+        <span className="hint">{agent.up ? t.mesh_up : t.mesh_down} · {seenAgo(agent.last_seen, t)}</span>
+      </div>
+
+      <h4 className="section-title">{t.mesh_agent_facts_h}</h4>
+      {kv(t.mesh_agent_uid, agent.instance_uid, "agent-uid")}
+      {kv(t.mesh_agent_os, [attrs["velox.os"], attrs["velox.arch"]].filter(Boolean).join(" / ") || "—")}
+      {kv(t.mesh_agent_version, attrs["velox.agent.version"] || "—")}
+      {kv(t.mesh_agent_enrolled, fmtTs(agent.enrolled_at, lang))}
+      {kv(t.mesh_fleet_rev, t.mesh_agent_rev
+        .replace("{applied}", agent.applied_revision != null ? agent.applied_revision : "—")
+        .replace("{current}", agent.current_revision != null ? agent.current_revision : "—"), "agent-rev")}
+      {agent.config_error && (
+        <Banner tone="danger" title={t.mesh_agent_cfg_err} style={{ marginTop: 8 }}>
+          <span className="mono" style={{ fontSize: 12 }}>{agent.config_error}</span>
+        </Banner>
+      )}
+
+      <h4 className="section-title" style={{ marginTop: 16 }}>{t.mesh_agent_policy_h}</h4>
+      <p className="hint" style={{ margin: "0 0 8px" }}>{t.mesh_agent_policy_p}</p>
+      <select className="select mono" value={policy} aria-label={t.mesh_fleet_policy} data-testid="agent-policy"
+        onChange={e => setPolicy(e.target.value)} disabled={busy} style={{ maxWidth: 320 }}>
+        {!agent.policy_id && <option value="">{t.mesh_agent_no_policy}</option>}
+        {(policies || []).map(p => <option key={p.id} value={p.id}>{p.id}{p.name && p.name !== p.id ? ` — ${p.name}` : ""}</option>)}
+      </select>
+
+      <h4 className="section-title" style={{ marginTop: 16 }}>{t.mesh_agent_deps_h}</h4>
+      <p className="hint" style={{ margin: "0 0 8px" }}>{t.mesh_agent_deps_p}</p>
+      <div data-testid="agent-deps">
+        {!policy && <p className="hint">{t.mesh_agent_no_policy}</p>}
+        {policy && !doc && !docErr && <p className="hint">{t.mesh_agent_deps_loading}</p>}
+        {docErr && <Banner tone="danger" title={t.mesh_save_err}>{docErr}</Banner>}
+        {doc && (
+          <>
+            <p className="hint mono" style={{ margin: "0 0 6px" }}>{policy} · {t.mesh_revision.replace("{n}", doc.revision)}</p>
+            {acts.length === 0 && <p className="hint">{t.mesh_agent_deps_none}</p>}
+            {acts.map(a => {
+              const inputs = Object.entries(a.inputs || {});
+              return (
+                <div key={a.package_id} className="mesh-card on" style={{ marginBottom: 8 }} data-testid={`agent-dep-${a.package_id}`}>
+                  <div className="mesh-card-head">
+                    <b className="mono">{a.package_id}</b>
+                    <span className="badge mono">{a.package_version}</span>
+                  </div>
+                  {inputs.length === 0 && <span className="hint" style={{ fontSize: 12 }}>{t.mesh_agent_dep_defaults}</span>}
+                  {inputs.length > 0 && (
+                    <div className="mesh-chips">
+                      {inputs.map(([id, v]) => (
+                        <span key={id} className="mesh-chip on" title={Object.entries((v && v.vars) || {}).map(([k, x]) => `${k}=${x}`).join("\n")}>
+                          {id}{Object.keys((v && v.vars) || {}).length ? ` · ${Object.entries(v.vars).map(([k, x]) => `${k}=${x}`).join(", ")}` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
+      </div>
+
+      {err && <Banner tone="danger" title={t.mesh_save_err} style={{ marginTop: 10 }}>{err}</Banner>}
+      <div className="dialog-actions">
+        <Btn variant="ghost" onClick={onClose} disabled={busy}>{t.cancel}</Btn>
+        <Btn variant="primary" icon="check" disabled={busy || !dirty || !policy} data-testid="agent-deploy" onClick={deploy}>
+          {busy ? t.mesh_agent_deploying : t.mesh_agent_deploy}
+        </Btn>
+      </div>
+    </Dialog>
   );
 }
 
@@ -371,101 +536,140 @@ function MeshInstallGuide({ lang, onToast }) {
   );
 }
 
-/* The deployment's Mesh settings (ADR-072 §5): where a host OUTSIDE the
-   cluster reaches this deployment's OpenSearch. One value per deployment,
-   read at compile time, so it is a card here and not a field on every
-   policy form. */
-function MeshSettingsCard({ t, d, onToast }) {
+/* ---- Tab 4: the deployment's Mesh settings (ADR-072 §5) ---------------
+   Where a host OUTSIDE the cluster reaches this deployment's OpenSearch
+   and the Mesh itself. One value each per deployment, read at compile
+   time (os_host) and into the enrolment commands (mesh_url), so they are
+   a screen here and not fields on every policy or token. The controller's
+   own installation stays the admin's, under Settings. -------------------- */
+function SettingsTab({ t, d, status, settings, onSettings, onToast }) {
   const [osHost, setOsHost] = useState("");
-  const [loaded, setLoaded] = useState(null);
+  const [meshUrl, setMeshUrl] = useState("");
   const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
   useEffect(() => {
-    let alive = true;
-    API.meshSettings(d.id)
-      .then(s => { if (alive) { setLoaded(s); setOsHost((s && s.os_host) || ""); } })
-      .catch(() => { if (alive) setLoaded({}); });
-    return () => { alive = false; };
-  }, [d.id]);
-  const dirty = loaded && (osHost.trim() || null) !== ((loaded.os_host || null));
+    if (!settings) return;
+    setOsHost(settings.os_host || ""); setMeshUrl(settings.mesh_url || "");
+  }, [settings]);
+  const loaded = !!settings;
+  const dirty = loaded && ((osHost.trim() || null) !== (settings.os_host || null)
+    || (meshUrl.trim() || null) !== (settings.mesh_url || null));
+  async function save() {
+    setSaving(true); setErr(null);
+    try {
+      const next = { os_host: osHost.trim() || null, mesh_url: meshUrl.trim() || null };
+      await API.meshSaveSettings(d.id, next);
+      onSettings(next);
+      if (onToast) onToast(t.mesh_settings_saved, true);
+    } catch (e) { setErr(e.message); }
+    finally { setSaving(false); }
+  }
   return (
-    <div className="card pad" data-testid="mesh-settings" style={{ marginBottom: 22 }}>
-      <h3 className="section-title">{t.mesh_settings_h}</h3>
-      <p className="hint" style={{ margin: "0 0 10px", maxWidth: "70ch" }}>{t.mesh_settings_p}</p>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <input className="input mono" value={osHost} onChange={e => setOsHost(e.target.value)}
-          placeholder={t.mesh_os_host_ph} aria-label={t.mesh_os_host}
-          data-testid="mesh-policy-os-host" style={{ maxWidth: 300 }} disabled={!loaded} />
-        <Btn variant="primary" size="sm" disabled={!dirty || saving} data-testid="mesh-settings-save"
-          onClick={async () => {
-            setSaving(true);
-            try {
-              await API.meshSaveSettings(d.id, osHost.trim() || null);
-              setLoaded({ os_host: osHost.trim() || null });
-              if (onToast) onToast(t.mesh_settings_saved, true);
-            } catch (e) { if (onToast) onToast(e.message, false); }
-            finally { setSaving(false); }
-          }}>{saving ? t.mesh_saving : t.save}</Btn>
+    <div className="ag-panel" data-testid="mesh-panel-settings">
+      <MeshStatusBanners t={t} status={status} />
+      <div className="card pad" data-testid="mesh-settings" style={{ marginBottom: 18 }}>
+        <h3 className="section-title">{t.mesh_settings_h}</h3>
+        <p className="hint" style={{ margin: "0 0 14px", maxWidth: "70ch" }}>{t.mesh_settings_p}</p>
+
+        <h4 className="section-title">{t.mesh_set_os_h}</h4>
+        <Field label={t.mesh_os_host} htmlFor="mesh-os-host" hint={t.mesh_os_host_hint}>
+          <input className="input mono" id="mesh-os-host" value={osHost} onChange={e => setOsHost(e.target.value)}
+            placeholder={t.mesh_os_host_ph} data-testid="mesh-policy-os-host" style={{ maxWidth: 360 }} disabled={!loaded || saving} />
+        </Field>
+
+        <h4 className="section-title" style={{ marginTop: 14 }}>{t.mesh_set_mesh_h}</h4>
+        <Field label={t.mesh_url} htmlFor="mesh-url" hint={t.mesh_url_hint}>
+          <input className="input mono" id="mesh-url" value={meshUrl} onChange={e => setMeshUrl(e.target.value)}
+            placeholder={t.mesh_url_ph} data-testid="mesh-url" style={{ maxWidth: 360 }} disabled={!loaded || saving} />
+        </Field>
+        <p className="hint" style={{ margin: "0 0 12px" }}>{t.mesh_set_ctrl_p}</p>
+
+        {err && <Banner tone="danger" title={t.mesh_save_err} style={{ marginBottom: 10 }}>{err}</Banner>}
+        <Btn variant="primary" size="sm" disabled={!dirty || saving} data-testid="mesh-settings-save" onClick={save}>
+          {saving ? t.mesh_saving : t.save}
+        </Btn>
       </div>
-      <p className="hint" style={{ margin: "8px 0 0" }}>{t.mesh_os_host_hint}</p>
     </div>
   );
 }
 
-function OverviewTab({ t, d, status, overview, onToast, onTab }) {
+/* ---- Tab 1: the state of the Mesh and the fleet it runs ---------------- */
+function OverviewTab({ t, d, status, overview, onTab }) {
+  const agents = (overview && overview.agents) || [];
   return (
     <div className="ag-panel" data-testid="mesh-panel-overview">
       <MeshStatusBanners t={t} status={status} />
 
       {overview && (
-        <div style={{ marginBottom: 22 }}>
-          <Onboarding t={t} step={overview.onboarding} onTab={onTab} />
-          {overview.seats != null && (
-            <p className="hint" style={{ margin: "10px 0 0" }} data-testid="mesh-seats">
-              {t.mesh_seats.replace("{used}", overview.enrolled_total ?? 0).replace("{seats}", overview.seats)}
-            </p>
-          )}
-        </div>
+        <>
+          <FleetSummary t={t} agents={agents} policies={overview.policies} />
+          <div style={{ marginBottom: 22 }}>
+            <Onboarding t={t} step={overview.onboarding} onTab={onTab} />
+            {overview.seats != null && (
+              <p className="hint" style={{ margin: "10px 0 0" }} data-testid="mesh-seats">
+                {t.mesh_seats.replace("{used}", overview.enrolled_total ?? 0).replace("{seats}", overview.seats)}
+              </p>
+            )}
+          </div>
+
+          <div className="card pad" style={{ marginBottom: 22 }} data-testid="mesh-overview-agents">
+            <div className="fleet-head">
+              <div>
+                <h3 className="section-title" style={{ marginBottom: 2 }}>{t.mesh_ov_agents_h}</h3>
+                <p className="hint" style={{ margin: 0, maxWidth: "70ch" }}>{t.mesh_ov_agents_p}</p>
+              </div>
+              <Btn variant="outline" size="sm" icon="server" onClick={() => onTab("agents")} data-testid="mesh-goto-agents">
+                {t.mesh_tab_agents}
+              </Btn>
+            </div>
+            {agents.length === 0
+              ? <p className="hint" data-testid="mesh-ov-none">{t.mesh_ov_none}</p>
+              : <FleetTable t={t} agents={agents} testid="mesh-overview-fleet" />}
+          </div>
+        </>
       )}
 
-      <MeshSettingsCard t={t} d={d} onToast={onToast} />
-
-      <h3 className="ag-h">{t.mesh_journey_h}</h3>
-      <p className="hint" style={{ margin: "0 0 18px", maxWidth: "70ch" }}>{t.mesh_journey_p}</p>
-
-      <Step n={1} title={t.mesh_j2_h} t={t}>
-        <p className="hint" style={{ margin: "0 0 10px" }}>{t.mesh_j2_p}</p>
-        <Btn variant="ghost" icon="server" onClick={() => onTab("agents")} data-testid="mesh-goto-agents">
-          {t.mesh_tab_agents}
-        </Btn>
-      </Step>
-
-      <Step n={2} title={t.mesh_j3_h} t={t}>
-        <p className="hint" style={{ margin: "0 0 10px" }}>{t.mesh_j3_p}</p>
-        <Btn variant="ghost" icon="layers" onClick={() => onTab("policies")} data-testid="mesh-goto-policies">
-          {t.mesh_tab_policies}
-        </Btn>
-      </Step>
-
-      <Step n={3} title={t.mesh_j4_h} t={t}>
-        <p className="hint" style={{ margin: 0 }}>{t.mesh_j4_p}</p>
-      </Step>
+      {(!overview || agents.length === 0) && (
+        <>
+          <h3 className="ag-h">{t.mesh_journey_h}</h3>
+          <p className="hint" style={{ margin: "0 0 18px", maxWidth: "70ch" }}>{t.mesh_journey_p}</p>
+          <Step n={1} title={t.mesh_j2_h} t={t}>
+            <p className="hint" style={{ margin: "0 0 10px" }}>{t.mesh_j2_p}</p>
+            {!overview && (
+              <Btn variant="ghost" icon="server" onClick={() => onTab("agents")} data-testid="mesh-goto-agents">
+                {t.mesh_tab_agents}
+              </Btn>
+            )}
+          </Step>
+          <Step n={2} title={t.mesh_j3_h} t={t}>
+            <p className="hint" style={{ margin: "0 0 10px" }}>{t.mesh_j3_p}</p>
+            <Btn variant="ghost" icon="layers" onClick={() => onTab("policies")} data-testid="mesh-goto-policies">
+              {t.mesh_tab_policies}
+            </Btn>
+          </Step>
+          <Step n={3} title={t.mesh_j4_h} t={t}>
+            <p className="hint" style={{ margin: 0 }}>{t.mesh_j4_p}</p>
+          </Step>
+        </>
+      )}
     </div>
   );
 }
 
-/* ---- Tab 2: get collection onto a host ------------------------------- */
-function AgentsTab({ t, dep, overview, onReload, onToast }) {
+/* The `--mesh` an agent enrols against: the deployment's published Mesh
+   address when the operator set one, else a placeholder they must replace. */
+function meshArg(settings) {
+  return (settings && settings.mesh_url) || "MESH_URL";
+}
+
+/* ---- Tab 2: the fleet, and how to get collection onto a host ----------- */
+function AgentsTab({ t, lang, dep, overview, settings, onReload, onToast }) {
   const [target, setTarget] = useState(TARGETS[0].key);
+  const [editing, setEditing] = useState(null);
   const d = TARGETS.find(x => x.key === target) || TARGETS[0];
+  const mesh = meshArg(settings);
   let n = 0;
 
-  const assign = async (uid, policy) => {
-    try {
-      await API.meshAssignPolicy(dep.id, uid, policy);
-      if (onToast) onToast(t.mesh_assigned_toast.replace("{policy}", policy), true);
-      if (onReload) onReload();
-    } catch (e) { if (onToast) onToast(e.message, false); }
-  };
   const unenrol = async (uid) => {
     try {
       await API.meshUnenrol(dep.id, uid);
@@ -478,9 +682,11 @@ function AgentsTab({ t, dep, overview, onReload, onToast }) {
     <>
       {overview && (
         <div className="ag-panel" style={{ borderTop: "1px solid var(--border)", borderRadius: "var(--radius)", marginBottom: 18 }}>
+          <FleetSummary t={t} agents={overview.agents} policies={overview.policies} />
           <h3 className="ag-h" style={{ marginBottom: 12 }}>{t.mesh_fleet_h}</h3>
-          <FleetTable t={t} agents={overview.agents} policies={overview.policies}
-            onAssign={assign} onUnenrol={unenrol} />
+          <FleetTable t={t} agents={overview.agents} onEdit={setEditing} onUnenrol={unenrol} />
+          <AgentDialog open={!!editing} onClose={() => setEditing(null)} t={t} lang={lang} d={dep}
+            agent={editing} policies={overview.policies} onDone={onReload} onToast={onToast} />
         </div>
       )}
 
@@ -537,7 +743,7 @@ function AgentsTab({ t, dep, overview, onReload, onToast }) {
           <CmdBlock text={d.agent} t={t} onToast={onToast} />
         </Step>
         <Step n={++n} title={t.mesh_step_enroll} soon t={t}>
-          <CmdBlock text={d.enroll || "sudo velox-agent enroll --mesh MESH_URL --token TOKEN"}
+          <CmdBlock text={(d.enroll || "sudo velox-agent enroll --mesh MESH_URL --token TOKEN").replace("MESH_URL", mesh)}
             t={t} onToast={onToast} />
           <p className="hint" style={{ marginTop: 8 }}>{t.mesh_placeholder_note}</p>
         </Step>
@@ -558,20 +764,56 @@ function AgentsTab({ t, dep, overview, onReload, onToast }) {
 }
 
 /* ---- Tab 3: the deployment's policies ----------------------------------
-   A policy is what a group of hosts runs (ADR-073). It is created here with a
-   name and nothing else; integrations are added to it from the Data tab —
-   the one onboarding, the same one the cluster target uses — so this tab
-   lists, mints tokens and shows rollouts, and never composes. -------- */
-function PoliciesTab({ t, d, overview, onReload, onToast, onTab }) {
+   A policy is what a group of hosts runs (ADR-073). It is created here with
+   a name; its integrations are added, configured and removed right here
+   too — through the SAME dialog the Data tab uses (the one onboarding), with
+   the policy as the fixed target — so this tab never grows a second
+   composer. It also mints tokens and shows rollouts. ------------------- */
+function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast }) {
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState(null);
   const [createErr, setCreateErr] = useState(null);
   const [tokens, setTokens] = useState({});
+  const [catalog, setCatalog] = useState(null);
+  const [catalogErr, setCatalogErr] = useState(null);
+  const [picking, setPicking] = useState(null);
+  const [dialog, setDialog] = useState(null);
+  const [busy, setBusy] = useState({});
   const policies = (overview && overview.policies) || [];
   const agentsByPolicy = {};
   ((overview && overview.agents) || []).forEach(a => { if (a.policy_id && a.status !== "unenrolled") agentsByPolicy[a.policy_id] = (agentsByPolicy[a.policy_id] || 0) + 1; });
   const slug = (n) => n.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "policy";
+  const mesh = meshArg(settings);
+
+  // The catalog, so "add integration" can offer what the registry has. The
+  // dialog then reads the chosen package's inputs itself.
+  useEffect(() => {
+    let alive = true;
+    API.catalog(d.id)
+      .then(v => { if (alive) { setCatalog(v); setCatalogErr(null); } })
+      .catch(e => { if (alive) setCatalogErr(e.message); });
+    return () => { alive = false; };
+  }, [d.id]);
+  const items = (catalog && catalog.integrations) || [];
+  const itemOf = (id) => items.find(x => x.id === id) || { id, title: null };
+
+  const openEdit = async (p, id) => {
+    try {
+      const doc = await API.meshPolicy(d.id, p.id);
+      const act = ((doc.body || {}).activations || []).find(a => a.package_id === id);
+      setDialog({ item: itemOf(id), policy: p.id, editing: true, initial: act ? { inputs: act.inputs || {} } : null });
+    } catch (e) { if (onToast) onToast(e.message, false); }
+  };
+  const remove = async (p, id) => {
+    setBusy(b => ({ ...b, [`${p.id}/${id}`]: true }));
+    try {
+      await API.removeIntegration(d.id, id, p.id);
+      if (onToast) onToast(t.mesh_pol_integ_removed.replace("{id}", id).replace("{policy}", p.id), true);
+      if (onReload) onReload();
+    } catch (e) { if (onToast) onToast(e.message, false); }
+    finally { setBusy(b => ({ ...b, [`${p.id}/${id}`]: false })); }
+  };
 
   if (!overview) {
     return (
@@ -585,6 +827,12 @@ function PoliciesTab({ t, d, overview, onReload, onToast, onTab }) {
 
   return (
     <div className="ag-panel" data-testid="mesh-panel-policies">
+      <AddIntegrationDialog open={!!dialog} onClose={() => setDialog(null)} lang={lang} d={d}
+        item={dialog && dialog.item} policies={policies} meshReady
+        fixedTarget={dialog && dialog.policy} editing={!!(dialog && dialog.editing)} initial={dialog && dialog.initial}
+        agentsByPolicy={agentsByPolicy} onToast={onToast}
+        onDone={() => { setPicking(null); if (onReload) onReload(); }} />
+
       <h3 className="ag-h">{t.mesh_pol_list_h}</h3>
       <p className="hint" style={{ margin: "0 0 14px", maxWidth: "70ch" }}>{t.mesh_pol_list_p}</p>
 
@@ -623,6 +871,8 @@ function PoliciesTab({ t, d, overview, onReload, onToast, onTab }) {
           {policies.map(p => {
             const r = (overview.rollout || {})[p.id] || {};
             const tok = tokens[p.id];
+            const on = p.integrations || [];
+            const candidates = items.filter(it => !on.includes(it.id));
             return (
               <div className="card pad" key={p.id} data-testid={`policy-${p.id}`}>
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -634,17 +884,44 @@ function PoliciesTab({ t, d, overview, onReload, onToast, onTab }) {
                   {r.updating > 0 && <span className="badge yellow">{t.mesh_rollout_wait.replace("{n}", r.updating)}</span>}
                   {r.failed > 0 && <span className="badge red">{t.mesh_rollout_failed.replace("{n}", r.failed)}</span>}
                 </div>
-                <div className="kvrow" style={{ marginTop: 10 }}>
-                  <span className="k">{t.mesh_pol_integrations}</span>
-                  <span className="v sans" data-testid={`policy-integrations-${p.id}`}>
-                    {(p.integrations || []).length
-                      ? (p.integrations || []).map(i => <span key={i} className="badge mono" style={{ marginRight: 6 }}>{i}</span>)
-                      : <span className="hint">{t.mesh_pol_none}</span>}
-                  </span>
+
+                <div style={{ marginTop: 12 }}>
+                  <div className="section-title" style={{ marginBottom: 6 }}>{t.mesh_pol_integrations}</div>
+                  <div data-testid={`policy-integrations-${p.id}`} style={{ display: "grid", gap: 6 }}>
+                    {on.length === 0 && <span className="hint">{t.mesh_pol_none}</span>}
+                    {on.map(id => {
+                      const it = itemOf(id);
+                      const working = busy[`${p.id}/${id}`];
+                      return (
+                        <div key={id} className="mesh-card on" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                          data-testid={`policy-integ-${p.id}-${id}`}>
+                          <b className="mono">{id}</b>
+                          <span className="hint" style={{ marginRight: "auto" }}>{locText(it.title, lang, "")}</span>
+                          <Btn variant="outline" size="sm" icon="sliders" disabled={working} data-testid={`policy-integ-edit-${p.id}-${id}`}
+                            onClick={() => openEdit(p, id)}>{t.mesh_pol_integ_edit}</Btn>
+                          <Btn variant="ghost" size="sm" icon="trash" disabled={working} data-testid={`policy-integ-remove-${p.id}-${id}`}
+                            onClick={() => remove(p, id)}>{t.mesh_pol_integ_remove}</Btn>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
+
+                <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
                   <Btn variant="outline" size="sm" icon="plus" data-testid={`policy-add-${p.id}`}
-                    onClick={() => onTab && onTab("data", null, { policy: p.id })}>{t.mesh_pol_add_integ}</Btn>
+                    onClick={() => setPicking(picking === p.id ? null : p.id)}>{t.mesh_pol_add_integ}</Btn>
+                  {picking === p.id && (
+                    catalogErr ? <span className="hint">{t.mesh_pol_catalog_err.replace("{err}", catalogErr)}</span>
+                      : !catalog ? <span className="hint">{t.integ_loading}</span>
+                        : candidates.length === 0 ? <span className="hint">{t.mesh_pol_all_added}</span>
+                          : (
+                            <select className="select" aria-label={t.mesh_pol_integ_pick} data-testid={`policy-add-pick-${p.id}`} defaultValue=""
+                              onChange={e => { const it = items.find(x => x.id === e.target.value); if (it) setDialog({ item: it, policy: p.id, editing: false, initial: null }); }}>
+                              <option value="" disabled>{t.mesh_pol_integ_pick}</option>
+                              {candidates.map(it => <option key={it.id} value={it.id}>{locText(it.title, lang, it.id)}</option>)}
+                            </select>
+                          )
+                  )}
                   <Btn variant="ghost" size="sm" icon="check" data-testid={`policy-token-${p.id}`}
                     onClick={async () => {
                       try {
@@ -655,7 +932,7 @@ function PoliciesTab({ t, d, overview, onReload, onToast, onTab }) {
                 </div>
                 {tok && (
                   <div style={{ marginTop: 10 }}>
-                    <CmdBlock t={t} onToast={onToast} text={`sudo velox-agent enroll --mesh MESH_URL --token ${tok}`} />
+                    <CmdBlock t={t} onToast={onToast} text={`sudo velox-agent enroll --mesh ${mesh} --token ${tok}`} />
                     <p className="hint" style={{ marginTop: 6 }}>{t.mesh_token_once}</p>
                   </div>
                 )}
@@ -668,13 +945,14 @@ function PoliciesTab({ t, d, overview, onReload, onToast, onTab }) {
   );
 }
 
-const TABS = ["overview", "agents", "policies"];
+const TABS = ["overview", "agents", "policies", "settings"];
 
 /* The `mesh` tab of one deployment: `/deployments/:id/mesh/:sub`. */
-function MeshTab({ d, lang, sub, onSub, onToast, onTab }) {
+function MeshTab({ d, lang, sub, onSub, onToast }) {
   const t = STR[lang] || STR.pt;
   const [status, setStatus] = useState(null);
   const [overview, setOverview] = useState(null);
+  const [settings, setSettings] = useState(null);
   const [tick, setTick] = useState(0);
   const active = TABS.includes(sub) ? sub : "overview";
 
@@ -683,13 +961,16 @@ function MeshTab({ d, lang, sub, onSub, onToast, onTab }) {
     API.meshStatus()
       .then(s => { if (alive) setStatus(s); })
       .catch(() => { if (alive) setStatus({ configured: false }); });
+    API.meshSettings(d.id)
+      .then(s => { if (alive) setSettings(s || {}); })
+      .catch(() => { if (alive) setSettings({}); });
     return () => { alive = false; };
-  }, []);
+  }, [d.id]);
 
   // THIS deployment's fleet (ADR-072), refreshed on a cadence a little under
   // the agents' own poll so "last seen" and a rollout move without the
   // operator reloading. No Mesh simply leaves `overview` null and the
-  // screens fall back to composing a policy that cannot yet be saved.
+  // screens say so.
   useEffect(() => {
     let alive = true;
     const load = () => API.meshOverview(d.id)
@@ -710,18 +991,22 @@ function MeshTab({ d, lang, sub, onSub, onToast, onTab }) {
           { key: "overview", label: t.mesh_tab_overview, icon: "grid" },
           { key: "agents", label: t.mesh_tab_agents, icon: "server" },
           { key: "policies", label: t.mesh_tab_policies, icon: "layers" },
+          { key: "settings", label: t.mesh_tab_settings, icon: "sliders" },
         ]}
         value={active} onChange={onSub} label={t.tab_mesh} testidPrefix="mesh-tab" />
 
       {active === "overview" && (
-        <OverviewTab t={t} d={d} status={status} overview={overview} onToast={onToast} onTab={onSub} />
+        <OverviewTab t={t} d={d} status={status} overview={overview} onTab={onSub} />
       )}
       {active === "agents" && (
-        <AgentsTab t={t} dep={d} overview={overview} onReload={reload} onToast={onToast} />
+        <AgentsTab t={t} lang={lang} dep={d} overview={overview} settings={settings} onReload={reload} onToast={onToast} />
       )}
       {active === "policies" && (
-        <PoliciesTab t={t} d={d} overview={overview}
-          onReload={reload} onToast={onToast} onTab={onTab} />
+        <PoliciesTab t={t} lang={lang} d={d} overview={overview} settings={settings}
+          onReload={reload} onToast={onToast} />
+      )}
+      {active === "settings" && (
+        <SettingsTab t={t} d={d} status={status} settings={settings} onSettings={setSettings} onToast={onToast} />
       )}
     </div>
   );

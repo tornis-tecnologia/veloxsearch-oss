@@ -23,18 +23,25 @@ that is easy to break and expensive to notice:
     decide, not ours.
   - **The commands are upstream's, verbatim.**
   - **The Mesh's absence is a state, not an error.**
-  - **The Policies tab creates, never composes.** A policy is a name; the
-    integrations come from the Data tab, and "add integration" there hands
-    the operator over with the policy preselected.
+  - **The Policies tab creates, and manages integrations through the one
+    dialog.** A policy is a name; "add integration" on its card picks a
+    catalog package and opens the SAME dialog the Data tab uses with the
+    policy as the fixed target; each integration on the card can be
+    configured or removed there. No second composer.
   - **One dialog for both targets.** `Add` on the Data tab asks where (this
     cluster / a policy / a new one) and what (the package's inputs, with
     their variables); the same dialog adds to a policy and shows the inputs
     collectable on a host only.
   - **The Data tab shows every target an integration is on**, and removes
     per target.
-  - **With a controller, the fleet is the product.** The guided first run is
-    ordered, each agent row's up/down agrees with its derived status, and an
-    agent can only be moved between THIS deployment's policies.
+  - **With a controller, the fleet is the product.** The overview opens on
+    the fleet summary (one count per status, one bar) and the configured
+    agents; the guided first run is ordered; each agent row's up/down agrees
+    with its derived status; the policy is NOT a picker on the row — the
+    agent's editor shows the policy, what it brings (integrations, inputs,
+    values) and deploys the change, within THIS deployment's policies only.
+  - **The addresses hosts need are a settings sub-tab**: the published
+    OpenSearch endpoint and the Mesh address the enrol commands print.
   - Nothing renders an i18n key or `undefined` in any of three languages.
 
 Usage:
@@ -121,9 +128,32 @@ with sync_playwright() as p:
     overview = page.locator('[data-testid="mesh-panel-overview"]').inner_text()
     check("VELOX_MESH_URL" not in overview,
           "the controller's install commands are NOT on the deployment's tab (they are the admin's, under Settings)")
-    osh = page.locator('[data-testid="mesh-settings"] [data-testid="mesh-policy-os-host"]')
-    check(osh.count() == 1, "the published OpenSearch endpoint is a deployment setting on the overview")
     has_mesh = page.locator('[data-testid="mesh-ready"]').count() == 1
+    if has_mesh:
+        page.wait_for_selector('[data-testid="mesh-summary"]', timeout=15000)
+        chips = page.locator('[data-testid^="mesh-sum-"]')
+        check(chips.count() == 5, f"the fleet summary has one chip per status bucket (got {chips.count()})")
+        total = page.locator('[data-testid="mesh-overview-fleet"] tbody tr').count()
+        summed = sum(int(chips.nth(i).get_attribute("data-n")) for i in range(chips.count()))
+        check(summed == total, f"the chips add up to the configured agents ({summed} = {total})")
+        check(page.locator('[data-testid="mesh-overview-agents"]').count() == 1,
+              "the overview lists the configured agents")
+        check(page.locator('[data-testid="mesh-overview-fleet"] select').count() == 0,
+              "the overview's agent list is read-only")
+
+    # ---- the settings sub-tab: the addresses hosts need ------------------
+    page.click('[data-testid="mesh-tab-settings"]')
+    page.wait_for_selector('[data-testid="mesh-panel-settings"]', timeout=15000)
+    check(page.url.endswith(f"/deployments/{dep}/mesh/settings"),
+          f"settings has a URL (got {page.url})")
+    check(page.locator('[data-testid="mesh-settings"] [data-testid="mesh-policy-os-host"]').count() == 1,
+          "the published OpenSearch endpoint is a deployment setting")
+    check(page.locator('[data-testid="mesh-settings"] [data-testid="mesh-url"]').count() == 1,
+          "the Mesh address for agents is a deployment setting")
+    check(page.locator('[data-testid="mesh-settings-save"]').is_disabled(),
+          "save is disabled until something changes")
+    body = page.locator('[data-testid="mesh-panel-settings"]').inner_text()
+    check("undefined" not in body and "mesh_" not in body, "the settings screen renders no raw key")
 
     # ---- the install guide ----------------------------------------------
     page.click('[data-testid="mesh-tab-agents"]')
@@ -156,11 +186,11 @@ with sync_playwright() as p:
           "redhat: names EPEL as the RHEL 9 route")
     check("3.2" in page.locator(".ag-facts").inner_text(), "the minimum Fluent Bit version is shown")
 
-    # ---- the policies tab: create, never compose --------------------------
+    # ---- the policies tab: create, and manage integrations in place ------
     page.goto(f"{base}/deployments/{dep}/mesh/policies", wait_until="networkidle")
     page.wait_for_selector('[data-testid="mesh-panel-policies"]', timeout=15000)
     check(page.locator('[data-testid^="mesh-integration-"]').count() == 0,
-          "no integration grid on the policies tab: integrations are added from the Data tab (ADR-073)")
+          "no integration grid on the policies tab: the one dialog adds to a policy (ADR-073)")
     if not has_mesh:
         check(page.locator('[data-testid="mesh-policy-save-blocked"]').count() == 1,
               "without a Mesh the policies tab says so instead of offering a form")
@@ -175,13 +205,36 @@ with sync_playwright() as p:
         body = page.locator(f'[data-testid="policy-{E2E_POLICY}"]').inner_text()
         check("undefined" not in body and "mesh_" not in body, "the policy card renders no raw key")
 
-        # "Add integration" hands over to the Data tab with the policy preselected.
+        # "Add integration" on the card picks a package and opens the one
+        # dialog with the policy fixed: no "where" step.
+        if page.locator(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]').count() == 1:
+            page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
+            page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
         page.click(f'[data-testid="policy-add-{E2E_POLICY}"]')
-        page.wait_for_selector('[data-testid="integrations-tab"]', timeout=15000)
-        check(f"/deployments/{dep}/data" in page.url and f"policy={E2E_POLICY}" in page.url,
-              f"'add integration' opens the Data tab with ?policy={E2E_POLICY}")
-        page.wait_for_selector('[data-testid="integ-adding-to"]', timeout=10000)
-        check(True, "the Data tab says which policy it is adding to")
+        page.wait_for_selector(f'[data-testid="policy-add-pick-{E2E_POLICY}"]', timeout=20000)
+        page.select_option(f'[data-testid="policy-add-pick-{E2E_POLICY}"]', E2E_INTEG)
+        page.wait_for_selector('[data-testid="add-integration"]', timeout=10000)
+        page.wait_for_selector('[data-testid="add-integration-configure"]', timeout=15000)
+        check(page.locator('[data-testid="add-integration-where"]').count() == 0,
+              "from a policy card the dialog skips 'where': the policy is the target")
+        check(E2E_POLICY in page.locator('[data-testid="add-integration-configure"]').inner_text(),
+              "the dialog names the policy it adds to")
+        page.click('[data-testid="add-integration-save"]')
+        page.wait_for_selector('[data-testid="add-integration"]', state="detached", timeout=60000)
+        page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', timeout=30000)
+        check(True, f"{E2E_INTEG} is listed on the policy card")
+        # Configure reopens the same dialog on the recorded values.
+        page.click(f'[data-testid="policy-integ-edit-{E2E_POLICY}-{E2E_INTEG}"]')
+        page.wait_for_selector('[data-testid="add-integration-configure"]', timeout=15000)
+        check(page.locator('[data-testid^="add-input-"][data-on="1"]').count() >= 1,
+              "configure shows the recorded input on")
+        page.keyboard.press("Escape")
+        page.wait_for_selector('[data-testid="add-integration"]', state="detached", timeout=10000)
+        page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
+        page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
+        check(True, "an integration is removed from the policy on its card")
+        check(page.locator(f'[data-testid="policy-token-{E2E_POLICY}"]').count() == 1,
+              "the card still mints the enrolment token")
 
     # ---- the one onboarding dialog ----------------------------------------
     page.goto(f"{base}/deployments/{dep}/data" + (f"?policy={E2E_POLICY}" if has_mesh else ""), wait_until="networkidle")
@@ -251,9 +304,12 @@ with sync_playwright() as p:
         check(page.locator('[data-testid="mesh-seats"]').count() == 1,
               "seats are shown as the installation's, not the deployment's")
         page.click('[data-testid="mesh-tab-agents"]')
-        page.wait_for_selector('[data-testid="mesh-fleet"], [data-testid="mesh-panel-overview"]', timeout=15000)
+        page.wait_for_selector('[data-testid="mesh-fleet"], [data-testid="mesh-fleet-empty"]', timeout=15000)
         rows = page.locator('[data-testid="mesh-fleet"] tbody tr')
         check(True, f"the fleet renders ({rows.count()} agent(s))")
+        check(page.locator('[data-testid="mesh-fleet"] select').count() == 0,
+              "no policy picker on the rows: the policy is changed in the agent's editor")
+        edited = False
         for i in range(rows.count()):
             r = rows.nth(i)
             status = r.get_attribute("data-status")
@@ -261,10 +317,28 @@ with sync_playwright() as p:
             expected_up = "0" if status in ("offline", "unenrolled") else "1"
             check(up == expected_up, f"row {i}: {status} is up={expected_up}")
             check(status not in r.inner_text(), f"row {i}: the status is a word, not {status!r}")
-            sel = r.locator('select[data-testid^="fleet-policy-"]')
-            if sel.count():
+            btn = r.locator('[data-testid^="fleet-edit-"]')
+            if btn.count() and not edited:
+                edited = True
+                btn.click()
+                page.wait_for_selector('[data-testid="agent-dialog"]', timeout=10000)
+                sel = page.locator('[data-testid="agent-policy"]')
+                check(sel.count() == 1, "the editor is where the policy is picked")
                 check(sel.locator("option").count() >= 1,
-                      f"row {i}: the policy picker offers this deployment's policies only")
+                      "the picker offers this deployment's policies only")
+                page.wait_for_selector('[data-testid="agent-deps"]', timeout=10000)
+                if sel.input_value():
+                    page.wait_for_function(
+                        "() => { const d = document.querySelector('[data-testid=\"agent-deps\"]'); return d && !/…$/.test(d.innerText.trim()); }",
+                        timeout=15000)
+                    deps = page.locator('[data-testid="agent-deps"]').inner_text()
+                    check(sel.input_value() in deps, "the dependencies name the policy and its revision")
+                check(page.locator('[data-testid="agent-deploy"]').is_disabled(),
+                      "deploy is disabled while nothing changed")
+                dlg = page.locator('[data-testid="agent-dialog"]').inner_text()
+                check("undefined" not in dlg and "mesh_" not in dlg, "the editor renders no raw key")
+                page.keyboard.press("Escape")
+                page.wait_for_selector('[data-testid="agent-dialog"]', state="detached", timeout=10000)
         check(page.locator('[data-testid^="agents-panel-"]').count() == 1,
               "the install guide sits under the fleet")
 

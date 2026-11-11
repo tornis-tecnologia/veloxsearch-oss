@@ -12,7 +12,7 @@
      /deployments/new           the create wizard
      /deployments/:id           → /deployments/:id/overview
      /deployments/:id/:tab      overview | data | backup | access | config | activity | mesh
-     /deployments/:id/mesh/:sub overview | agents | policies (ADR-072: the Mesh
+     /deployments/:id/mesh/:sub overview | agents | policies | settings (ADR-072: the Mesh
                                 is the deployment's)
      /deployments/:id/data?integration=<id>&policy=<cluster|id>
                                 opens the add-integration dialog on that
@@ -38,7 +38,7 @@ import { useState, useEffect, useCallback } from "react";
 const TABS = ["overview", "data", "backup", "access", "config", "activity", "mesh"];
 // The Mesh tab's sub-screens (ADR-072). Same rule as the deployment tabs:
 // an unknown segment falls back rather than 404ing a bookmark.
-const MESH_TABS = ["overview", "agents", "policies"];
+const MESH_TABS = ["overview", "agents", "policies", "settings"];
 const TAB_ALIASES = {
   edit: "config", integrations: "data", snapshot: "backup",
   security: "access", auth: "access",

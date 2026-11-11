@@ -92,19 +92,24 @@ to the tenant namespace.
 
 `mesh_check.py <base> <user> <pw> [shot.png]` drives the **Velox Mesh** tab
 of a deployment (`/deployments/:id/mesh/:sub`, ADR-072; the old `/mesh` must
-redirect): the journey, the per-target install guide (whose tab set mirrors
-the Fluent Bit project's own downloads index, ADR-069) and the policy
-policies tab, which creates a policy by name and never composes (ADR-073).
-It then drives the one integration onboarding on the Data tab: *Add* opens a
-dialog that asks where (this cluster, a policy — preselected when the Mesh
-tab sent the operator over with `?policy=` — or a new one) and what (the
-package's inputs and variables), and the row then shows every target the
-integration is on, removable per target. When a Velox Mesh is configured it
-also checks the fleet: the guided first run is ordered and each agent row's
-up/down agrees with its derived status. Without one, the dialog's only target
-is the cluster and the fleet assertions are skipped. It needs Playwright
-and an authenticated install; it touches no cluster state, so it is safe
-against a live one.
+redirect): the overview (fleet summary and configured agents), the settings
+sub-tab (the published OpenSearch endpoint and the Mesh address for agents),
+the per-target install guide (whose tab set mirrors the Fluent Bit project's
+own downloads index, ADR-069) and the policies tab, which creates a policy
+by name and adds, configures and removes its integrations through the SAME
+dialog the Data tab uses, with the policy as the fixed target (ADR-073). It
+then drives that onboarding on the Data tab: *Add* opens a dialog that asks
+where (this cluster, a policy — preselected when sent over with `?policy=` —
+or a new one) and what (the package's inputs and variables), and the row
+then shows every target the integration is on, removable per target. When a
+Velox Mesh is configured it also checks the fleet: the guided first run is
+ordered, each agent row's up/down agrees with its derived status, the row
+has no policy picker, and the agent's editor shows the policy, its
+dependencies and a *Deploy* that stays disabled until something changes.
+Without one, the dialog's only target is the cluster and the fleet
+assertions are skipped. It creates `e2e-policy` on the Mesh and adds/removes
+`ssh` on it; it touches no cluster state otherwise. Needs Playwright and an
+authenticated install.
 
 ## Fixtures
 

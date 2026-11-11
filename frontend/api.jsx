@@ -218,11 +218,12 @@ const API = {
   // The stored document of one policy: its activations and their inputs.
   // -> { revision, body: { activations: [{package_id, package_version, inputs}], ... } }
   meshPolicy: (deployment, policy_id) => call("mesh_policy", { deployment, policy_id }),
-  // The deployment's Mesh settings, off its CR. -> { os_host }
+  // The deployment's Mesh settings, off its CR. -> { os_host, mesh_url }
   meshSettings: (deployment) => call("mesh_settings", { deployment }),
-  // `os_host` null clears it (= the in-cluster service name).
-  meshSaveSettings: (deployment, os_host) =>
-    call("mesh_save_settings", { deployment, os_host }),
+  // `os_host` null clears it (= the in-cluster service name); `mesh_url`
+  // null clears it (= the `MESH_URL` placeholder in the enrol commands).
+  meshSaveSettings: (deployment, { os_host, mesh_url }) =>
+    call("mesh_save_settings", { deployment, os_host: os_host || null, mesh_url: mesh_url || null }),
   // ── OTel observability stack (ADR-053) ───────────────────────
   // The SECOND collection option, additive to the recipes above: it ships OTLP
   // traces + metrics, which is what fills the Trace Analytics, service-map and

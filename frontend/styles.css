@@ -1159,7 +1159,23 @@ button.badge { cursor: pointer; }
 .mesh-chip.on { color: var(--ok-text); border-color: var(--accent-border); }
 .mesh-chip svg { opacity: .8; }
 
-/* Velox Mesh: the fleet table and the guided first run. */
+/* Velox Mesh: the fleet summary (status counts and one stacked bar), the
+   fleet table and the guided first run. */
+.fleet-sum { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; font-size: 12.5px; }
+.fleet-sum .chip { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+.fleet-sum .chip b { font-family: var(--font-mono); font-weight: 500; color: var(--text); }
+.fleet-sum .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
+.fleet-sum .chip.green .dot { background: var(--accent); }
+.fleet-sum .chip.red .dot { background: var(--danger); }
+.fleet-sum .chip.yellow .dot { background: var(--warn); }
+.fleet-sum .total { margin-right: auto; color: var(--text-3); }
+.fleet-bar { display: flex; height: 6px; border-radius: 99px; overflow: hidden; background: var(--surface-2); margin: 8px 0 0; }
+.fleet-bar span { display: block; height: 100%; background: var(--border-strong); }
+.fleet-bar span.green { background: var(--accent); }
+.fleet-bar span.red { background: var(--danger); }
+.fleet-bar span.yellow { background: var(--warn); }
+.fleet-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.pill.unknown { color: var(--text-3); background: var(--surface-2); border-color: var(--border); }
 .fleet { width: 100%; border-collapse: collapse; font-size: 13px; }
 .fleet th {
   text-align: left; font-weight: 500; color: var(--text-3);

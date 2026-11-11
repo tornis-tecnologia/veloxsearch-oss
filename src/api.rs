@@ -2595,19 +2595,7 @@ mod server {
         Json(req): Json<MeshSaveSettingsReq>,
     ) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
-        if let Some(h) = req.settings.os_host.as_deref() {
-            // A host[:port], nothing more: this lands verbatim in a collector's
-            // output stanza, and a scheme or a path there is a config error an
-            // operator would only meet as "healthy agent, no data".
-            let h = h.trim();
-            if !h.is_empty()
-                && (h.contains("://") || h.contains('/') || h.chars().any(char::is_whitespace))
-            {
-                return Err(ApiError::bad_request(
-                    "os_host is a host or host:port, without scheme or path",
-                ));
-            }
-        }
+        crate::mesh::validate_settings(&req.settings).map_err(ApiError::bad_request)?;
         crate::k8s::set_mesh_settings(&dep, &req.settings)
             .await
             .map_err(ApiError::internal)?;

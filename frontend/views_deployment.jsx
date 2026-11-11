@@ -1649,7 +1649,7 @@ function DeploymentView({ d, lang, hostNodes = [], tab, sub, integration, policy
       {tab === "overview" && <OverviewTab d={d} lang={lang} onToast={onToast} hostNodes={hostNodes} onTab={onTab} />}
       {tab === "data" && <DataTab d={d} lang={lang} onToggleStack={onToggleStack} onToast={onToast} locked={locked} onTab={onTab}
         intent={integration || policy ? { integration, policy } : null} />}
-      {tab === "mesh" && <MeshTab d={d} lang={lang} sub={sub} onSub={s => onTab("mesh", s)} onToast={onToast} onTab={onTab} />}
+      {tab === "mesh" && <MeshTab d={d} lang={lang} sub={sub} onSub={s => onTab("mesh", s)} onToast={onToast} />}
       {tab === "backup" && <SnapshotTab d={d} lang={lang} onToast={onToast} locked={locked} />}
       {tab === "access" && <AccessTab d={d} lang={lang} onReset={onResetPass} onToast={onToast} locked={locked} />}
       {tab === "config" && <ConfigTab d={d} lang={lang} onSave={onSaveEdit} onToast={onToast} locked={locked} onDeleteRequest={() => setConfirm(true)} />}

@@ -60,8 +60,11 @@ and coupled to the Mesh's agentic side.
    cluster collector or stores the policy's next revision. The same dialog
    edits an activation (target fixed, recorded values filled in). The Mesh
    tab's Policies screen creates policies (a name), mints tokens and shows
-   rollouts; its "add integration" sends the operator to the Data tab with
-   the policy preselected. There is no second composer.
+   rollouts, and — since 2026-11-11 — adds, configures and removes a
+   policy's integrations **through this same dialog**, opened with the
+   policy as the fixed target (the catalog package is picked on the card;
+   the dialog skips "where"). There is no second composer: one dialog, two
+   doors. The `?policy=` handoff to the Data tab remains a deep link.
 
 4. **The backend half belongs to whoever still uses it.** Removing an
    integration from one target (`POST /api/remove_integration`) takes it off
@@ -94,10 +97,10 @@ and coupled to the Mesh's agentic side.
   in-binary recipe (cluster template, pipeline, index template) and require
   the recipe's resources to be a subset of the package's, so a 1.2 package
   may add inputs and never lose the recipe.
-- `tests/mesh_check.py` drives the dialog on both targets. The Mesh tab's
-  composer test ids (`mesh-integration-*`, `mesh-policy-save`) are gone;
-  `mesh-policy-create`, `policy-*`, `add-integration*` and `add-target-*`
-  replace them.
+- `tests/mesh_check.py` drives the dialog on both targets and from the
+  policy card. The Mesh tab's composer test ids (`mesh-integration-*`,
+  `mesh-policy-save`) are gone; `mesh-policy-create`, `policy-*`,
+  `policy-integ-*`, `add-integration*` and `add-target-*` replace them.
 - Not done here: saved objects per input are installed but the Data tab's
   "receiving" check still reads the first input's index family; a metrics
   input's data shows in Dashboards, not on the tab's row.
