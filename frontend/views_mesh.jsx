@@ -48,7 +48,7 @@
 import { useEffect, useState } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Banner, Btn, Dialog, Field, Icon, Tabs, copyText, fmtBytes } from "./ui.jsx";
+import { Banner, Btn, Confirm, Dialog, Field, Icon, Menu, Tabs, copyText, fmtBytes } from "./ui.jsx";
 import { AddIntegrationDialog, locText } from "./views_integration_add.jsx";
 
 /* ADR-069 decision 3; `velox_agent::preflight::MIN_FLUENT_BIT` is the same
@@ -1220,37 +1220,167 @@ function OverviewTab({ t, lang, dep, status, overview, settings, onReload, onToa
 
 /* ---- Tab 3: the deployment's policies ----------------------------------
    A policy is what a group of hosts runs (ADR-073): its integrations, and
-   the two endpoints it is bound to (ADR-072 amendment 2). It is created
-   here with a name and both endpoints; its integrations are added,
-   configured and removed right here too — through the SAME dialog the Data
-   tab uses (the one onboarding), with the policy as the fixed target — so
-   this tab never grows a second composer. "Add agent" on a card opens the
-   add-agent dialog with the policy chosen. ----------------------------- */
-function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddAgent, onTab }) {
+   the two endpoints it is bound to (ADR-072 amendment 2). One table — name,
+   agents, revision, integrations — with the actions in a menu per row:
+   endpoints (rebind, a new revision), settings (the policy's binding,
+   rollout and integrations, each configured or removed through the SAME
+   dialog the Data tab uses — the one onboarding), add integration, add
+   agent (the add-agent page with the policy chosen) and remove (refused by
+   the Mesh while a live agent runs it). "New policy" opens a dialog that
+   asks for the name and both endpoints. ----------------------------------- */
+
+/* Name + both endpoints. Shared by the tab's "New policy" button. */
+function NewPolicyDialog({ open, onClose, t, d, settings, onDone, onToast }) {
+  const osEps = (settings && settings.os_endpoints) || [];
+  const meshEps = (settings && settings.mesh_endpoints) || [];
   const [name, setName] = useState("");
   const [os, setOs] = useState("");
   const [mesh, setMesh] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [created, setCreated] = useState(null);
-  const [createErr, setCreateErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    if (!open) return;
+    setName(""); setErr(null);
+    // One of each configured = chosen; more = the operator picks.
+    setOs(osEps.length === 1 ? osEps[0].id : "");
+    setMesh(meshEps.length === 1 ? meshEps[0].id : "");
+  }, [open]);
+  if (!open) return null;
+  const id = slugOf(name) || "policy";
+  async function create() {
+    setBusy(true); setErr(null);
+    try {
+      await API.meshCreatePolicy(d.id, id, name.trim(), os, mesh);
+      if (onToast) onToast(t.mesh_pol_created.replace("{id}", id), true);
+      if (onDone) onDone();
+      if (onClose) onClose();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+  return (
+    <Dialog open={open} onClose={busy ? undefined : onClose} width={600} busy={busy} testid="mesh-policy-new-dialog"
+      title={t.mesh_pol_new_h}>
+      <p className="hint" style={{ margin: "0 0 14px" }}>{t.mesh_pol_new_dlg_p}</p>
+      <div style={{ display: "grid", gap: 12 }}>
+        <label style={{ display: "grid", gap: 6 }}>
+          <span className="section-title" style={{ margin: 0 }}>{t.mesh_policy_name}</span>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <input className="input" value={name} onChange={e => setName(e.target.value)} disabled={busy} autoFocus
+              placeholder={t.mesh_pol_new_ph} aria-label={t.mesh_policy_name} data-testid="mesh-policy-name" style={{ maxWidth: 320 }}
+              onKeyDown={e => { if (e.key === "Enter" && name.trim() && os && mesh && !busy) create(); }} />
+            {name.trim() && <span className="hint mono">{id}</span>}
+          </div>
+        </label>
+        <EndpointPickers t={t} settings={settings} os={os} mesh={mesh} onOs={setOs} onMesh={setMesh} disabled={busy} prefix="mesh-policy" />
+      </div>
+      {err && <Banner tone="danger" title={t.mesh_save_err} style={{ marginTop: 12 }}>{err}</Banner>}
+      <div className="dialog-actions">
+        <Btn variant="ghost" onClick={onClose} disabled={busy}>{t.cancel}</Btn>
+        <Btn variant="primary" icon="plus" disabled={busy || !name.trim() || !os || !mesh} data-testid="mesh-policy-create" onClick={create}>
+          {busy ? t.mesh_saving : t.mesh_pol_create}
+        </Btn>
+      </div>
+    </Dialog>
+  );
+}
+
+/* Pick a package for a policy; the one onboarding dialog then configures it
+   with the policy fixed. */
+function PickIntegrationDialog({ open, onClose, t, lang, policy, items, catalogErr, catalogLoaded, onPick }) {
+  if (!open || !policy) return null;
+  const on = policy.integrations || [];
+  const candidates = items.filter(it => !on.includes(it.id));
+  return (
+    <Dialog open={open} onClose={onClose} width={520} testid="policy-add-dialog"
+      title={t.mesh_pol_add_integ_dlg.replace("{id}", policy.id)}>
+      {catalogErr ? <p className="hint">{t.mesh_pol_catalog_err.replace("{err}", catalogErr)}</p>
+        : !catalogLoaded ? <p className="hint">{t.integ_loading}</p>
+          : candidates.length === 0 ? <p className="hint">{t.mesh_pol_all_added}</p>
+            : (
+              <select className="select" aria-label={t.mesh_pol_integ_pick} data-testid={`policy-add-pick-${policy.id}`} defaultValue=""
+                onChange={e => { const it = items.find(x => x.id === e.target.value); if (it) onPick(it); }} style={{ width: "100%" }}>
+                <option value="" disabled>{t.mesh_pol_integ_pick}</option>
+                {candidates.map(it => <option key={it.id} value={it.id}>{locText(it.title, lang, it.id)}</option>)}
+              </select>
+            )}
+      <div className="dialog-actions">
+        <Btn variant="ghost" onClick={onClose}>{t.cancel}</Btn>
+      </div>
+    </Dialog>
+  );
+}
+
+/* A policy's settings: what it is bound to, how its rollout stands, and its
+   integrations — each configured or removed in place. */
+function PolicySettingsDialog({ open, onClose, t, lang, policy, settings, rollout, agents, itemOf, busy,
+  onEndpoints, onAddIntegration, onEditIntegration, onRemoveIntegration }) {
+  if (!open || !policy) return null;
+  const p = policy;
+  const r = rollout || {};
+  const on = p.integrations || [];
+  return (
+    <Dialog open={open} onClose={onClose} width={760} testid="policy-settings-dialog"
+      title={t.mesh_pol_settings_dlg.replace("{id}", p.id)}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <b>{p.name}</b><span className="hint mono">{p.id}</span>
+        <span className="badge">{t.mesh_pol_agents.replace("{n}", agents)}</span>
+        <span className="badge mono">{t.mesh_revision.replace("{n}", p.current_revision)}</span>
+        {r.complete && <span className="badge green">{t.mesh_rollout_done}</span>}
+        {r.updating > 0 && <span className="badge yellow">{t.mesh_rollout_wait.replace("{n}", r.updating)}</span>}
+        {r.failed > 0 && <span className="badge red">{t.mesh_rollout_failed.replace("{n}", r.failed)}</span>}
+      </div>
+
+      <div className="section-title" style={{ marginBottom: 6 }}>{t.mesh_pol_endpoints_h}</div>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
+        <PolicyEndpointsLine t={t} ids={p} settings={settings} testid={`policy-endpoints-${p.id}`} />
+        <Btn variant="ghost" size="sm" icon="sliders" onClick={onEndpoints}>{t.mesh_pol_endpoints_change}</Btn>
+      </div>
+
+      <div className="section-title" style={{ marginBottom: 6 }}>{t.mesh_pol_integrations}</div>
+      <div data-testid={`policy-integrations-${p.id}`} style={{ display: "grid", gap: 6 }}>
+        {on.length === 0 && <span className="hint">{t.mesh_pol_none}</span>}
+        {on.map(id => {
+          const it = itemOf(id);
+          const working = busy[`${p.id}/${id}`];
+          return (
+            <div key={id} className="mesh-card on" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}
+              data-testid={`policy-integ-${p.id}-${id}`}>
+              <b className="mono">{id}</b>
+              <span className="hint" style={{ marginRight: "auto" }}>{locText(it.title, lang, "")}</span>
+              <Btn variant="outline" size="sm" icon="sliders" disabled={working} data-testid={`policy-integ-edit-${p.id}-${id}`}
+                onClick={() => onEditIntegration(id)}>{t.mesh_pol_integ_edit}</Btn>
+              <Btn variant="ghost" size="sm" icon="trash" disabled={working} data-testid={`policy-integ-remove-${p.id}-${id}`}
+                onClick={() => onRemoveIntegration(id)}>{t.mesh_pol_integ_remove}</Btn>
+            </div>
+          );
+        })}
+      </div>
+      <div className="dialog-actions">
+        <Btn variant="outline" icon="plus" onClick={onAddIntegration} data-testid={`policy-settings-add-${p.id}`}>{t.mesh_pol_add_integ}</Btn>
+        <Btn variant="primary" onClick={onClose} data-testid="policy-settings-close">{t.close}</Btn>
+      </div>
+    </Dialog>
+  );
+}
+
+function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddAgent, onTab }) {
+  const [newOpen, setNewOpen] = useState(false);
   const [catalog, setCatalog] = useState(null);
   const [catalogErr, setCatalogErr] = useState(null);
-  const [picking, setPicking] = useState(null);
-  const [dialog, setDialog] = useState(null);
-  const [epDialog, setEpDialog] = useState(null);
+  const [picking, setPicking] = useState(null);      // policy id: the package picker
+  const [dialog, setDialog] = useState(null);        // the one onboarding dialog
+  const [epDialog, setEpDialog] = useState(null);    // policy id: rebind
+  const [settingsOf, setSettingsOf] = useState(null); // policy id: settings
+  const [removing, setRemoving] = useState(null);    // policy id: confirm
+  const [removeBusy, setRemoveBusy] = useState(false);
   const [busy, setBusy] = useState({});
   const policies = (overview && overview.policies) || [];
+  const byId = (id) => policies.find(p => p.id === id) || null;
   const agentsByPolicy = {};
   ((overview && overview.agents) || []).forEach(a => { if (a.policy_id && a.status !== "unenrolled") agentsByPolicy[a.policy_id] = (agentsByPolicy[a.policy_id] || 0) + 1; });
   const osEps = (settings && settings.os_endpoints) || [];
   const meshEps = (settings && settings.mesh_endpoints) || [];
   const haveEps = osEps.length > 0 && meshEps.length > 0;
-
-  // One of each configured = chosen; more = the operator picks.
-  useEffect(() => {
-    if (osEps.length === 1) setOs(osEps[0].id);
-    if (meshEps.length === 1) setMesh(meshEps[0].id);
-  }, [settings]);
 
   // The catalog, so "add integration" can offer what the registry has. The
   // dialog then reads the chosen package's inputs itself.
@@ -1264,21 +1394,31 @@ function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddA
   const items = (catalog && catalog.integrations) || [];
   const itemOf = (id) => items.find(x => x.id === id) || { id, title: null };
 
-  const openEdit = async (p, id) => {
+  const openEdit = async (pid, id) => {
     try {
-      const doc = await API.meshPolicy(d.id, p.id);
+      const doc = await API.meshPolicy(d.id, pid);
       const act = ((doc.body || {}).activations || []).find(a => a.package_id === id);
-      setDialog({ item: itemOf(id), policy: p.id, editing: true, initial: act ? { inputs: act.inputs || {} } : null });
+      setDialog({ item: itemOf(id), policy: pid, editing: true, initial: act ? { inputs: act.inputs || {} } : null });
     } catch (e) { if (onToast) onToast(e.message, false); }
   };
-  const remove = async (p, id) => {
-    setBusy(b => ({ ...b, [`${p.id}/${id}`]: true }));
+  const removeInteg = async (pid, id) => {
+    setBusy(b => ({ ...b, [`${pid}/${id}`]: true }));
     try {
-      await API.removeIntegration(d.id, id, p.id);
-      if (onToast) onToast(t.mesh_pol_integ_removed.replace("{id}", id).replace("{policy}", p.id), true);
+      await API.removeIntegration(d.id, id, pid);
+      if (onToast) onToast(t.mesh_pol_integ_removed.replace("{id}", id).replace("{policy}", pid), true);
       if (onReload) onReload();
     } catch (e) { if (onToast) onToast(e.message, false); }
-    finally { setBusy(b => ({ ...b, [`${p.id}/${id}`]: false })); }
+    finally { setBusy(b => ({ ...b, [`${pid}/${id}`]: false })); }
+  };
+  const removePolicy = async () => {
+    setRemoveBusy(true);
+    try {
+      await API.meshDeletePolicy(d.id, removing);
+      if (onToast) onToast(t.mesh_pol_removed.replace("{id}", removing), true);
+      setRemoving(null);
+      if (onReload) onReload();
+    } catch (e) { if (onToast) onToast(e.message, false); }
+    finally { setRemoveBusy(false); }
   };
 
   if (!overview) {
@@ -1297,12 +1437,33 @@ function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddA
         item={dialog && dialog.item} policies={policies} meshReady
         fixedTarget={dialog && dialog.policy} editing={!!(dialog && dialog.editing)} initial={dialog && dialog.initial}
         agentsByPolicy={agentsByPolicy} onToast={onToast}
-        onDone={() => { setPicking(null); if (onReload) onReload(); }} />
+        onDone={() => { if (onReload) onReload(); }} />
       <PolicyEndpointsDialog open={!!epDialog} onClose={() => setEpDialog(null)} t={t} d={d}
-        policy={epDialog} settings={settings} onDone={onReload} onToast={onToast} />
+        policy={byId(epDialog)} settings={settings} onDone={onReload} onToast={onToast} />
+      <NewPolicyDialog open={newOpen} onClose={() => setNewOpen(false)} t={t} d={d} settings={settings}
+        onDone={onReload} onToast={onToast} />
+      <PickIntegrationDialog open={!!picking} onClose={() => setPicking(null)} t={t} lang={lang} policy={byId(picking)}
+        items={items} catalogErr={catalogErr} catalogLoaded={!!catalog}
+        onPick={it => { const pid = picking; setPicking(null); setDialog({ item: it, policy: pid, editing: false, initial: null }); }} />
+      <PolicySettingsDialog open={!!settingsOf && !dialog && !epDialog && !picking} onClose={() => setSettingsOf(null)}
+        t={t} lang={lang} policy={byId(settingsOf)} settings={settings}
+        rollout={(overview.rollout || {})[settingsOf]} agents={agentsByPolicy[settingsOf] || 0}
+        itemOf={itemOf} busy={busy}
+        onEndpoints={() => setEpDialog(settingsOf)} onAddIntegration={() => setPicking(settingsOf)}
+        onEditIntegration={id => openEdit(settingsOf, id)} onRemoveIntegration={id => removeInteg(settingsOf, id)} />
+      <Confirm open={!!removing} title={removing ? t.mesh_pol_remove_h.replace("{id}", removing) : ""}
+        body={t.mesh_pol_remove_p} confirmLabel={t.mesh_pol_act_remove} cancelLabel={t.cancel} busy={removeBusy}
+        confirmTestid="policy-remove-confirm" onCancel={() => setRemoving(null)} onConfirm={removePolicy} />
 
-      <h3 className="ag-h">{t.mesh_pol_list_h}</h3>
-      <p className="hint" style={{ margin: "0 0 14px", maxWidth: "70ch" }}>{t.mesh_pol_list_p}</p>
+      <div className="fleet-head" style={{ marginBottom: 14 }}>
+        <div>
+          <h3 className="ag-h" style={{ marginBottom: 2 }}>{t.mesh_pol_list_h}</h3>
+          <p className="hint" style={{ margin: 0, maxWidth: "70ch" }}>{t.mesh_pol_list_p}</p>
+        </div>
+        <Btn variant="primary" size="sm" icon="plus" disabled={!haveEps} onClick={() => setNewOpen(true)} data-testid="mesh-policy-new-open">
+          {t.mesh_pol_new_h}
+        </Btn>
+      </div>
 
       {settings && !haveEps && (
         <Banner tone="warn" title={t.mesh_pol_need_ep_h} testid="mesh-policy-need-endpoints" style={{ marginBottom: 14 }}
@@ -1311,114 +1472,58 @@ function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddA
         </Banner>
       )}
 
-      <div className="card pad" style={{ marginBottom: 18 }} data-testid="mesh-policy-new">
-        <h3 className="section-title">{t.mesh_pol_new_h}</h3>
-        <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <input className="input" value={name} onChange={e => setName(e.target.value)} disabled={!haveEps}
-              placeholder={t.mesh_pol_new_ph} aria-label={t.mesh_policy_name} data-testid="mesh-policy-name" style={{ maxWidth: 280 }} />
-            {name.trim() && <span className="hint mono">{slugOf(name) || "policy"}</span>}
-          </div>
-          <EndpointPickers t={t} settings={settings} os={os} mesh={mesh} onOs={setOs} onMesh={setMesh} disabled={!haveEps || creating} prefix="mesh-policy" />
-          <div>
-            <Btn variant="primary" icon="plus" disabled={creating || !name.trim() || !os || !mesh} data-testid="mesh-policy-create"
-              onClick={async () => {
-                setCreating(true); setCreateErr(null);
-                try {
-                  const id = slugOf(name) || "policy";
-                  await API.meshCreatePolicy(d.id, id, name.trim(), os, mesh);
-                  setCreated(id); setName("");
-                  if (onToast) onToast(t.mesh_pol_created.replace("{id}", id), true);
-                  if (onReload) onReload();
-                } catch (e) {
-                  setCreateErr(e.message);
-                } finally { setCreating(false); }
-              }}>{creating ? t.mesh_saving : t.mesh_pol_create}</Btn>
-          </div>
-        </div>
-        {createErr && <Banner tone="danger" title={t.mesh_save_err} style={{ marginTop: 10 }}>{createErr}</Banner>}
-        {created && (
-          <p className="hint" style={{ marginTop: 8 }} data-testid="mesh-policy-saved">
-            {t.mesh_pol_created.replace("{id}", created)}
-          </p>
-        )}
-      </div>
-
       {policies.length === 0 ? (
         <p className="hint" data-testid="mesh-policies-empty">{t.mesh_pol_empty}</p>
       ) : (
-        <div style={{ display: "grid", gap: 10 }}>
-          {policies.map(p => {
-            const r = (overview.rollout || {})[p.id] || {};
-            const on = p.integrations || [];
-            const candidates = items.filter(it => !on.includes(it.id));
-            const eps = policyEndpoints(p, settings);
-            return (
-              <div className="card pad" key={p.id} data-testid={`policy-${p.id}`}>
-                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                  <b className="mono">{p.id}</b>
-                  <span className="hint">{p.name}</span>
-                  <span className="badge">{t.mesh_pol_agents.replace("{n}", agentsByPolicy[p.id] || 0)}</span>
-                  <span className="badge mono">{t.mesh_revision.replace("{n}", p.current_revision)}</span>
-                  {settings && !eps.complete && <span className="badge red" data-testid={`policy-endpoints-missing-${p.id}`}>{t.mesh_pol_incomplete}</span>}
-                  {r.complete && <span className="badge green">{t.mesh_rollout_done}</span>}
-                  {r.updating > 0 && <span className="badge yellow">{t.mesh_rollout_wait.replace("{n}", r.updating)}</span>}
-                  {r.failed > 0 && <span className="badge red">{t.mesh_rollout_failed.replace("{n}", r.failed)}</span>}
-                </div>
-
-                <div style={{ marginTop: 12 }}>
-                  <div className="section-title" style={{ marginBottom: 6 }}>{t.mesh_pol_endpoints_h}</div>
-                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                    <PolicyEndpointsLine t={t} ids={p} settings={settings} testid={`policy-endpoints-${p.id}`} />
-                    <Btn variant="ghost" size="sm" icon="sliders" data-testid={`policy-endpoints-edit-${p.id}`}
-                      onClick={() => setEpDialog(p)}>{t.mesh_pol_endpoints_change}</Btn>
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 12 }}>
-                  <div className="section-title" style={{ marginBottom: 6 }}>{t.mesh_pol_integrations}</div>
-                  <div data-testid={`policy-integrations-${p.id}`} style={{ display: "grid", gap: 6 }}>
-                    {on.length === 0 && <span className="hint">{t.mesh_pol_none}</span>}
-                    {on.map(id => {
-                      const it = itemOf(id);
-                      const working = busy[`${p.id}/${id}`];
-                      return (
-                        <div key={id} className="mesh-card on" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}
-                          data-testid={`policy-integ-${p.id}-${id}`}>
-                          <b className="mono">{id}</b>
-                          <span className="hint" style={{ marginRight: "auto" }}>{locText(it.title, lang, "")}</span>
-                          <Btn variant="outline" size="sm" icon="sliders" disabled={working} data-testid={`policy-integ-edit-${p.id}-${id}`}
-                            onClick={() => openEdit(p, id)}>{t.mesh_pol_integ_edit}</Btn>
-                          <Btn variant="ghost" size="sm" icon="trash" disabled={working} data-testid={`policy-integ-remove-${p.id}-${id}`}
-                            onClick={() => remove(p, id)}>{t.mesh_pol_integ_remove}</Btn>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap", alignItems: "center" }}>
-                  <Btn variant="outline" size="sm" icon="plus" data-testid={`policy-add-${p.id}`}
-                    onClick={() => setPicking(picking === p.id ? null : p.id)}>{t.mesh_pol_add_integ}</Btn>
-                  {picking === p.id && (
-                    catalogErr ? <span className="hint">{t.mesh_pol_catalog_err.replace("{err}", catalogErr)}</span>
-                      : !catalog ? <span className="hint">{t.integ_loading}</span>
-                        : candidates.length === 0 ? <span className="hint">{t.mesh_pol_all_added}</span>
-                          : (
-                            <select className="select" aria-label={t.mesh_pol_integ_pick} data-testid={`policy-add-pick-${p.id}`} defaultValue=""
-                              onChange={e => { const it = items.find(x => x.id === e.target.value); if (it) setDialog({ item: it, policy: p.id, editing: false, initial: null }); }}>
-                              <option value="" disabled>{t.mesh_pol_integ_pick}</option>
-                              {candidates.map(it => <option key={it.id} value={it.id}>{locText(it.title, lang, it.id)}</option>)}
-                            </select>
-                          )
-                  )}
-                  <Btn variant="ghost" size="sm" icon="server" data-testid={`policy-add-agent-${p.id}`}
-                    onClick={() => onAddAgent(p.id)}>{t.mesh_pol_add_agent}</Btn>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <table className="fleet" data-testid="mesh-policies-table">
+          <thead>
+            <tr>
+              <th>{t.mesh_pol_col_name}</th><th>{t.mesh_pol_col_agents}</th>
+              <th>{t.mesh_pol_col_rev}</th><th>{t.mesh_pol_col_integ}</th>
+              <th style={{ textAlign: "right" }}>{t.mesh_fleet_actions}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {policies.map(p => {
+              const r = (overview.rollout || {})[p.id] || {};
+              const on = p.integrations || [];
+              const eps = policyEndpoints(p, settings);
+              const live = agentsByPolicy[p.id] || 0;
+              return (
+                <tr key={p.id} data-testid={`policy-${p.id}`} data-complete={eps.complete ? "1" : "0"}>
+                  <td>
+                    <b>{p.name || p.id}</b> <span className="hint mono" style={{ fontSize: 11.5 }}>{p.id}</span>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                      {settings && !eps.complete && <span className="badge red" data-testid={`policy-endpoints-missing-${p.id}`}>{t.mesh_pol_incomplete}</span>}
+                      {r.updating > 0 && <span className="badge yellow">{t.mesh_rollout_wait.replace("{n}", r.updating)}</span>}
+                      {r.failed > 0 && <span className="badge red">{t.mesh_rollout_failed.replace("{n}", r.failed)}</span>}
+                    </div>
+                  </td>
+                  <td className="tnum" data-testid={`policy-agents-${p.id}`}>{live}</td>
+                  <td className="mono">{p.current_revision}</td>
+                  <td data-testid={`policy-integ-list-${p.id}`}>
+                    {on.length === 0 ? <span className="hint">{t.mesh_pol_none}</span> : (
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {on.map(id => <span key={id} className="badge green">{locText(itemOf(id).title, lang, id)}</span>)}
+                      </div>
+                    )}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    <Menu label={t.mesh_fleet_actions} testid={`policy-menu-${p.id}`} items={[
+                      { label: t.mesh_pol_act_endpoints, icon: "plug", testid: `policy-endpoints-edit-${p.id}`, onClick: () => setEpDialog(p.id) },
+                      { label: t.mesh_pol_act_settings, icon: "sliders", testid: `policy-settings-${p.id}`, onClick: () => setSettingsOf(p.id) },
+                      { label: t.mesh_pol_add_integ, icon: "plus", testid: `policy-add-${p.id}`, onClick: () => setPicking(p.id) },
+                      { label: t.mesh_pol_add_agent, icon: "server", testid: `policy-add-agent-${p.id}`, disabled: !eps.complete, onClick: () => onAddAgent(p.id) },
+                      { sep: true },
+                      { label: live ? t.mesh_pol_remove_busy.replace("{n}", live) : t.mesh_pol_act_remove, icon: "trash", danger: true,
+                        disabled: live > 0, testid: `policy-remove-${p.id}`, onClick: () => setRemoving(p.id) },
+                    ]} />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       )}
     </div>
   );

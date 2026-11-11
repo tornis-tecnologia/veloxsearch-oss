@@ -200,81 +200,124 @@ with sync_playwright() as p:
     body = page.locator('[data-testid="mesh-panel-settings"]').inner_text()
     check("undefined" not in body and "mesh_" not in body, "the settings screen renders no raw key")
 
-    # ---- the policies tab: endpoints required, integrations in place -----
+    # ---- the policies tab: a table, actions in a menu per row, a "New
+    # policy" dialog that asks for both endpoints -------------------------
     page.goto(f"{base}/deployments/{dep}/mesh/policies", wait_until="networkidle")
     page.wait_for_selector('[data-testid="mesh-panel-policies"]', timeout=15000)
     check(page.locator('[data-testid^="mesh-integration-"]').count() == 0,
           "no integration grid on the policies tab: the one dialog adds to a policy (ADR-073)")
+
+    def row_action(pid, item):
+        """Open a row's action menu and pick an item."""
+        page.click(f'[data-testid="policy-menu-{pid}"]')
+        page.wait_for_selector(f'[data-testid="{item}"]', timeout=5000)
+        page.click(f'[data-testid="{item}"]')
+
+    def create_policy(name, pid):
+        page.click('[data-testid="mesh-policy-new-open"]')
+        page.wait_for_selector('[data-testid="mesh-policy-new-dialog"]', timeout=10000)
+        check(page.locator('[data-testid="mesh-policy-os-endpoint"]').count() == 1
+              and page.locator('[data-testid="mesh-policy-mesh-endpoint"]').count() == 1,
+              "the new-policy dialog asks for its OpenSearch and Mesh endpoints")
+        page.fill('[data-testid="mesh-policy-name"]', name)
+        page.select_option('[data-testid="mesh-policy-os-endpoint"]', E2E_OS)
+        page.select_option('[data-testid="mesh-policy-mesh-endpoint"]', E2E_MESH)
+        page.click('[data-testid="mesh-policy-create"]')
+        page.wait_for_selector('[data-testid="mesh-policy-new-dialog"]', state="detached", timeout=20000)
+        page.wait_for_selector(f'[data-testid="policy-{pid}"]', timeout=20000)
+
     if not has_mesh:
         check(page.locator('[data-testid="mesh-policy-save-blocked"]').count() == 1,
               "without a Mesh the policies tab says so instead of offering a form")
     else:
-        page.wait_for_selector('[data-testid="mesh-policy-create"]', timeout=10000)
-        check(page.locator('[data-testid="mesh-policy-os-endpoint"]').count() == 1
-              and page.locator('[data-testid="mesh-policy-mesh-endpoint"]').count() == 1,
-              "creating a policy asks for its OpenSearch and Mesh endpoints")
+        page.wait_for_selector('[data-testid="mesh-policies-table"], [data-testid="mesh-policies-empty"]', timeout=10000)
+        check(page.locator('[data-testid="mesh-policy-new-open"]').count() == 1, "a 'New policy' button on top")
         if page.locator(f'[data-testid="policy-{E2E_POLICY}"]').count() == 0:
-            page.fill('[data-testid="mesh-policy-name"]', "E2E policy")
-            check(page.locator('[data-testid="mesh-policy-create"]').is_disabled()
-                  or page.locator('[data-testid="mesh-policy-os-endpoint"]').input_value() != "",
-                  "a name alone does not create: both endpoints are required")
-            page.select_option('[data-testid="mesh-policy-os-endpoint"]', E2E_OS)
-            page.select_option('[data-testid="mesh-policy-mesh-endpoint"]', E2E_MESH)
-            page.click('[data-testid="mesh-policy-create"]')
-            page.wait_for_selector(f'[data-testid="policy-{E2E_POLICY}"]', timeout=20000)
-        check(page.locator(f'[data-testid="policy-{E2E_POLICY}"]').count() == 1,
-              f"the policy exists ({E2E_POLICY})")
-        # A policy from before the amendment has no endpoints: the card says
+            create_policy("E2E policy", E2E_POLICY)
+        check(page.locator(f'[data-testid="policy-{E2E_POLICY}"]').count() == 1, f"the policy exists ({E2E_POLICY})")
+        heads = page.locator('[data-testid="mesh-policies-table"] thead').inner_text().lower()
+        check(all(w in heads for w in ("polic", "agent", "revis", "integra")),
+              f"the table's columns: policy, agents, revision, integrations, actions ({heads.strip()})")
+        page.click(f'[data-testid="policy-menu-{E2E_POLICY}"]')
+        for item in ("policy-endpoints-edit", "policy-settings", "policy-add", "policy-add-agent", "policy-remove"):
+            check(page.locator(f'[data-testid="{item}-{E2E_POLICY}"]').count() == 1, f"the row's menu offers {item}")
+        page.keyboard.press("Escape")
+
+        # A policy from before the amendment has no endpoints: the row says
         # so, and binding it is a dialog that makes a new revision.
-        eps = page.locator(f'[data-testid="policy-endpoints-{E2E_POLICY}"]')
-        if eps.get_attribute("data-complete") != "1":
+        if page.locator(f'[data-testid="policy-{E2E_POLICY}"]').get_attribute("data-complete") != "1":
             check(page.locator(f'[data-testid="policy-endpoints-missing-{E2E_POLICY}"]').count() == 1,
-                  "an unbound policy is flagged on its card")
-            page.click(f'[data-testid="policy-endpoints-edit-{E2E_POLICY}"]')
+                  "an unbound policy is flagged on its row")
+            row_action(E2E_POLICY, f"policy-endpoints-edit-{E2E_POLICY}")
             page.wait_for_selector('[data-testid="policy-endpoints-dialog"]', timeout=10000)
             page.select_option('[data-testid="policy-ep-os-endpoint"]', E2E_OS)
             page.select_option('[data-testid="policy-ep-mesh-endpoint"]', E2E_MESH)
             page.click('[data-testid="policy-ep-save"]')
             page.wait_for_selector('[data-testid="policy-endpoints-dialog"]', state="detached", timeout=30000)
-            page.wait_for_selector(f'[data-testid="policy-endpoints-{E2E_POLICY}"][data-complete="1"]', timeout=30000)
-        check(page.locator(f'[data-testid="policy-endpoints-{E2E_POLICY}"]').get_attribute("data-complete") == "1",
-              "the card shows the policy bound to both endpoints")
-        check(E2E_OS not in page.locator(f'[data-testid="policy-endpoints-{E2E_POLICY}"]').inner_text()
-              or "10.43.207.250" in page.locator(f'[data-testid="policy-endpoints-{E2E_POLICY}"]').inner_text(),
-              "the binding is shown by name and address, not by id")
+            page.wait_for_selector(f'[data-testid="policy-{E2E_POLICY}"][data-complete="1"]', timeout=30000)
+        check(page.locator(f'[data-testid="policy-{E2E_POLICY}"]').get_attribute("data-complete") == "1",
+              "the row shows the policy bound to both endpoints")
         body = page.locator(f'[data-testid="policy-{E2E_POLICY}"]').inner_text()
-        check("undefined" not in body and "mesh_" not in body, "the policy card renders no raw key")
-        check(page.locator(f'[data-testid="policy-add-agent-{E2E_POLICY}"]').count() == 1
-              and page.locator(f'[data-testid="policy-token-{E2E_POLICY}"]').count() == 0,
-              "the card adds an agent through the page; no bare token button")
+        check("undefined" not in body and "mesh_" not in body, "the policy row renders no raw key")
 
-        # "Add integration" on the card picks a package and opens the one
-        # dialog with the policy fixed: no "where" step.
+        # Settings: the binding, by name and address, and the integrations.
+        row_action(E2E_POLICY, f"policy-settings-{E2E_POLICY}")
+        page.wait_for_selector('[data-testid="policy-settings-dialog"]', timeout=10000)
+        eps = page.locator(f'[data-testid="policy-endpoints-{E2E_POLICY}"]')
+        check(eps.get_attribute("data-complete") == "1" and "10.43.207.250" in eps.inner_text(),
+              "settings show the binding by name and address")
         if page.locator(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]').count() == 1:
             page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
             page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
-        page.click(f'[data-testid="policy-add-{E2E_POLICY}"]')
+        page.click('[data-testid="policy-settings-close"]')
+        page.wait_for_selector('[data-testid="policy-settings-dialog"]', state="detached", timeout=10000)
+
+        # "Add integration" picks a package and opens the one dialog with the
+        # policy fixed: no "where" step.
+        row_action(E2E_POLICY, f"policy-add-{E2E_POLICY}")
         page.wait_for_selector(f'[data-testid="policy-add-pick-{E2E_POLICY}"]', timeout=20000)
         page.select_option(f'[data-testid="policy-add-pick-{E2E_POLICY}"]', E2E_INTEG)
         page.wait_for_selector('[data-testid="add-integration"]', timeout=10000)
         page.wait_for_selector('[data-testid="add-integration-configure"]', timeout=15000)
         check(page.locator('[data-testid="add-integration-where"]').count() == 0,
-              "from a policy card the dialog skips 'where': the policy is the target")
+              "from a policy the dialog skips 'where': the policy is the target")
         check(E2E_POLICY in page.locator('[data-testid="add-integration-configure"]').inner_text(),
               "the dialog names the policy it adds to")
         page.click('[data-testid="add-integration-save"]')
         page.wait_for_selector('[data-testid="add-integration"]', state="detached", timeout=60000)
-        page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', timeout=30000)
-        check(True, f"{E2E_INTEG} is listed on the policy card")
+        page.wait_for_function(
+            f"() => (document.querySelector('[data-testid=\"policy-integ-list-{E2E_POLICY}\"]') || {{}}).innerText?.toLowerCase().includes('ssh')",
+            timeout=30000)
+        check(True, f"{E2E_INTEG} is listed on the policy's row")
+        row_action(E2E_POLICY, f"policy-settings-{E2E_POLICY}")
+        page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', timeout=15000)
         page.click(f'[data-testid="policy-integ-edit-{E2E_POLICY}-{E2E_INTEG}"]')
         page.wait_for_selector('[data-testid="add-integration-configure"]', timeout=15000)
         check(page.locator('[data-testid^="add-input-"][data-on="1"]').count() >= 1,
               "configure shows the recorded input on")
         page.keyboard.press("Escape")
         page.wait_for_selector('[data-testid="add-integration"]', state="detached", timeout=10000)
+        page.wait_for_selector('[data-testid="policy-settings-dialog"]', timeout=10000)
         page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
         page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
-        check(True, "an integration is removed from the policy on its card")
+        check(True, "an integration is removed from the policy in its settings")
+        page.click('[data-testid="policy-settings-close"]')
+
+        # Remove: a throwaway policy goes; one with live agents cannot.
+        if page.locator('[data-testid="policy-e2e-remove"]').count() == 0:
+            create_policy("E2E remove", "e2e-remove")
+        row_action("e2e-remove", "policy-remove-e2e-remove")
+        page.wait_for_selector('[data-testid="policy-remove-confirm"]', timeout=10000)
+        page.click('[data-testid="policy-remove-confirm"]')
+        page.wait_for_selector('[data-testid="policy-e2e-remove"]', state="detached", timeout=20000)
+        check(True, "a policy without agents is removed")
+        busy = [r for r in page.locator('[data-testid^="policy-agents-"]').all() if r.inner_text().strip() not in ("", "0")]
+        if busy:
+            pid = busy[0].get_attribute("data-testid").removeprefix("policy-agents-")
+            page.click(f'[data-testid="policy-menu-{pid}"]')
+            item = page.locator(f'[data-testid="policy-remove-{pid}"]')
+            check(item.is_disabled(), f"removing {pid}, which live agents run, is disabled")
+            page.keyboard.press("Escape")
 
     # ---- the overview IS the fleet (the Agents tab merged into it), and
     # "Add agent" is a page in steps, not a dialog ---------------------------
@@ -336,7 +379,8 @@ with sync_playwright() as p:
 
         # From a policy card too, with the policy on the URL and chosen.
         page.goto(f"{base}/deployments/{dep}/mesh/policies", wait_until="networkidle")
-        page.wait_for_selector(f'[data-testid="policy-add-agent-{E2E_POLICY}"]', timeout=15000)
+        page.wait_for_selector(f'[data-testid="policy-menu-{E2E_POLICY}"]', timeout=15000)
+        page.click(f'[data-testid="policy-menu-{E2E_POLICY}"]')
         page.click(f'[data-testid="policy-add-agent-{E2E_POLICY}"]')
         page.wait_for_selector('[data-testid="add-agent-page"]', timeout=10000)
         check(f"policy={E2E_POLICY}" in page.url, f"a policy card opens the page with the policy on the URL ({page.url})")
@@ -400,18 +444,19 @@ with sync_playwright() as p:
         check(page.locator(f'[data-testid="remove-{E2E_INTEG}-{E2E_POLICY}"]').count() == 0,
               "per-policy removal is not on the Data tab")
         page.keyboard.press("Escape")
-        # Received-data facts live on the deployment's overview.
+        # The deployment's overview no longer carries a received-data table.
         page.goto(f"{base}/deployments/{dep}/overview", wait_until="networkidle")
-        page.wait_for_selector(f'[data-testid="ov-receiving-{E2E_INTEG}"]', timeout=30000)
-        row = page.locator(f'[data-testid="ov-receiving-{E2E_INTEG}"]').inner_text()
-        check(E2E_POLICY not in row and ("política" in row or "policy" in row or "polític" in row),
-              f"the overview row says where it is collected, by count ({row.strip()[:60]})")
-        # Removal from the policy is on the policy's card.
+        page.wait_for_selector('[data-testid="tile-docs"]', timeout=30000)
+        check(page.locator('[data-testid="ov-receiving"]').count() == 0, "no 'Data received' panel on the overview")
+        # Removal from the policy is in the policy's settings.
         page.goto(f"{base}/deployments/{dep}/mesh/policies", wait_until="networkidle")
+        page.wait_for_selector(f'[data-testid="policy-menu-{E2E_POLICY}"]', timeout=15000)
+        page.click(f'[data-testid="policy-menu-{E2E_POLICY}"]')
+        page.click(f'[data-testid="policy-settings-{E2E_POLICY}"]')
         page.wait_for_selector(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]', timeout=15000)
         page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
         page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
-        check(True, "removal is per target, on the policy's card")
+        check(True, "removal is per target, in the policy's settings")
     else:
         page.click(f'[data-testid="integ-menu-{E2E_INTEG}"]')
         page.click(f'[data-testid="uninstall-{E2E_INTEG}"]')

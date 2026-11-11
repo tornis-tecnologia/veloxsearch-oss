@@ -2565,6 +2565,17 @@ mod server {
         mesh_forward(&scope, req, "policy").await
     }
 
+    /// Delete one of the deployment's policies. The Mesh refuses (400, with
+    /// the count) while a live agent runs it — every agent runs a policy
+    /// (ADR-072 amendment 2). OpenSearch is not touched: the policy's
+    /// `veloxagent-*` artifacts are shared by name (ADR-071).
+    async fn mesh_delete_policy(
+        scope: Scope,
+        Json(req): Json<MeshDepReq>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
+        mesh_forward(&scope, req, "delete_policy").await
+    }
+
     /// Unenrol a host from the deployment's fleet.
     async fn mesh_unenrol(
         scope: Scope,
@@ -3476,6 +3487,7 @@ mod server {
         RoutePolicy { path: "/mesh_save_policy", policy: TenantScoped, note: "compiles a policy against VERIFIED packages and stores it as a new revision; the destination deployment is resolve-before-mutate, because a policy writes that deployment's data path." },
         RoutePolicy { path: "/mesh_enrollment_token", policy: TenantScoped, note: "mints a token that enrols a HOST into one of the deployment's policies; the Mesh refuses a policy of another deployment (ADR-072 §3)." },
         RoutePolicy { path: "/mesh_assign_policy", policy: TenantScoped, note: "moves one of the deployment's hosts between its policies; another deployment's policy is refused — re-enrol instead (ADR-072 §3)." },
+        RoutePolicy { path: "/mesh_delete_policy", policy: TenantScoped, note: "deletes one of the deployment's policies; the Mesh refuses while a live agent runs it (every agent runs a policy, ADR-072 amendment 2); resolve-before-mutate." },
         RoutePolicy { path: "/mesh_unenrol", policy: TenantScoped, note: "unenrols one of the deployment's hosts; the agent is refused on its next check-in." },
         RoutePolicy { path: "/mesh_policy", policy: TenantScoped, note: "the current document of one of the deployment's policies (its activations and their inputs, ADR-073); resolve-before-read." },
         RoutePolicy { path: "/mesh_settings", policy: TenantScoped, note: "the deployment's Mesh settings — its named OpenSearch and Mesh endpoints — off its CR (ADR-072 §5, amendment 2)." },
@@ -3584,6 +3596,7 @@ mod server {
             .route(p("/mesh_enrollment_token"), post(mesh_enrollment_token))
             .route(p("/mesh_assign_policy"), post(mesh_assign_policy))
             .route(p("/mesh_unenrol"), post(mesh_unenrol))
+            .route(p("/mesh_delete_policy"), post(mesh_delete_policy))
             .route(p("/mesh_policy"), post(mesh_policy))
             .route(p("/mesh_settings"), post(mesh_settings))
             .route(p("/mesh_save_settings"), post(mesh_save_settings))

@@ -178,12 +178,14 @@ async fn opamp(
     store::checkin(
         &st.pg,
         &agent.instance_uid,
-        applied_revision,
-        applied_hash.as_deref(),
-        status.as_str(),
-        &error,
-        health.as_ref(),
-        attributes.as_ref(),
+        &store::Checkin {
+            applied_revision,
+            applied_hash: applied_hash.as_deref(),
+            config_status: status.as_str(),
+            config_error: &error,
+            health: health.as_ref(),
+            attributes: attributes.as_ref(),
+        },
     )
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -564,6 +566,20 @@ async fn assign(
         .map_err(store_err)
 }
 
+/// Delete one of the deployment's policies; refused (400, with the count)
+/// while a live agent runs it.
+async fn delete_policy(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<PolicyIdReq>,
+) -> ApiResult<StatusCode> {
+    console_auth(&st, &headers)?;
+    store::delete_policy(&st.pg, &req.dep, &req.policy_id)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(store_err)
+}
+
 #[derive(Deserialize)]
 struct AgentIdReq {
     #[serde(flatten)]
@@ -646,6 +662,7 @@ async fn main() {
         .route("/api/mesh/enrollment_token", post(mint_token))
         .route("/api/mesh/assign_policy", post(assign))
         .route("/api/mesh/unenrol", post(unenrol))
+        .route("/api/mesh/delete_policy", post(delete_policy))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {

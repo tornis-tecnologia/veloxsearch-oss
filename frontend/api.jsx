@@ -211,6 +211,9 @@ const API = {
     call("mesh_assign_policy", { deployment, instance_uid, policy_id }),
   meshUnenrol: (deployment, instance_uid) =>
     call("mesh_unenrol", { deployment, instance_uid }),
+  // Refused (400, with the count) while a live agent runs the policy.
+  meshDeletePolicy: (deployment, policy_id) =>
+    call("mesh_delete_policy", { deployment, policy_id }),
   // An empty policy (ADR-073): the thing integrations are then added to —
   // bound to one OpenSearch and one Mesh endpoint of the deployment's
   // settings, both required (ADR-072 amendment 2). -> { revision }

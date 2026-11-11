@@ -465,10 +465,6 @@ function OverviewTab({ d, lang, onToast, hostNodes, onTab }) {
         </div>
       </div>
 
-      {/* What arrives, per integration: the receiving facts moved here from
-          the Data tab, which is now the catalogue alone. */}
-      <ReceivingPanel d={d} lang={lang} onTab={onTab} />
-
       {/* One row per node: three meters side by side read as a comparison. A
           cell is emphasised only past the bar's own threshold — never the
           whole row, and never because of a number that means nothing here. */}
@@ -1092,103 +1088,6 @@ function fmtAge(sec, t) {
 // The runtime catalog (ADR-039 / ADR-047, #76). Installed first, then the
 // catalog in a grid with search and categories. The degraded-registry states
 // are RENDERED, not hidden.
-/* What this deployment receives, per integration — on the overview, where
-   the question "is data arriving?" is asked, and off the Data tab, which is
-   the catalogue. An integration is on when the cluster or any Mesh policy
-   collects it; each row says where it is collected and whether documents
-   are landing (the same monitoring_status the tab used to poll). */
-function ReceivingPanel({ d, lang, onTab }) {
-  const t = STR[lang];
-  const [items, setItems] = useState(null);
-  const [policies, setPolicies] = useState([]);
-  const [status, setStatus] = useState({});
-  useEffect(() => {
-    let alive = true;
-    const load = () => {
-      API.catalog(d.id).then(v => { if (alive) setItems((v && v.integrations) || []); }).catch(() => { if (alive) setItems([]); });
-      API.meshOverview(d.id).then(o => { if (alive) setPolicies((o && o.policies) || []); }).catch(() => { if (alive) setPolicies([]); });
-    };
-    load();
-    const h = setInterval(load, 60000);
-    return () => { alive = false; clearInterval(h); };
-  }, [d.id]);
-  const monitors = d.monitors || [];
-  const onCluster = (it) => it.installed_version != null || monitors.includes(it.id);
-  const hostPolicies = {};
-  policies.forEach(p => (p.integrations || []).forEach(i => { (hostPolicies[i] = hostPolicies[i] || []).push(p.id); }));
-  const installed = (items || []).filter(it => onCluster(it) || !!hostPolicies[it.id]);
-  const sig = installed.map(it => it.id).join(",");
-  useEffect(() => {
-    if (!sig) return undefined;
-    let alive = true;
-    const load = async () => {
-      if (document.hidden) return;
-      for (const k of sig.split(",")) {
-        try {
-          const s = await API.monitoringStatus(d.id, k);
-          if (!alive) return;
-          setStatus(c => ({ ...c, [k]: s }));
-        } catch {
-          if (!alive) return;
-          setStatus(c => ({ ...c, [k]: undefined }));
-        }
-      }
-    };
-    load();
-    const h = setInterval(load, INTEG_POLL_MS);
-    return () => { alive = false; clearInterval(h); };
-  }, [d.id, sig]);
-  const rowStatus = (it) => {
-    const st = status[it.id];
-    const count = st ? st.doc_count : 0;
-    const lastMs = st && st.last_doc_at ? Date.parse(st.last_doc_at) : NaN;
-    const lastAge = Number.isFinite(lastMs) ? Math.max(0, Math.round((Date.now() - lastMs) / 1000)) : null;
-    if (st && st.receiving) return { live: true, text: `${t.receiving} · ${fmtInt(count, lang)} ${t.docs}` };
-    if (!st || count === 0) return { live: false, text: t.no_data };
-    if (st.state === "untimed") return { live: false, text: `${fmtInt(count, lang)} ${t.docs} — ${t.integ_recency_unknown}` };
-    return { live: false, text: `${t.integ_no_recent}${lastAge != null ? ` — ${t.integ_last_data.replace("{age}", fmtAge(lastAge, t))}` : ""} · ${fmtInt(count, lang)} ${t.docs}` };
-  };
-  const where = (it) => {
-    const parts = [];
-    if (onCluster(it)) parts.push(t.integ_target_cluster);
-    if (hostPolicies[it.id]) parts.push(t.ov_rec_policies.replace("{n}", hostPolicies[it.id].length));
-    return parts.join(" · ");
-  };
-  return (
-    <div className="card" style={{ marginBottom: 14 }} data-testid="ov-receiving">
-      <div className="card-head">
-        <h3><Icon name="spark" size={14} /> {t.ov_receiving_h}</h3>
-        <span className="sub">{t.ov_receiving_p}</span>
-        <div className="right">
-          <Btn variant="ghost" size="sm" icon="plus" onClick={() => onTab("data")} data-testid="ov-receiving-add">{t.integ_add}</Btn>
-        </div>
-      </div>
-      {items === null ? (
-        <p className="hint" style={{ margin: "10px 14px" }}>{t.integ_loading}</p>
-      ) : installed.length === 0 ? (
-        <p className="hint" style={{ margin: "10px 14px" }} data-testid="ov-receiving-none">{t.ov_receiving_none}</p>
-      ) : (
-        <table className="fleet" style={{ margin: 0 }}>
-          <thead><tr><th>{t.ov_rec_integration}</th><th>{t.ov_rec_where}</th><th>{t.ov_rec_status}</th></tr></thead>
-          <tbody>
-            {installed.map(it => {
-              const rs = rowStatus(it);
-              const title = loc(it.title, lang, it.id);
-              return (
-                <tr key={it.id} data-testid={`ov-receiving-${it.id}`} data-live={rs.live ? "1" : "0"}>
-                  <td><span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}><span className="integ-mono on">{monogram(it.id, title)}</span><b>{title}</b></span></td>
-                  <td className="hint">{where(it)}</td>
-                  <td className={rs.live ? "live" : "idle"}>{rs.live && <Icon name="spark" size={12} style={{ verticalAlign: -2, marginRight: 4 }} />}{rs.text}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
-}
-
 function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
   const t = STR[lang];
   const [view, setView] = useState(null);

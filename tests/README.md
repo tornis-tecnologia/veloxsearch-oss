@@ -101,19 +101,21 @@ something changes), the settings sub-tab (the Mesh's state, the ordered
 first run, the daemons table with the controller and each configured Mesh
 address probed, and the two endpoint lists — OpenSearch `host[:port]` or
 URL, and Mesh URL — with the in-cluster address offered, never assumed;
-ADR-072 amendment 2), the policies tab (a policy is created with a name AND
-both endpoints, its card shows and changes the binding, an unbound legacy
-policy is flagged, and integrations are added, configured and removed
-through the SAME dialog the Data tab uses with the policy as the fixed
-target, ADR-073) and the **add-agent page** (`/mesh/add-agent?policy=`):
+ADR-072 amendment 2), the policies tab (a table — policy, agents, revision,
+integrations — with a menu per row; *New policy* is a dialog that asks for
+a name AND both endpoints; *Set endpoints* rebinds, an unbound legacy
+policy is flagged; *Settings* shows the binding and configures/removes
+integrations through the SAME dialog the Data tab uses with the policy as
+the fixed target, ADR-073; *Remove* deletes a throwaway `e2e-remove`
+policy and is disabled on a policy live agents run) and the **add-agent page** (`/mesh/add-agent?policy=`):
 three steps — the policy, its token, the per-target install guide (whose
 tab set mirrors the Fluent Bit project's own downloads index, ADR-069) with
 the enrol command completed from the policy's Mesh endpoint and the token,
 and a watch on the fleet; a policy card opens it with the policy chosen. It
 then drives the onboarding on the Data tab — the catalogue, where an
 installed integration is a green card with no received-data facts and no
-policy pills (those are on the deployment's overview's *Data received*
-panel and on the policy's card): *Add* opens the dialog that asks where
+policy pills (the policy's own settings carry those; the deployment's
+overview has no received-data table): *Add* opens the dialog that asks where
 (this cluster, a policy — preselected when sent over with `?policy=` — or a
 new one, enabled only with endpoints configured) and what (the package's
 inputs and variables). Without a Mesh the dialog's only target is the

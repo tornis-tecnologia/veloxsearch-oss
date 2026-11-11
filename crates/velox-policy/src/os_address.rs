@@ -182,12 +182,8 @@ pub fn bind_fluent_bit_output(body: &str, addr: &OsAddress) -> String {
         }
         t.split_whitespace().next().map(str::to_ascii_lowercase)
     };
-    let value_of = |l: &str| -> Option<String> {
-        l.trim()
-            .split_whitespace()
-            .nth(1)
-            .map(str::to_ascii_lowercase)
-    };
+    let value_of =
+        |l: &str| -> Option<String> { l.split_whitespace().nth(1).map(str::to_ascii_lowercase) };
     let mut out: Vec<String> = Vec::with_capacity(lines.len() + 4);
     let mut cursor = 0;
     for (start, end) in sections {
@@ -275,7 +271,7 @@ mod tests {
             (443, true, Some("/opensearch"))
         );
         assert_eq!(h.url(), "https://proxy.example.com:443/opensearch");
-        assert_eq!(p("HTTPS://X").tls, true);
+        assert!(p("HTTPS://X").tls);
         let v6 = p("[::1]:9200");
         assert_eq!((v6.host.as_str(), v6.port), ("::1", 9200));
         assert_eq!(v6.url(), "https://[::1]:9200");

@@ -607,17 +607,27 @@ pub async fn authenticate(pg: &Client, credential: &str) -> Result<Option<AgentR
         .map(agent_from_row))
 }
 
+/// What one check-in reports, as the store records it.
+#[derive(Debug, Clone, Copy)]
+pub struct Checkin<'a> {
+    pub applied_revision: Option<u64>,
+    pub applied_hash: Option<&'a str>,
+    pub config_status: &'a str,
+    pub config_error: &'a str,
+    pub health: Option<&'a serde_json::Value>,
+    pub attributes: Option<&'a serde_json::Value>,
+}
+
 /// Record a check-in: what the agent says it is running, and how it is.
-pub async fn checkin(
-    pg: &Client,
-    instance_uid: &str,
-    applied_revision: Option<u64>,
-    applied_hash: Option<&str>,
-    config_status: &str,
-    config_error: &str,
-    health: Option<&serde_json::Value>,
-    attributes: Option<&serde_json::Value>,
-) -> Result<()> {
+pub async fn checkin(pg: &Client, instance_uid: &str, c: &Checkin<'_>) -> Result<()> {
+    let Checkin {
+        applied_revision,
+        applied_hash,
+        config_status,
+        config_error,
+        health,
+        attributes,
+    } = *c;
     // `attributes` is merged, not replaced: the enrolment's identifying
     // facts stay, and the check-in's changing ones (usage, engine version)
     // overwrite their own keys only. An agent that sends no description
@@ -724,6 +734,43 @@ pub async fn assign_policy(
         &[&instance_uid, &policy_id],
     )
     .await?;
+    Ok(())
+}
+
+/// Delete one of the deployment's policies. Refused while a live agent runs
+/// it: every agent runs a policy (ADR-072 amendment 2), and a host whose
+/// policy vanished would keep its last config with nobody able to change it.
+/// One statement, so an enrolment landing between a count and a delete
+/// cannot leave an agent pointing at nothing. Revisions, tokens and the
+/// policy's credential cascade (001/002); unenrolled agents keep their row
+/// with `policy_id` NULL (003). Nothing in OpenSearch is touched: the
+/// `veloxagent-*` artifacts are shared by name with the cluster path
+/// (ADR-071) and are the core's to remove.
+pub async fn delete_policy(pg: &Client, dep: &DeploymentRef, policy_id: &str) -> Result<()> {
+    dep.check()?;
+    policy_belongs(pg, dep, policy_id).await?;
+    let n = pg
+        .execute(
+            "DELETE FROM mesh_policies p
+              WHERE p.id = $1 AND p.deployment_ns = $2 AND p.deployment = $3
+                AND NOT EXISTS (SELECT 1 FROM mesh_agents a
+                                 WHERE a.policy_id = p.id AND NOT a.unenrolled)",
+            &[&policy_id, &dep.deployment_ns, &dep.deployment],
+        )
+        .await?;
+    if n == 0 {
+        let live: i64 = pg
+            .query_one(
+                "SELECT count(*) FROM mesh_agents WHERE policy_id = $1 AND NOT unenrolled",
+                &[&policy_id],
+            )
+            .await?
+            .get(0);
+        return Err(Error::Refused(format!(
+            "policy {policy_id} still runs {live} agent(s); move them to another policy or \
+             unenrol them first"
+        )));
+    }
     Ok(())
 }
 

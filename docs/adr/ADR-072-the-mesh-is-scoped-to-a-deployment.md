@@ -196,10 +196,24 @@ sub-tabs redundant. Three decisions:
   Per-policy configure and remove stay on the policy's card (amendment to
   ADR-073's "one dialog": the dialog is still the one onboarding; the
   per-target rows moved).
-- **What the deployment receives is on the deployment's overview**: a
-  *Data received* panel, one row per active integration — where it is
-  collected (cluster, N policies) and whether documents are landing (the
-  same `monitoring_status` the tab used to poll).
+- ~~What the deployment receives is on the deployment's overview~~ — a
+  *Data received* panel shipped with this amendment and was withdrawn the
+  same day at the user's request; the deployment's overview keeps its
+  tiles (documents, ingestion, storage, nodes) and the per-integration
+  receiving view is off for now.
+- **The Policies sub-tab is a table**: policy, agents, revision,
+  integrations, and a menu per row — *Set endpoints* (rebind, a new
+  revision), *Settings* (binding, rollout, integrations configured or
+  removed in place through the one onboarding dialog), *Add integration*,
+  *Add agent* (the add-agent page with the policy chosen; disabled while
+  the policy is unbound) and *Remove*. *New policy* is a dialog asking for
+  the name and both endpoints. **Removing a policy** is a new console route
+  (`mesh_delete_policy` → the Mesh's `delete_policy`): refused, with the
+  count, while a live agent runs it — every agent runs a policy — in one
+  `DELETE … WHERE NOT EXISTS` so an enrolment cannot slip in between;
+  revisions, tokens and the policy's credential cascade; nothing in
+  OpenSearch is touched (the `veloxagent-*` artifacts are shared by name,
+  ADR-071).
 - **The Mesh overview is the fleet** (the Agents sub-tab is merged into it;
   `/mesh/agents` redirects). The table is Fleet-shaped: status, host (OS ·
   arch), policy and applied revision, **CPU, memory**, last report, agent
