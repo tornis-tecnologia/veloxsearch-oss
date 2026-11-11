@@ -137,7 +137,25 @@ address per deployment".
   document (`endpoints.opensearch`, `endpoints.mesh`; the Mesh's policy rows
   carry them as `os_endpoint`/`mesh_endpoint`). The OpenSearch address is
   what the compiler puts in every collector output; the Mesh address is the
-  `--mesh` of the policy's enrolment command. **Both are required**:
+  `--mesh` of the policy's enrolment command.
+- **An OpenSearch endpoint is spelled the way the operator has it, and the
+  compiler writes it the way Fluent Bit reads it.** `host` (9200 over TLS,
+  the package default), `host:port`, or an http(s) URL with an optional
+  path — the scheme decides TLS and the default port (80/443), the path is
+  the reverse-proxy prefix. The `opensearch` output has no "address" key:
+  it takes `Host` (a name or IP, nothing else), `Port`, `tls` and `Path`
+  separately, and every package template fixes `Port 9200` / `tls On` for
+  the in-cluster service. So `velox_policy::OsAddress` parses the endpoint
+  once (the settings save validates with the same function) and `compile`
+  **binds** it onto every `opensearch` output of the assembled body,
+  replacing those keys and leaving the rest of the stanza the package's
+  (`tls.verify`, `Index`, the credential references). The closed token set
+  is not widened for this (ADR-039): a `{os_port}` would have to reach
+  every signed package and would still leave `tls` and `Path` to be typed
+  by hand. An ingress on 443 typed as `host:443` had produced
+  `Host host:443` + `Port 9200` — a config Fluent Bit cannot connect with —
+  which is what forced the rule. OTel bodies are not rewritten; their
+  `{os_host}` is the endpoint's host. **Both are required**:
   `save_policy` refuses a draft that names none or names one the settings no
   longer hold (400), so a policy cannot exist without somewhere to send.
   Rebinding (`mesh_policy_endpoints`) is a new revision. A settings save that

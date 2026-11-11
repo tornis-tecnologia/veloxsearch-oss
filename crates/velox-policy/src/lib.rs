@@ -52,6 +52,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
+
+pub mod os_address;
+pub use os_address::{bind_fluent_bit_output, OsAddress};
 use velox_integrations::Package;
 
 /// Which child process a fragment is for. The agent supervises one of each.
@@ -274,6 +277,14 @@ pub trait FragmentRenderer {
     ) -> Result<Option<BackendRequirement>, String> {
         Ok(None)
     }
+
+    /// Where the compiled Fluent Bit body's `opensearch` outputs are bound
+    /// to (`os_address`): the policy's named endpoint, parsed. `None` keeps
+    /// the package's own connection keys — the in-cluster defaults the
+    /// DaemonSet path relies on. [`PackageRenderer`] answers from its target.
+    fn os_address(&self) -> Option<&OsAddress> {
+        None
+    }
 }
 
 /// Where verified packages come from: the Mesh's package cache, filled only
@@ -286,13 +297,15 @@ pub trait PackageStore {
 /// What the agent's collector reaches: the OpenSearch endpoint a policy's
 /// `Output::OpenSearch { deployment }` resolves to. The namespace keeps
 /// `{tenant}` and the in-cluster `{os_host}` identical to the DaemonSet path;
-/// `os_host` overrides the latter for hosts outside the cluster, which cannot
-/// resolve `<deployment>.<ns>.svc` (ARCHITECTURE.md §5.1).
+/// `os_endpoint` overrides the latter for hosts outside the cluster, which
+/// cannot resolve `<deployment>.<ns>.svc` (ARCHITECTURE.md §5.1) — its host
+/// becomes `{os_host}`, and its port, TLS and path are bound onto every
+/// `opensearch` output of the compiled body (ADR-072 amendment 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     pub deployment: String,
     pub namespace: String,
-    pub os_host: Option<String>,
+    pub os_endpoint: Option<OsAddress>,
 }
 
 /// What a rendered config carries where the core's path carries the admin
@@ -371,8 +384,8 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
                 OS_USER_REF,
                 OS_PASSWORD_REF,
             );
-            if let Some(h) = &self.target.os_host {
-                vars = vars.with_os_host(h);
+            if let Some(ep) = &self.target.os_endpoint {
+                vars = vars.with_os_host(&ep.host);
             }
             vars
         };
@@ -438,6 +451,10 @@ impl<S: PackageStore + ?Sized> FragmentRenderer for PackageRenderer<'_, S> {
             inputs,
         }))
     }
+
+    fn os_address(&self) -> Option<&OsAddress> {
+        self.target.os_endpoint.as_ref()
+    }
 }
 
 /// The configuration an agent receives: one body per engine it must run,
@@ -490,13 +507,19 @@ pub fn compile(policy: &Policy, renderer: &dyn FragmentRenderer) -> Result<Compi
         .map(|(e, parts)| match e {
             Engine::FluentBit => {
                 let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-                (
-                    e,
-                    velox_integrations::assemble_fluent_bit(
-                        &velox_integrations::fluent_bit_service(policy.agent.flush_seconds, None),
-                        &refs,
-                    ),
-                )
+                let body = velox_integrations::assemble_fluent_bit(
+                    &velox_integrations::fluent_bit_service(policy.agent.flush_seconds, None),
+                    &refs,
+                );
+                // The endpoint says where; the package's `Port 9200` /
+                // `tls On` are the in-cluster defaults and are replaced
+                // (os_address). An operator's `host:443` or ingress URL
+                // reaches the engine as the keys it reads.
+                let body = match renderer.os_address() {
+                    Some(addr) => bind_fluent_bit_output(&body, addr),
+                    None => body,
+                };
+                (e, body)
             }
             Engine::OtelCollector => (e, parts.join("\n")),
         })
@@ -738,11 +761,11 @@ mod tests {
         Store(m)
     }
 
-    fn target(os_host: Option<&str>) -> Target {
+    fn target(os_endpoint: Option<&str>) -> Target {
         Target {
             deployment: "logs-a1b2".into(),
             namespace: "veloxsearch".into(),
-            os_host: os_host.map(str::to_string),
+            os_endpoint: os_endpoint.map(|s| OsAddress::parse(s).unwrap()),
         }
     }
 
@@ -766,16 +789,46 @@ mod tests {
         assert!(!c.bodies.contains_key(&Engine::OtelCollector));
     }
 
-    /// A host outside the cluster gets the published endpoint instead.
+    /// A host outside the cluster gets the published endpoint instead: its
+    /// host as `{os_host}`, and its port/TLS/path bound onto the output in
+    /// place of the package's `Port 9200` / `tls On` — the keys Fluent Bit
+    /// reads, not a `host:port` glued into `Host`.
     #[test]
-    fn package_renderer_honours_an_off_cluster_host() {
-        let s = store(TMPL);
+    fn package_renderer_honours_an_off_cluster_endpoint() {
+        const OUT: &str = "[OUTPUT]\n    Name opensearch\n    Match *\n    Host {os_host}\n    Port 9200\n    HTTP_User {os_user}\n    tls On\n    tls.verify Off\n    Index {index}\n";
+        let s = store(OUT);
         let r = PackageRenderer {
             store: &s,
-            target: target(Some("logs.example.internal:9200")),
+            target: target(Some("logs.example.internal:443")),
         };
-        let c = compile(&policy(&["nginx"]), &r).unwrap();
-        assert!(c.bodies[&Engine::FluentBit].contains("Host logs.example.internal:9200"));
+        let fb = &compile(&policy(&["nginx"]), &r).unwrap().bodies[&Engine::FluentBit];
+        assert!(
+            fb.contains("    Name opensearch\n    Host logs.example.internal\n    Port 443\n    tls On\n    Match *\n"),
+            "{fb}"
+        );
+        assert!(!fb.contains("Port 9200"), "{fb}");
+        assert!(fb.contains("    tls.verify Off\n"), "{fb}");
+        let r = PackageRenderer {
+            store: &s,
+            target: target(Some("http://proxy.example.internal/os")),
+        };
+        let fb = &compile(&policy(&["nginx"]), &r).unwrap().bodies[&Engine::FluentBit];
+        assert!(
+            fb.contains(
+                "    Host proxy.example.internal\n    Port 80\n    tls Off\n    Path /os\n"
+            ),
+            "{fb}"
+        );
+        // No endpoint (the DaemonSet-shaped default): the package's keys stand.
+        let r = PackageRenderer {
+            store: &s,
+            target: target(None),
+        };
+        let fb = &compile(&policy(&["nginx"]), &r).unwrap().bodies[&Engine::FluentBit];
+        assert!(
+            fb.contains("    Host logs-a1b2.veloxsearch.svc\n    Port 9200\n"),
+            "{fb}"
+        );
     }
 
     /// The fail-closed rule survives the boundary: a package with a foreign

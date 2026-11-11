@@ -385,17 +385,12 @@ pub fn validate_settings(s: &MeshSettings) -> Result<(), String> {
         if e.name.trim().is_empty() {
             return Err(format!("OpenSearch endpoint {} needs a name", e.id));
         }
-        let h = e.host.trim();
-        if h.is_empty()
-            || h.contains("://")
-            || h.contains('/')
-            || h.chars().any(char::is_whitespace)
-        {
-            return Err(format!(
-                "OpenSearch endpoint {}: the address is a host or host:port, without scheme or path",
-                e.id
-            ));
-        }
+        // The three spellings Fluent Bit's output can be bound to —
+        // `host`, `host:port`, an http(s) URL with an optional path — parsed
+        // by the same function the compiler binds with (velox_policy::
+        // os_address), so a saved endpoint is one the policy can compile.
+        velox_policy::OsAddress::parse(&e.host)
+            .map_err(|reason| format!("OpenSearch endpoint {}: {reason}", e.id))?;
     }
     seen.clear();
     for e in &s.mesh_endpoints {
@@ -704,8 +699,12 @@ pub async fn save_policy(
             deployment: draft.deployment.clone(),
             namespace: dep.namespace().to_string(),
             // Always the named endpoint's address: the renderer's in-cluster
-            // fallback is for the DaemonSet path, never for a host.
-            os_host: Some(os_endpoint.host.trim().to_string()),
+            // fallback is for the DaemonSet path, never for a host. Parsed
+            // here so host, port, TLS and path land in the output's own keys.
+            os_endpoint: Some(
+                velox_policy::OsAddress::parse(&os_endpoint.host)
+                    .map_err(|e| anyhow::anyhow!("OpenSearch endpoint {}: {e}", os_endpoint.id))?,
+            ),
         },
     };
     let compiled = velox_policy::compile(&policy, &renderer)
@@ -933,14 +932,21 @@ mod tests {
         }
     }
 
-    /// Each address in the shape its consumer expects — a bare host[:port]
-    /// for the collector's output, a base URL for `velox-agent enroll
-    /// --mesh` — under a slug id that is unique in its list.
+    /// Each address in the shape its consumer expects — `host`,
+    /// `host:port` or an http(s) URL for the collector's output (the port
+    /// and TLS follow the spelling, bound at compile time), a base URL for
+    /// `velox-agent enroll --mesh` — under a slug id unique in its list.
     #[test]
     fn settings_are_validated_in_the_shape_their_consumer_expects() {
         assert!(validate_settings(&MeshSettings::default()).is_ok());
         assert!(validate_settings(&settings(
-            &[("lan", "10.43.207.250"), ("lb", "os.example.com:9200")],
+            &[
+                ("lan", "10.43.207.250"),
+                ("lb", "os.example.com:9200"),
+                ("ing", "os.192.168.1.200.sslip.io:443"),
+                ("url", "https://os.example.com"),
+                ("proxy", "http://proxy.example.com:8080/opensearch/"),
+            ],
             &[
                 ("lan", "http://192.168.1.200:4320"),
                 ("pub", "https://mesh.example.com:4320")
@@ -948,9 +954,12 @@ mod tests {
         ))
         .is_ok());
         let err = |s: MeshSettings| validate_settings(&s).unwrap_err();
-        assert!(err(settings(&[("lan", "http://os.example.com")], &[])).contains("scheme"));
-        assert!(err(settings(&[("lan", "os.example.com/path")], &[])).contains("path"));
-        assert!(err(settings(&[("lan", "")], &[])).contains("address"));
+        assert!(err(settings(&[("lan", "ftp://os.example.com")], &[])).contains("http or https"));
+        assert!(err(settings(&[("lan", "os.example.com:x")], &[])).contains("port"));
+        assert!(
+            err(settings(&[("lan", "https://u:p@os.example.com")], &[])).contains("credentials")
+        );
+        assert!(err(settings(&[("lan", "")], &[])).contains("empty"));
         assert!(err(settings(&[], &[("lan", "mesh.example.com:4320")])).contains("base URL"));
         assert!(err(settings(&[], &[("lan", "https://")])).contains("base URL"));
         assert!(err(settings(&[], &[("lan", "https://mesh example.com")])).contains("base URL"));

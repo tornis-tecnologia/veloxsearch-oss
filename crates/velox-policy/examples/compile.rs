@@ -38,7 +38,7 @@ fn main() {
     let Some(root) = args.next() else {
         eprintln!(
             "usage: cargo run -p velox-policy --example compile -- \
-             <veloxsearch-registry checkout> [--host HOST] [package ...]"
+             <veloxsearch-registry checkout> [--host HOST[:PORT]|URL] [package ...]"
         );
         std::process::exit(2);
     };
@@ -126,7 +126,15 @@ fn main() {
         target: Target {
             deployment: "logs-a1b2".into(),
             namespace: "veloxsearch".into(),
-            os_host: os_host.clone(),
+            os_endpoint: os_host
+                .as_deref()
+                .map(|h| match velox_policy::OsAddress::parse(h) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!("--host {h:?}: {e}");
+                        std::process::exit(2);
+                    }
+                }),
         },
     };
 
@@ -144,7 +152,7 @@ fn main() {
     );
     println!("hash {}", compiled.hash);
     if let Some(h) = &os_host {
-        println!("rendered for an off-cluster agent: os_host = {h}");
+        println!("rendered for an off-cluster agent: endpoint = {h}");
     }
     for (engine, body) in &compiled.bodies {
         let name = match engine {

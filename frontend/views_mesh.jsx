@@ -169,6 +169,49 @@ function slugOf(n) {
   return n.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 }
 
+/* What Fluent Bit's opensearch output will be given for an OpenSearch
+   address — the same reading as velox_policy::OsAddress::parse, for the
+   screen only (the server validates and binds): a bare host is 9200 over
+   TLS (the package default), host:port keeps TLS, an http(s) URL takes the
+   port from the scheme (80/443) and a path as the output's `Path`. */
+export function osAddressOf(input) {
+  const s = (input || "").trim();
+  if (!s || /\s/.test(s)) return null;
+  let tls = true, port = 9200, rest = s;
+  const m = s.match(/^([a-zA-Z]+):\/\/(.*)$/);
+  if (m) {
+    const scheme = m[1].toLowerCase();
+    if (scheme === "http") { tls = false; port = 80; } else if (scheme === "https") { port = 443; } else return null;
+    rest = m[2];
+  }
+  if (/[?#@]/.test(rest)) return null;
+  const slash = rest.indexOf("/");
+  const authority = slash >= 0 ? rest.slice(0, slash) : rest;
+  let path = slash >= 0 ? rest.slice(slash).replace(/\/+$/, "") : "";
+  let host = authority, p = null;
+  const v6 = authority.match(/^\[([^\]]+)\](?::(.*))?$/);
+  if (v6) { host = v6[1]; p = v6[2] === undefined ? null : v6[2]; }
+  else {
+    const i = authority.lastIndexOf(":");
+    if (i >= 0) { host = authority.slice(0, i); p = authority.slice(i + 1); if (host.includes(":")) return null; }
+  }
+  if (!host) return null;
+  if (p !== null) { if (!/^\d+$/.test(p)) return null; port = Number(p); if (port < 1 || port > 65535) return null; }
+  return { host, port, tls, path: path || null };
+}
+
+/* The address as the four keys, in words: "porta 443 · TLS · /opensearch". */
+function OsAddressHint({ t, value, testid }) {
+  const a = osAddressOf(value);
+  if (!value || !value.trim()) return null;
+  if (!a) return <span className="hint" data-testid={testid} data-valid="0" style={{ color: "var(--danger-text)" }}>{t.mesh_ep_invalid}</span>;
+  return (
+    <span className="hint" data-testid={testid} data-valid="1">
+      {a.host} · {t.mesh_ep_port} {a.port} · {a.tls ? t.mesh_ep_tls_on : t.mesh_ep_tls_off}{a.path ? ` · ${a.path}` : ""}
+    </span>
+  );
+}
+
 /* One endpoint as a value: its name and address, or why it cannot be shown. */
 function EndpointValue({ t, id, ep }) {
   if (!id) return <span className="hint" data-state="missing">{t.mesh_ep_missing}</span>;
@@ -830,7 +873,7 @@ function EndpointListEditor({ t, kind, items, onChange, usage, suggest, disabled
   const [name, setName] = useState("");
   const [addr, setAddr] = useState("");
   const addrKey = kind === "os" ? "host" : "url";
-  const canAdd = name.trim() && addr.trim();
+  const canAdd = name.trim() && addr.trim() && (kind !== "os" || !!osAddressOf(addr));
   function add() {
     if (!canAdd) return;
     let id = slugOf(name) || kind;
@@ -852,7 +895,10 @@ function EndpointListEditor({ t, kind, items, onChange, usage, suggest, disabled
             {items.map(e => (
               <tr key={e.id} data-testid={`${testid}-row-${e.id}`}>
                 <td>{e.name} <span className="hint mono" style={{ fontSize: 11 }}>{e.id}</span></td>
-                <td className="mono">{e[addrKey]}</td>
+                <td className="mono">
+                  {e[addrKey]}
+                  {kind === "os" && <div style={{ fontFamily: "var(--font-sans)" }}><OsAddressHint t={t} value={e.host} testid={`${testid}-row-${e.id}-resolved`} /></div>}
+                </td>
                 <td className="hint">{t.mesh_ep_in_use.replace("{n}", (usage && usage[e.id]) || 0)}</td>
                 <td style={{ textAlign: "right" }}>
                   <Btn variant="ghost" size="sm" icon="trash" disabled={disabled} data-testid={`${testid}-remove-${e.id}`}
@@ -871,6 +917,7 @@ function EndpointListEditor({ t, kind, items, onChange, usage, suggest, disabled
           aria-label={kind === "os" ? t.mesh_os_host : t.mesh_url} data-testid={`${testid}-addr`} style={{ maxWidth: 320 }} disabled={disabled}
           onKeyDown={e => { if (e.key === "Enter") add(); }} />
         <Btn variant="outline" size="sm" icon="plus" disabled={disabled || !canAdd} data-testid={`${testid}-add`} onClick={add}>{t.mesh_ep_add}</Btn>
+        {kind === "os" && <OsAddressHint t={t} value={addr} testid={`${testid}-resolved`} />}
         {suggest && (
           <Btn variant="ghost" size="sm" disabled={disabled} data-testid={`${testid}-suggest`}
             onClick={() => { if (!name.trim()) setName(t.mesh_ep_internal_name); setAddr(suggest); }}>{t.mesh_ep_use_internal}</Btn>

@@ -33,7 +33,14 @@ These reconcile 1:1 with the set named in ADR-039:
 
 - **`agent_config`** (`agent.conf.tmpl`) — `{os_host}` (Host), `{os_user}`
   (HTTP_User), `{os_password}` (HTTP_Passwd), `{index}` (Index). This is where
-  `fluent_bit_conf` interpolates today.
+  `fluent_bit_conf` interpolates today. On the **host path** (a Velox Mesh
+  policy, ADR-072 amendment 2) `{os_host}` is the bare host of the policy's
+  OpenSearch endpoint, and the compiler then rewrites the `Host`, `Port`,
+  `tls` and `Path` keys of every `[OUTPUT]` with `Name opensearch` from that
+  endpoint (`velox_policy::bind_fluent_bit_output`): the `Port 9200` /
+  `tls On` a package writes are the in-cluster defaults, right for the
+  DaemonSet path and replaced for a host. A package keeps every other key
+  of the stanza, and must not rely on those four.
 - **`pipeline` / `index_template`** — need no interpolation in the nginx recipe
   (they are static JSON PUT under the fixed ids `{recipe_id}` / `{index}`). The
   ids themselves are engine-owned, so a package that parameterizes them uses
