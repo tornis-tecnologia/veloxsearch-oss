@@ -48,7 +48,7 @@
 import { useEffect, useState } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
-import { Banner, Btn, Dialog, Field, Icon, Tabs, copyText } from "./ui.jsx";
+import { Banner, Btn, Dialog, Field, Icon, Tabs, copyText, fmtBytes } from "./ui.jsx";
 import { AddIntegrationDialog, locText } from "./views_integration_add.jsx";
 
 /* ADR-069 decision 3; `velox_agent::preflight::MIN_FLUENT_BIT` is the same
@@ -299,20 +299,32 @@ function FleetSummary({ t, agents, policies }) {
   );
 }
 
-/* The deployment's fleet. Read-only on the overview; on the Agents tab each
-   row opens the agent's editor (where the policy is picked) or unenrols.
-   The policy is a word here, never a picker: moving a host is a decision
-   with dependencies, and the editor shows them before "Deploy". */
-function FleetTable({ t, agents, onEdit, onUnenrol, testid = "mesh-fleet" }) {
+/* The deployment's fleet, Fleet-style: status, host, policy and revision,
+   what the agent costs the host (CPU as a share of one core over its last
+   poll interval, resident memory — reported by velox-agent's usage.rs on
+   every check-in), when it last reported, its version and the engine's.
+   Each row opens the agent's editor (where the policy is picked) or
+   unenrols; the policy is a word here, never a picker. */
+// The engine key as `velox_policy::Engine` serialises it → how it is spelled.
+const ENGINE_NAMES = { fluent_bit: "Fluent Bit", otel_collector: "OpenTelemetry Collector" };
+
+function attr(a, key) {
+  const v = a && a.attributes ? a.attributes[key] : undefined;
+  return v === undefined || v === null || v === "" ? null : String(v);
+}
+
+function FleetTable({ t, lang, agents, onEdit, onUnenrol, testid = "mesh-fleet" }) {
   if (!agents || agents.length === 0) return <p className="hint" data-testid={`${testid}-empty`}>{t.mesh_fleet_empty}</p>;
   const actions = !!(onEdit || onUnenrol);
+  const na = <span className="hint">{t.mesh_na}</span>;
   return (
     <table className="fleet" data-testid={testid}>
       <thead>
         <tr>
-          <th>{t.mesh_fleet_host}</th><th>{t.mesh_fleet_status}</th>
-          <th>{t.mesh_fleet_policy}</th><th>{t.mesh_fleet_rev}</th>
-          <th>{t.mesh_fleet_seen}</th>
+          <th>{t.mesh_fleet_status}</th><th>{t.mesh_fleet_host}</th>
+          <th>{t.mesh_fleet_policy}</th>
+          <th>{t.mesh_fleet_cpu}</th><th>{t.mesh_fleet_mem}</th>
+          <th>{t.mesh_fleet_seen}</th><th>{t.mesh_fleet_version}</th>
           {actions && <th>{t.mesh_fleet_actions}</th>}
         </tr>
       </thead>
@@ -320,24 +332,40 @@ function FleetTable({ t, agents, onEdit, onUnenrol, testid = "mesh-fleet" }) {
         {agents.map(a => {
           const short = a.instance_uid.slice(0, 8);
           const live = a.status !== "unenrolled";
+          const cpu = attr(a, "velox.agent.cpu_percent");
+          const rss = attr(a, "velox.agent.rss_bytes");
+          const ver = attr(a, "velox.agent.version");
+          const engine = attr(a, "velox.engine");
+          const engineVer = attr(a, "velox.engine.version");
+          const os = [attr(a, "velox.os"), attr(a, "velox.arch")].filter(Boolean).join(" · ");
           return (
             <tr key={a.instance_uid} data-testid={`fleet-row-${short}`}
               data-status={a.status} data-up={a.up ? "1" : "0"}>
-              <td className="mono">{a.hostname || a.instance_uid.slice(0, 12)}</td>
               <td>
                 <AgentPill status={a.status} t={t} />
-                <span className="hint" style={{ marginLeft: 8 }}>{a.up ? t.mesh_up : t.mesh_down}</span>
                 {a.config_error && (
                   <div className="mono fleet-err" title={a.config_error}>{a.config_error}</div>
                 )}
               </td>
-              <td className="mono" data-testid={`fleet-policy-${short}`}>{a.policy_id || "—"}</td>
-              <td className="mono">
-                {a.applied_revision != null ? a.applied_revision : "—"}
-                {a.current_revision != null && a.applied_revision !== a.current_revision
-                  && <span className="hint"> → {a.current_revision}</span>}
+              <td>
+                <div className="mono">{a.hostname || a.instance_uid.slice(0, 12)}</div>
+                {os && <div className="hint" style={{ fontSize: 11.5 }}>{os}</div>}
               </td>
-              <td className="hint">{seenAgo(a.last_seen, t)}</td>
+              <td>
+                <span className="mono" data-testid={`fleet-policy-${short}`}>{a.policy_id || "—"}</span>
+                <div className="hint mono" style={{ fontSize: 11.5 }}>
+                  {a.applied_revision != null ? t.mesh_revision.replace("{n}", a.applied_revision) : "—"}
+                  {a.current_revision != null && a.applied_revision !== a.current_revision
+                    && <span> → {a.current_revision}</span>}
+                </div>
+              </td>
+              <td className="tnum" data-testid={`fleet-cpu-${short}`}>{live && cpu !== null ? `${cpu} %` : na}</td>
+              <td className="tnum" data-testid={`fleet-mem-${short}`}>{live && rss !== null ? fmtBytes(Number(rss), lang) : na}</td>
+              <td className="hint">{seenAgo(a.last_seen, t)}{live && <div style={{ fontSize: 11.5 }}>{a.up ? t.mesh_up : t.mesh_down}</div>}</td>
+              <td>
+                <span className="mono" data-testid={`fleet-version-${short}`}>{ver || "—"}</span>
+                {engine && <div className="hint" style={{ fontSize: 11.5 }}>{ENGINE_NAMES[engine] || engine}{engineVer ? ` ${engineVer}` : ""}</div>}
+              </td>
               {actions && (
                 <td>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -505,7 +533,7 @@ function Onboarding({ t, step, onTab }) {
   }
   const at = ONB_STEPS.indexOf(step);
   const labels = [t.mesh_j1_h, t.mesh_j3_h, t.mesh_j2_h, t.mesh_j4_h];
-  const goes = [null, "policies", "agents", "policies"];
+  const goes = [null, "policies", "add-agent", "policies"];
   return (
     <div className="onb card pad" data-testid="mesh-onboarding" data-step={step} style={{ marginBottom: 18 }}>
       <h3 className="ag-h">{t.mesh_onb_h}</h3>
@@ -521,7 +549,7 @@ function Onboarding({ t, step, onTab }) {
               {state === "ok" && <span className="hint">{t.mesh_step_ok}</span>}
               {state === "now" && goes[i] && (
                 <Btn variant="ghost" size="sm" onClick={() => onTab(goes[i])}
-                  data-testid={`onb-go-${goes[i]}`}>{t[`mesh_tab_${goes[i]}`]}</Btn>
+                  data-testid={`onb-go-${goes[i]}`}>{goes[i] === "add-agent" ? t.mesh_add_agent : t[`mesh_tab_${goes[i]}`]}</Btn>
               )}
             </li>
           );
@@ -657,7 +685,7 @@ function InstallGuide({ t, target, onTarget, meshUrl, token, onToast }) {
       </Banner>
 
       <Tabs items={TARGETS.map(x => ({ key: x.key, label: x.label }))}
-        value={target} onChange={onTarget} label={t.mesh_tab_agents} testidPrefix="agents-tab" />
+        value={target} onChange={onTarget} label={t.mesh_target_label} testidPrefix="agents-tab" />
 
       <div className="ag-panel" data-testid={`agents-panel-${d.key}`}>
         {d.note && <p className="ag-note"><Icon name="info" size={14} /><span>{t[d.note]}</span></p>}
@@ -720,25 +748,36 @@ function InstallGuide({ t, target, onTarget, meshUrl, token, onToast }) {
   );
 }
 
-/* "Add agent": the policy first — every agent runs one, and the token is the
-   policy's — then its token, then the install steps for the host's system
-   with the enrol command filled from the policy's Mesh endpoint. A policy
-   without both endpoints cannot enrol hosts: the dialog says so and keeps
-   the token button off, so the gap is found here and not on the host. */
-function AddAgentDialog({ open, onClose, t, d, overview, settings, initialPolicy, onToast }) {
+/* "Add agent" is a page, in steps (not a dialog: an operator does this with
+   a terminal open on the host and comes back to it). 1 — the policy: every
+   agent runs one, and the token is the policy's; a policy without both
+   endpoints cannot enrol hosts, the step says so and does not advance.
+   2 — the token, shown once. 3 — the install steps for the host's system
+   with the enrol command completed from the policy's Mesh endpoint and the
+   token, and a watch on the fleet: the page says when a NEW host reports.
+   `?policy=` (a policy card's button) starts on step 1 with it chosen. */
+function AddAgentPage({ t, lang, d, overview, settings, initialPolicy, onBack, onToast }) {
   const policies = (overview && overview.policies) || [];
-  const [policy, setPolicy] = useState("");
+  const [step, setStep] = useState(0);
+  const [policy, setPolicy] = useState(initialPolicy || (policies.length === 1 ? policies[0].id : ""));
   const [token, setToken] = useState(null);
   const [minting, setMinting] = useState(false);
   const [target, setTarget] = useState(TARGETS[0].key);
+  // The fleet as it was when the page FIRST saw it (the overview may still
+  // be loading when the page mounts from a URL): a host that is not in it
+  // and reports later is the one being added.
+  const [known, setKnown] = useState(null);
   useEffect(() => {
-    if (!open) return;
-    setToken(null);
-    setPolicy(initialPolicy || (policies.length === 1 ? policies[0].id : ""));
-  }, [open, initialPolicy]);
-  if (!open) return null;
+    if (overview && known === null) setKnown(new Set((overview.agents || []).map(a => a.instance_uid)));
+  }, [overview, known]);
+  useEffect(() => {
+    if (!policy && policies.length === 1) setPolicy(policies[0].id);
+  }, [policies.length]);
   const p = policies.find(x => x.id === policy) || null;
   const eps = policyEndpoints(p, settings);
+  const arrived = known
+    ? ((overview && overview.agents) || []).filter(a => !known.has(a.instance_uid) && a.status !== "unenrolled")
+    : [];
   async function mint() {
     setMinting(true);
     try {
@@ -747,60 +786,107 @@ function AddAgentDialog({ open, onClose, t, d, overview, settings, initialPolicy
     } catch (e) { if (onToast) onToast(e.message, false); }
     finally { setMinting(false); }
   }
+  const steps = [t.mesh_add_agent_s1, t.mesh_add_agent_s2, t.mesh_add_agent_s3];
+  const canNext = step === 0 ? !!(p && eps.complete) : step === 1 ? !!token : true;
   return (
-    <Dialog open={open} onClose={onClose} width={900} testid="add-agent-dialog" title={t.mesh_add_agent}>
-      <p className="hint" style={{ margin: "0 0 14px", maxWidth: "80ch" }}>{t.mesh_add_agent_p}</p>
+    <div className="ag-panel" data-testid="add-agent-page" data-step={step}>
+      {/* Back goes top-LEFT: the top-right corner is the alert tray's
+          (alerts.jsx), and a button under a standing popup is unreachable. */}
+      <div style={{ marginBottom: 10 }}>
+        <Btn variant="ghost" size="sm" icon="chevL" onClick={onBack} data-testid="add-agent-back">{t.mesh_add_agent_back}</Btn>
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <h3 className="ag-h" style={{ marginBottom: 2 }}>{t.mesh_add_agent}</h3>
+        <p className="hint" style={{ margin: 0, maxWidth: "70ch" }}>{t.mesh_add_agent_p}</p>
+      </div>
 
-      <div className="card pad" style={{ marginBottom: 16 }} data-testid="add-agent-policy-card">
-        <h4 className="section-title">{t.mesh_add_agent_policy_h}</h4>
-        <p className="hint" style={{ margin: "0 0 8px" }}>{t.mesh_add_agent_policy_p}</p>
-        {policies.length === 0 ? (
-          <p className="hint" data-testid="add-agent-no-policies">{t.mesh_add_agent_no_policies}</p>
-        ) : (
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <select className="select mono" value={policy} aria-label={t.mesh_fleet_policy} data-testid="add-agent-policy"
-              onChange={e => { setPolicy(e.target.value); setToken(null); }} style={{ maxWidth: 320 }}>
-              <option value="" disabled>{t.mesh_add_agent_pick}</option>
-              {policies.map(x => <option key={x.id} value={x.id}>{x.id}{x.name && x.name !== x.id ? ` — ${x.name}` : ""}</option>)}
-            </select>
-            {p && <span className="badge mono">{t.mesh_revision.replace("{n}", p.current_revision)}</span>}
-            {p && <span className="badge">{t.mesh_pol_integ_n.replace("{n}", (p.integrations || []).length)}</span>}
-          </div>
-        )}
-        {p && (
-          <div style={{ marginTop: 10 }}>
-            <PolicyEndpointsLine t={t} ids={p} settings={settings} testid="add-agent-endpoints" />
-            {!eps.complete && (
-              <Banner tone="warn" title={t.mesh_pol_incomplete} testid="add-agent-incomplete" style={{ marginTop: 8 }}>
-                {t.mesh_add_agent_incomplete}
-              </Banner>
+      <div className="stepper" style={{ marginBottom: 16 }}>
+        {steps.map((label, i) => (
+          <span key={label} style={{ display: "contents" }}>
+            <button type="button" className={`step ${i === step ? "active" : ""} ${i < step ? "done" : ""}`}
+              style={{ background: "none", border: "none", padding: 0 }} disabled={i > step}
+              data-testid={`add-agent-step-${i + 1}`} onClick={() => i < step && setStep(i)}>
+              <span className="node">{i < step ? <Icon name="check" size={13} /> : i + 1}</span>
+              <span className="txt">{label}</span>
+            </button>
+            {i < steps.length - 1 && <span className={`line ${i < step ? "done" : ""}`} />}
+          </span>
+        ))}
+      </div>
+
+      <div className="card pad">
+        {step === 0 && (
+          <div className="view-enter" data-testid="add-agent-policy-card">
+            <h4 className="section-title">{t.mesh_add_agent_policy_h}</h4>
+            <p className="hint" style={{ margin: "0 0 10px", maxWidth: "70ch" }}>{t.mesh_add_agent_policy_p}</p>
+            {policies.length === 0 ? (
+              <p className="hint" data-testid="add-agent-no-policies">{t.mesh_add_agent_no_policies}</p>
+            ) : (
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <select className="select mono" value={policy} aria-label={t.mesh_fleet_policy} data-testid="add-agent-policy"
+                  onChange={e => { setPolicy(e.target.value); setToken(null); }} style={{ maxWidth: 320 }}>
+                  <option value="" disabled>{t.mesh_add_agent_pick}</option>
+                  {policies.map(x => <option key={x.id} value={x.id}>{x.id}{x.name && x.name !== x.id ? ` — ${x.name}` : ""}</option>)}
+                </select>
+                {p && <span className="badge mono">{t.mesh_revision.replace("{n}", p.current_revision)}</span>}
+                {p && <span className="badge">{t.mesh_pol_integ_n.replace("{n}", (p.integrations || []).length)}</span>}
+              </div>
+            )}
+            {p && (
+              <div style={{ marginTop: 10 }}>
+                <PolicyEndpointsLine t={t} ids={p} settings={settings} testid="add-agent-endpoints" />
+                {!eps.complete && (
+                  <Banner tone="warn" title={t.mesh_pol_incomplete} testid="add-agent-incomplete" style={{ marginTop: 8 }}>
+                    {t.mesh_add_agent_incomplete}
+                  </Banner>
+                )}
+              </div>
             )}
           </div>
         )}
-        {p && eps.complete && (
-          <div style={{ marginTop: 12 }}>
-            <p className="hint" style={{ margin: "0 0 8px" }}>{t.mesh_add_agent_token_p}</p>
-            <Btn variant="primary" size="sm" icon="check" disabled={minting} data-testid="add-agent-token" onClick={mint}>
-              {token ? t.mesh_token_again : t.mesh_token_get}
-            </Btn>
+
+        {step === 1 && (
+          <div className="view-enter" data-testid="add-agent-token-card">
+            <h4 className="section-title">{t.mesh_add_agent_token_h}</h4>
+            <p className="hint" style={{ margin: "0 0 10px", maxWidth: "70ch" }}>{t.mesh_add_agent_token_p}</p>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+              <span className="badge mono">{policy}</span>
+              <Btn variant="primary" size="sm" icon="check" disabled={minting} data-testid="add-agent-token" onClick={mint}>
+                {token ? t.mesh_token_again : t.mesh_token_get}
+              </Btn>
+            </div>
             {token && (
-              <div style={{ marginTop: 10 }}>
+              <div>
                 <CmdBlock t={t} onToast={onToast} testid="add-agent-token-value" text={token} />
                 <p className="hint" style={{ marginTop: 6 }}>{t.mesh_token_once}</p>
               </div>
             )}
           </div>
         )}
+
+        {step === 2 && (
+          <div className="view-enter" data-testid="add-agent-install-card">
+            <h4 className="section-title">{t.mesh_add_agent_steps_h}</h4>
+            <InstallGuide t={t} target={target} onTarget={setTarget} onToast={onToast}
+              meshUrl={eps.mesh ? eps.mesh.url : null} token={token} />
+            <div data-testid="add-agent-watch" data-seen={arrived.length ? "1" : "0"} style={{ marginTop: 16 }}>
+              <Banner tone={arrived.length ? "ok" : "info"} title={arrived.length ? t.mesh_add_agent_seen_h : t.mesh_add_agent_watch_h}>
+                {arrived.length
+                  ? <span data-testid="add-agent-seen">{t.mesh_add_agent_seen_p.replace("{host}", arrived.map(a => a.hostname || a.instance_uid.slice(0, 12)).join(", "))}</span>
+                  : <span>{t.mesh_add_agent_watch_p}</span>}
+              </Banner>
+            </div>
+          </div>
+        )}
       </div>
 
-      <h4 className="section-title" style={{ marginBottom: 8 }}>{t.mesh_add_agent_steps_h}</h4>
-      <InstallGuide t={t} target={target} onTarget={setTarget} onToast={onToast}
-        meshUrl={eps.mesh ? eps.mesh.url : null} token={token} />
-
-      <div className="dialog-actions">
-        <Btn variant="outline" onClick={onClose} data-testid="add-agent-close">{t.close}</Btn>
+      <div className="dialog-actions" style={{ marginTop: 14 }}>
+        {step > 0 && <Btn variant="ghost" onClick={() => setStep(step - 1)} data-testid="add-agent-prev">{t.back}</Btn>}
+        {step < 2
+          ? <Btn variant="primary" icon="arrowR" disabled={!canNext} onClick={() => setStep(step + 1)} data-testid="add-agent-next">{t.next}</Btn>
+          : <Btn variant="primary" icon="check" onClick={onBack} data-testid="add-agent-done">{t.mesh_add_agent_done}</Btn>}
       </div>
-    </Dialog>
+    </div>
   );
 }
 
@@ -1085,9 +1171,17 @@ function SettingsTab({ t, d, status, overview, settings, onSettings, onToast, on
    the guided first run live on the settings sub-tab; the overview only
    raises what blocks the fleet: no Mesh, a Mesh that does not answer, or
    endpoints not yet configured. ---------------------------------------- */
-function OverviewTab({ t, status, overview, settings, onTab }) {
+function OverviewTab({ t, lang, dep, status, overview, settings, onReload, onToast, onTab }) {
+  const [editing, setEditing] = useState(null);
   const agents = (overview && overview.agents) || [];
   const needEps = settings && ((settings.os_endpoints || []).length === 0 || (settings.mesh_endpoints || []).length === 0);
+  const unenrol = async (uid) => {
+    try {
+      await API.meshUnenrol(dep.id, uid);
+      if (onToast) onToast(t.mesh_unenrolled_toast, true);
+      if (onReload) onReload();
+    } catch (e) { if (onToast) onToast(e.message, false); }
+  };
   return (
     <div className="ag-panel" data-testid="mesh-panel-overview">
       <MeshStatusBanners t={t} status={status} ready={false} />
@@ -1106,62 +1200,20 @@ function OverviewTab({ t, status, overview, settings, onTab }) {
               {t.mesh_seats.replace("{used}", overview.enrolled_total ?? 0).replace("{seats}", overview.seats)}
             </p>
           )}
-
-          <div className="card pad" style={{ marginBottom: 22 }} data-testid="mesh-overview-agents">
-            <div className="fleet-head">
-              <div>
-                <h3 className="section-title" style={{ marginBottom: 2 }}>{t.mesh_ov_agents_h}</h3>
-                <p className="hint" style={{ margin: 0, maxWidth: "70ch" }}>{t.mesh_ov_agents_p}</p>
-              </div>
-              <Btn variant="outline" size="sm" icon="server" onClick={() => onTab("agents")} data-testid="mesh-goto-agents">
-                {t.mesh_tab_agents}
-              </Btn>
+          <div className="fleet-head">
+            <div>
+              <h3 className="ag-h" style={{ marginBottom: 2 }}>{t.mesh_fleet_h}</h3>
+              <p className="hint" style={{ margin: 0, maxWidth: "70ch" }}>{t.mesh_agents_p}</p>
             </div>
-            {agents.length === 0
-              ? <p className="hint" data-testid="mesh-ov-none">{t.mesh_ov_none}</p>
-              : <FleetTable t={t} agents={agents} testid="mesh-overview-fleet" />}
+            <Btn variant="primary" size="sm" icon="plus" onClick={() => onTab("add-agent")} data-testid="mesh-add-agent">
+              {t.mesh_add_agent}
+            </Btn>
           </div>
+          <FleetTable t={t} lang={lang} agents={agents} onEdit={setEditing} onUnenrol={unenrol} />
+          <AgentDialog open={!!editing} onClose={() => setEditing(null)} t={t} lang={lang} d={dep}
+            agent={editing} policies={overview.policies} settings={settings} onDone={onReload} onToast={onToast} />
         </>
       )}
-    </div>
-  );
-}
-
-/* ---- Tab 2: the fleet, and "Add agent" ----------------------------------- */
-function AgentsTab({ t, lang, dep, overview, settings, onReload, onToast, onAddAgent }) {
-  const [editing, setEditing] = useState(null);
-
-  const unenrol = async (uid) => {
-    try {
-      await API.meshUnenrol(dep.id, uid);
-      if (onToast) onToast(t.mesh_unenrolled_toast, true);
-      if (onReload) onReload();
-    } catch (e) { if (onToast) onToast(e.message, false); }
-  };
-
-  if (!overview) {
-    return (
-      <div className="ag-panel" data-testid="mesh-panel-agents">
-        <Banner tone="warn" title={t.mesh_pol_save_h} testid="mesh-agents-blocked">{t.mesh_absent_settings}</Banner>
-      </div>
-    );
-  }
-
-  return (
-    <div className="ag-panel" data-testid="mesh-panel-agents">
-      <FleetSummary t={t} agents={overview.agents} policies={overview.policies} />
-      <div className="fleet-head">
-        <div>
-          <h3 className="ag-h" style={{ marginBottom: 2 }}>{t.mesh_fleet_h}</h3>
-          <p className="hint" style={{ margin: 0, maxWidth: "70ch" }}>{t.mesh_agents_p}</p>
-        </div>
-        <Btn variant="primary" size="sm" icon="plus" onClick={() => onAddAgent(null)} data-testid="mesh-add-agent">
-          {t.mesh_add_agent}
-        </Btn>
-      </div>
-      <FleetTable t={t} agents={overview.agents} onEdit={setEditing} onUnenrol={unenrol} />
-      <AgentDialog open={!!editing} onClose={() => setEditing(null)} t={t} lang={lang} d={dep}
-        agent={editing} policies={overview.policies} settings={settings} onDone={onReload} onToast={onToast} />
     </div>
   );
 }
@@ -1372,16 +1424,17 @@ function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddA
   );
 }
 
-const TABS = ["overview", "agents", "policies", "settings"];
+// The sub-screens: three tabs and the add-agent page (no tab of its own;
+// reached from the overview, a policy card or the first-run guide).
+const TABS = ["overview", "policies", "settings", "add-agent"];
 
 /* The `mesh` tab of one deployment: `/deployments/:id/mesh/:sub`. */
-function MeshTab({ d, lang, sub, onSub, onToast }) {
+function MeshTab({ d, lang, sub, onSub, onToast, initialPolicy }) {
   const t = STR[lang] || STR.pt;
   const [status, setStatus] = useState(null);
   const [overview, setOverview] = useState(null);
   const [settings, setSettings] = useState(null);
   const [tick, setTick] = useState(0);
-  const [addAgent, setAddAgent] = useState(null);
   const active = TABS.includes(sub) ? sub : "overview";
 
   useEffect(() => {
@@ -1410,7 +1463,18 @@ function MeshTab({ d, lang, sub, onSub, onToast }) {
   }, [d.id, tick]);
 
   const reload = () => setTick(x => x + 1);
-  const openAddAgent = (policyId) => setAddAgent({ policy: policyId || null });
+  // The add-agent page, with the policy on the URL so a card's button and a
+  // bookmark both land on step 1 with it chosen.
+  const openAddAgent = (policyId) => onSub("add-agent", policyId ? { policy: policyId } : undefined);
+
+  if (active === "add-agent") {
+    return (
+      <div className="view-enter" data-testid="mesh-tab">
+        <AddAgentPage t={t} lang={lang} d={d} overview={overview} settings={settings}
+          initialPolicy={initialPolicy || null} onBack={() => onSub("overview")} onToast={onToast} />
+      </div>
+    );
+  }
 
   return (
     <div className="view-enter" data-testid="mesh-tab">
@@ -1418,21 +1482,14 @@ function MeshTab({ d, lang, sub, onSub, onToast }) {
       <Tabs
         items={[
           { key: "overview", label: t.mesh_tab_overview, icon: "grid" },
-          { key: "agents", label: t.mesh_tab_agents, icon: "server" },
           { key: "policies", label: t.mesh_tab_policies, icon: "layers" },
           { key: "settings", label: t.mesh_tab_settings, icon: "sliders" },
         ]}
         value={active} onChange={onSub} label={t.tab_mesh} testidPrefix="mesh-tab" />
 
-      <AddAgentDialog open={!!addAgent} onClose={() => setAddAgent(null)} t={t} d={d}
-        overview={overview} settings={settings} initialPolicy={addAgent && addAgent.policy} onToast={onToast} />
-
       {active === "overview" && (
-        <OverviewTab t={t} status={status} overview={overview} settings={settings} onTab={onSub} />
-      )}
-      {active === "agents" && (
-        <AgentsTab t={t} lang={lang} dep={d} overview={overview} settings={settings} onReload={reload} onToast={onToast}
-          onAddAgent={openAddAgent} />
+        <OverviewTab t={t} lang={lang} dep={d} status={status} overview={overview} settings={settings}
+          onReload={reload} onToast={onToast} onTab={onSub} />
       )}
       {active === "policies" && (
         <PoliciesTab t={t} lang={lang} d={d} overview={overview} settings={settings}

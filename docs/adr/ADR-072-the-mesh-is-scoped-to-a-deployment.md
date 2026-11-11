@@ -181,6 +181,42 @@ address per deployment".
   `mesh_policy_endpoints`), `mesh_create_policy` takes the two ids, and
   `mesh_settings` answers the lists plus `in_cluster_os_host`.
 
+## Amendment 3 (2026-11-11): the catalogue, the fleet, the add-agent page
+
+The user's review of the console (2026-11-11) found the Data tab "very
+confusing" — one integration carried its targets, its policies and its
+received-data facts on one card — and the Mesh's *Overview* and *Agents*
+sub-tabs redundant. Three decisions:
+
+- **The Data tab is the catalogue.** Every package, the installed ones in
+  green (installed on the cluster or on any policy of the deployment, an
+  *Installed* filter beside the categories). A card carries no received-
+  data facts and no policy pills: it answers "is it on?" and offers add /
+  configure on the cluster / remove from the cluster / *see in policies*.
+  Per-policy configure and remove stay on the policy's card (amendment to
+  ADR-073's "one dialog": the dialog is still the one onboarding; the
+  per-target rows moved).
+- **What the deployment receives is on the deployment's overview**: a
+  *Data received* panel, one row per active integration — where it is
+  collected (cluster, N policies) and whether documents are landing (the
+  same `monitoring_status` the tab used to poll).
+- **The Mesh overview is the fleet** (the Agents sub-tab is merged into it;
+  `/mesh/agents` redirects). The table is Fleet-shaped: status, host (OS ·
+  arch), policy and applied revision, **CPU, memory**, last report, agent
+  and engine version, edit / unenrol. The agent reports its cost on every
+  check-in in the OpAMP description's non-identifying attributes
+  (`velox.agent.cpu_percent`, `velox.agent.rss_bytes` — the agent process
+  plus the engine it supervises, from `/proc`; `velox.engine`,
+  `velox.engine.version`, `velox.engine.up`), and the Mesh merges them into
+  the agent row's `attributes` at check-in. No protocol extension: the
+  slot exists in OpAMP for exactly this.
+- **"Add agent" is a page, not a dialog**: `/mesh/add-agent[?policy=<id>]`,
+  in three steps — the policy (with its endpoints; an unbound policy does
+  not advance), the token (minted, shown once), install and enrol (the
+  per-system guide with the enrol command completed, and a watch on the
+  fleet that says when a new host reports). An operator does this with a
+  terminal open on the host; a dialog is lost on the first mis-click.
+
 ## Consequences
 
 - One schema migration (`003_deployment_scope.sql`) adds the pair to

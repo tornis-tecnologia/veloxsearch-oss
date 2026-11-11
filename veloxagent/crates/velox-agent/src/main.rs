@@ -27,6 +27,7 @@
 mod preflight;
 mod runtime;
 mod supervisor;
+mod usage;
 
 /// `--flag value` out of the remaining arguments.
 fn flag(args: &[String], name: &str) -> Option<String> {

@@ -838,7 +838,14 @@ async fn read_mesh<T: serde::de::DeserializeOwned>(res: reqwest::Response) -> an
             .unwrap_or(text);
         anyhow::bail!("the Mesh answered {status}: {msg}");
     }
-    Ok(serde_json::from_str(&text)?)
+    // A unit answer (`unenrol` is a bare 200) deserialises as `{}` so the
+    // console gets its empty object, not a 500 for a body that is not there.
+    let text = if text.trim().is_empty() {
+        "{}"
+    } else {
+        text.as_str()
+    };
+    Ok(serde_json::from_str(text)?)
 }
 
 /// The token this control plane authenticates to its Mesh with.

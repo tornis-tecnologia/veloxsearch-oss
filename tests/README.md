@@ -92,33 +92,35 @@ to the tenant namespace.
 
 `mesh_check.py <base> <user> <pw> [shot.png]` drives the **Velox Mesh** tab
 of a deployment (`/deployments/:id/mesh/:sub`, ADR-072; the old `/mesh` must
-redirect): the overview (fleet summary and configured agents, nothing else —
-"Mesh ready" and the guided first run are NOT there), the settings sub-tab
-(the Mesh's state, the ordered first run, the daemons table with the
-controller and each configured Mesh address probed, and the two endpoint
-lists — OpenSearch `host[:port]` and Mesh URL — with the in-cluster address
-offered, never assumed; ADR-072 amendment 2), the policies tab (a policy is
-created with a name AND both endpoints, its card shows and changes the
-binding, an unbound legacy policy is flagged, and integrations are added,
-configured and removed through the SAME dialog the Data tab uses with the
-policy as the fixed target, ADR-073) and the agents tab, where *Add agent*
-opens a dialog that starts with the policy, mints its token, and carries the
-per-target install guide (whose tab set mirrors the Fluent Bit project's own
-downloads index, ADR-069) with the enrol command completed from the policy's
-Mesh endpoint and the token; a policy card opens the same dialog with the
-policy chosen. It then drives the onboarding on the Data tab: *Add* opens a
-dialog that asks where (this cluster, a policy — preselected when sent over
-with `?policy=` — or a new one, enabled only with endpoints configured) and
-what (the package's inputs and variables), and the row then shows every
-target the integration is on, removable per target. When a Velox Mesh is
-configured it also checks the fleet: each agent row's up/down agrees with
-its derived status, the row has no policy picker, and the agent's editor
-shows the policy, its endpoints and integrations, and a *Deploy* that stays
-disabled until something changes. Without one, the dialog's only target is
-the cluster and the fleet assertions are skipped. It creates the endpoints
+redirect, and `/mesh/agents` lands on the overview): the overview, which IS
+the fleet (ADR-072 amendment 3: the summary, then a Fleet-shaped table with
+CPU, memory, last report and versions, no policy picker on the rows — the
+agent's editor is where the policy is picked, with the policy's endpoints
+and integrations as dependencies and a *Deploy* that stays disabled until
+something changes), the settings sub-tab (the Mesh's state, the ordered
+first run, the daemons table with the controller and each configured Mesh
+address probed, and the two endpoint lists — OpenSearch `host[:port]` or
+URL, and Mesh URL — with the in-cluster address offered, never assumed;
+ADR-072 amendment 2), the policies tab (a policy is created with a name AND
+both endpoints, its card shows and changes the binding, an unbound legacy
+policy is flagged, and integrations are added, configured and removed
+through the SAME dialog the Data tab uses with the policy as the fixed
+target, ADR-073) and the **add-agent page** (`/mesh/add-agent?policy=`):
+three steps — the policy, its token, the per-target install guide (whose
+tab set mirrors the Fluent Bit project's own downloads index, ADR-069) with
+the enrol command completed from the policy's Mesh endpoint and the token,
+and a watch on the fleet; a policy card opens it with the policy chosen. It
+then drives the onboarding on the Data tab — the catalogue, where an
+installed integration is a green card with no received-data facts and no
+policy pills (those are on the deployment's overview's *Data received*
+panel and on the policy's card): *Add* opens the dialog that asks where
+(this cluster, a policy — preselected when sent over with `?policy=` — or a
+new one, enabled only with endpoints configured) and what (the package's
+inputs and variables). Without a Mesh the dialog's only target is the
+cluster and the fleet assertions are skipped. It creates the endpoints
 `e2e-os`/`e2e-mesh` on the deployment's settings and `e2e-policy` on the
-Mesh, and adds/removes `ssh` on it; it touches no cluster state otherwise.
-Needs Playwright and an authenticated install.
+Mesh, mints a token for it, and adds/removes `ssh` on it; it touches no
+cluster state otherwise. Needs Playwright and an authenticated install.
 
 ## Fixtures
 

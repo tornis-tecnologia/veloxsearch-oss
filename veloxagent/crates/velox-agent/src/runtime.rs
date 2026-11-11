@@ -403,8 +403,10 @@ pub async fn run() -> Result<(), String> {
     })?;
 
     let verdict = preflight::probe();
-    let (bin, dry_run) = match (preflight::find_engine().0, &verdict) {
-        (Some(bin), preflight::Verdict::Ok { dry_run, .. }) => (bin, *dry_run),
+    let (bin, dry_run, engine_version) = match (preflight::find_engine().0, &verdict) {
+        (Some(bin), preflight::Verdict::Ok { dry_run, version }) => {
+            (bin, *dry_run, version.to_string())
+        }
         _ => {
             // Report the refusal to the Mesh anyway, then stop: an agent that
             // cannot drive its engine must say so where the operator is
@@ -437,6 +439,11 @@ pub async fn run() -> Result<(), String> {
     let mut applied_hash = String::new();
     let mut status = velox_opamp::RemoteConfigStatuses::Unset;
     let mut error = String::new();
+    // What this host costs (usage.rs), carried on every check-in in the
+    // description's non-identifying attributes — the OpAMP slot for facts
+    // about the agent that change — so the fleet view can show CPU, memory
+    // and the engine's version per agent without a second protocol.
+    let mut meter = crate::usage::Meter::default();
 
     // Backoff between restart attempts, so an engine that cannot start does
     // not become a spawn loop. Resets as soon as one stays up.
@@ -467,10 +474,11 @@ pub async fn run() -> Result<(), String> {
             }
         }
 
+        let usage = meter.round(engine.child.as_ref().map(|c| c.id()));
         let msg = velox_opamp::AgentToServer {
             instance_uid: id.instance_uid.clone(),
             sequence_num: seq,
-            agent_description: None,
+            agent_description: Some(describe(&engine_version, engine.alive(), &usage)),
             remote_config_status: Some(velox_opamp::RemoteConfigStatus {
                 last_remote_config_hash: applied_hash.clone(),
                 status,
@@ -619,6 +627,46 @@ async fn report_fatal(id: &Identity, message: &str) -> Result<(), String> {
         .await
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// The agent's description for a check-in: what identifies the install
+/// (the same three facts `enrol` sent) and what changes round to round —
+/// the engine and its version, whether it is up, and the host usage. The
+/// Mesh merges the non-identifying map into the agent's stored attributes.
+fn describe(
+    engine_version: &str,
+    engine_up: bool,
+    usage: &crate::usage::Usage,
+) -> velox_opamp::AgentDescription {
+    let mut non_identifying = std::collections::BTreeMap::new();
+    non_identifying.insert("velox.engine".to_string(), FLUENT_BIT.to_string());
+    non_identifying.insert(
+        "velox.engine.version".to_string(),
+        engine_version.to_string(),
+    );
+    non_identifying.insert(
+        "velox.engine.up".to_string(),
+        if engine_up { "true" } else { "false" }.to_string(),
+    );
+    if let Some(p) = usage.cpu_percent {
+        non_identifying.insert("velox.agent.cpu_percent".to_string(), format!("{p}"));
+    }
+    if let Some(b) = usage.rss_bytes {
+        non_identifying.insert("velox.agent.rss_bytes".to_string(), b.to_string());
+    }
+    velox_opamp::AgentDescription {
+        identifying_attributes: [
+            ("velox.os".to_string(), std::env::consts::OS.to_string()),
+            ("velox.arch".to_string(), std::env::consts::ARCH.to_string()),
+            (
+                "velox.agent.version".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        non_identifying_attributes: non_identifying,
+    }
 }
 
 #[cfg(test)]

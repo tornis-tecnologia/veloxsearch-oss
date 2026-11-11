@@ -160,6 +160,21 @@ async fn opamp(
         .health
         .as_ref()
         .and_then(|h| serde_json::to_value(h).ok());
+    // The description's two maps fold into the agent's attributes: the
+    // identifying ones repeat what enrolment recorded, the non-identifying
+    // ones (engine version, CPU, memory — velox-agent's usage.rs) are the
+    // facts the fleet view shows per row.
+    let attributes = msg.agent_description.as_ref().map(|d| {
+        let mut m = serde_json::Map::new();
+        for (k, v) in d
+            .identifying_attributes
+            .iter()
+            .chain(d.non_identifying_attributes.iter())
+        {
+            m.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+        serde_json::Value::Object(m)
+    });
     store::checkin(
         &st.pg,
         &agent.instance_uid,
@@ -168,6 +183,7 @@ async fn opamp(
         status.as_str(),
         &error,
         health.as_ref(),
+        attributes.as_ref(),
     )
     .await
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;

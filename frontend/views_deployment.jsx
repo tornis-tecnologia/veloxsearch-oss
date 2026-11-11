@@ -465,6 +465,10 @@ function OverviewTab({ d, lang, onToast, hostNodes, onTab }) {
         </div>
       </div>
 
+      {/* What arrives, per integration: the receiving facts moved here from
+          the Data tab, which is now the catalogue alone. */}
+      <ReceivingPanel d={d} lang={lang} onTab={onTab} />
+
       {/* One row per node: three meters side by side read as a comparison. A
           cell is emphasised only past the bar's own threshold — never the
           whole row, and never because of a number that means nothing here. */}
@@ -1088,6 +1092,103 @@ function fmtAge(sec, t) {
 // The runtime catalog (ADR-039 / ADR-047, #76). Installed first, then the
 // catalog in a grid with search and categories. The degraded-registry states
 // are RENDERED, not hidden.
+/* What this deployment receives, per integration — on the overview, where
+   the question "is data arriving?" is asked, and off the Data tab, which is
+   the catalogue. An integration is on when the cluster or any Mesh policy
+   collects it; each row says where it is collected and whether documents
+   are landing (the same monitoring_status the tab used to poll). */
+function ReceivingPanel({ d, lang, onTab }) {
+  const t = STR[lang];
+  const [items, setItems] = useState(null);
+  const [policies, setPolicies] = useState([]);
+  const [status, setStatus] = useState({});
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      API.catalog(d.id).then(v => { if (alive) setItems((v && v.integrations) || []); }).catch(() => { if (alive) setItems([]); });
+      API.meshOverview(d.id).then(o => { if (alive) setPolicies((o && o.policies) || []); }).catch(() => { if (alive) setPolicies([]); });
+    };
+    load();
+    const h = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(h); };
+  }, [d.id]);
+  const monitors = d.monitors || [];
+  const onCluster = (it) => it.installed_version != null || monitors.includes(it.id);
+  const hostPolicies = {};
+  policies.forEach(p => (p.integrations || []).forEach(i => { (hostPolicies[i] = hostPolicies[i] || []).push(p.id); }));
+  const installed = (items || []).filter(it => onCluster(it) || !!hostPolicies[it.id]);
+  const sig = installed.map(it => it.id).join(",");
+  useEffect(() => {
+    if (!sig) return undefined;
+    let alive = true;
+    const load = async () => {
+      if (document.hidden) return;
+      for (const k of sig.split(",")) {
+        try {
+          const s = await API.monitoringStatus(d.id, k);
+          if (!alive) return;
+          setStatus(c => ({ ...c, [k]: s }));
+        } catch {
+          if (!alive) return;
+          setStatus(c => ({ ...c, [k]: undefined }));
+        }
+      }
+    };
+    load();
+    const h = setInterval(load, INTEG_POLL_MS);
+    return () => { alive = false; clearInterval(h); };
+  }, [d.id, sig]);
+  const rowStatus = (it) => {
+    const st = status[it.id];
+    const count = st ? st.doc_count : 0;
+    const lastMs = st && st.last_doc_at ? Date.parse(st.last_doc_at) : NaN;
+    const lastAge = Number.isFinite(lastMs) ? Math.max(0, Math.round((Date.now() - lastMs) / 1000)) : null;
+    if (st && st.receiving) return { live: true, text: `${t.receiving} · ${fmtInt(count, lang)} ${t.docs}` };
+    if (!st || count === 0) return { live: false, text: t.no_data };
+    if (st.state === "untimed") return { live: false, text: `${fmtInt(count, lang)} ${t.docs} — ${t.integ_recency_unknown}` };
+    return { live: false, text: `${t.integ_no_recent}${lastAge != null ? ` — ${t.integ_last_data.replace("{age}", fmtAge(lastAge, t))}` : ""} · ${fmtInt(count, lang)} ${t.docs}` };
+  };
+  const where = (it) => {
+    const parts = [];
+    if (onCluster(it)) parts.push(t.integ_target_cluster);
+    if (hostPolicies[it.id]) parts.push(t.ov_rec_policies.replace("{n}", hostPolicies[it.id].length));
+    return parts.join(" · ");
+  };
+  return (
+    <div className="card" style={{ marginBottom: 14 }} data-testid="ov-receiving">
+      <div className="card-head">
+        <h3><Icon name="spark" size={14} /> {t.ov_receiving_h}</h3>
+        <span className="sub">{t.ov_receiving_p}</span>
+        <div className="right">
+          <Btn variant="ghost" size="sm" icon="plus" onClick={() => onTab("data")} data-testid="ov-receiving-add">{t.integ_add}</Btn>
+        </div>
+      </div>
+      {items === null ? (
+        <p className="hint" style={{ margin: "10px 14px" }}>{t.integ_loading}</p>
+      ) : installed.length === 0 ? (
+        <p className="hint" style={{ margin: "10px 14px" }} data-testid="ov-receiving-none">{t.ov_receiving_none}</p>
+      ) : (
+        <table className="fleet" style={{ margin: 0 }}>
+          <thead><tr><th>{t.ov_rec_integration}</th><th>{t.ov_rec_where}</th><th>{t.ov_rec_status}</th></tr></thead>
+          <tbody>
+            {installed.map(it => {
+              const rs = rowStatus(it);
+              const title = loc(it.title, lang, it.id);
+              return (
+                <tr key={it.id} data-testid={`ov-receiving-${it.id}`} data-live={rs.live ? "1" : "0"}>
+                  <td><span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}><span className="integ-mono on">{monogram(it.id, title)}</span><b>{title}</b></span></td>
+                  <td className="hint">{where(it)}</td>
+                  <td className={rs.live ? "live" : "idle"}>{rs.live && <Icon name="spark" size={12} style={{ verticalAlign: -2, marginRight: 4 }} />}{rs.text}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
   const t = STR[lang];
   const [view, setView] = useState(null);
@@ -1117,7 +1218,6 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
   const [dialog, setDialog] = useState(null);
   const [pendingPolicy, setPendingPolicy] = useState(intent && intent.policy ? intent.policy : null);
   const [loadErr, setLoadErr] = useState("");
-  const [status, setStatus] = useState({});
   const [busy, setBusy] = useState({});
   const [itemErr, setItemErr] = useState({});
   const [q, setQ] = useState("");
@@ -1140,7 +1240,6 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
   const onCluster = (it) => it.installed_version != null || monitors.includes(it.id);
   // Active anywhere: the cluster or any policy of this deployment.
   const isInstalled = (it) => onCluster(it) || !!hostPolicies[it.id];
-  const installedSig = items.filter(isInstalled).map(it => it.id).join(",");
 
   useEffect(() => {
     if (!intent || !intent.integration || !items.length) return;
@@ -1176,27 +1275,6 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
       setBusy(b => ({ ...b, [it.id]: null }));
     }
   }
-
-  useEffect(() => {
-    if (!installedSig) return undefined;
-    let alive = true;
-    const load = async () => {
-      if (document.hidden) return;
-      for (const k of installedSig.split(",")) {
-        try {
-          const s = await API.monitoringStatus(d.id, k);
-          if (!alive) return;
-          setStatus(c => ({ ...c, [k]: s }));
-        } catch {
-          if (!alive) return;
-          setStatus(c => ({ ...c, [k]: undefined }));
-        }
-      }
-    };
-    load();
-    const h = setInterval(load, INTEG_POLL_MS);
-    return () => { alive = false; clearInterval(h); };
-  }, [d.id, installedSig]);
 
   // An update keeps the recorded inputs: the cluster target re-installed at
   // the catalog's version.
@@ -1240,21 +1318,11 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
   const installedItems = items.filter(isInstalled);
   const needle = q.trim().toLowerCase();
   const catOf = (it) => INTEG_CAT[it.id] || "other";
-  const counts = CATS.reduce((m, c) => { m[c] = items.filter(it => !isInstalled(it) && (c === "all" || catOf(it) === c)).length; return m; }, {});
-  const available = items.filter(it => !isInstalled(it)
-    && (cat === "all" || catOf(it) === cat)
-    && (!needle || loc(it.title, lang, it.id).toLowerCase().includes(needle) || it.id.includes(needle) || loc(it.summary, lang, "").toLowerCase().includes(needle)));
-
-  const rowStatus = (it) => {
-    const st = status[it.id];
-    const count = st ? st.doc_count : 0;
-    const lastMs = st && st.last_doc_at ? Date.parse(st.last_doc_at) : NaN;
-    const lastAge = Number.isFinite(lastMs) ? Math.max(0, Math.round((Date.now() - lastMs) / 1000)) : null;
-    if (st && st.receiving) return { live: true, text: `${t.receiving} · ${fmtInt(count, lang)} ${t.docs}` };
-    if (!st || count === 0) return { live: false, text: t.no_data };
-    if (st.state === "untimed") return { live: false, text: `${fmtInt(count, lang)} ${t.docs} — ${t.integ_recency_unknown}` };
-    return { live: false, text: `${t.integ_no_recent}${lastAge != null ? ` — ${t.integ_last_data.replace("{age}", fmtAge(lastAge, t))}` : ""} · ${fmtInt(count, lang)} ${t.docs}` };
-  };
+  const counts = CATS.reduce((m, c) => { m[c] = items.filter(it => c === "all" || catOf(it) === c).length; return m; }, {});
+  // Installed first within the view, so what is on reads at the top.
+  const shown = items.filter(it => (cat === "all" || (cat === "installed" ? isInstalled(it) : catOf(it) === cat))
+    && (!needle || loc(it.title, lang, it.id).toLowerCase().includes(needle) || it.id.includes(needle) || loc(it.summary, lang, "").toLowerCase().includes(needle)))
+    .sort((a, b) => Number(isInstalled(b)) - Number(isInstalled(a)));
 
   return (
     <div className="view-enter" data-testid="integrations-tab">
@@ -1272,76 +1340,16 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
         agentsByPolicy={agentsByPolicy} onToast={onToast}
         onDone={() => { setPendingPolicy(null); reload(); setMeshTick(x => x + 1); }} />
 
-      {/* 1. what is already sending data */}
-      <div className="section-title">{t.integ_installed_h} <span className="tab-count">{installedItems.length}</span></div>
-      {installedItems.length === 0 ? (
-        <p className="hint" style={{ marginBottom: 18 }} data-testid="integ-none-installed">{t.integ_none_installed}</p>
-      ) : (
-        <div style={{ display: "grid", gap: 8, marginBottom: 18 }}>
-          {installedItems.map(it => {
-            const state = it.update_available ? "update" : "installed";
-            const rs = rowStatus(it);
-            const working = busy[it.id];
-            const err = itemErr[it.id];
-            return (
-              <div className="card installed-row" key={it.id} data-testid={`integration-${it.id}`} data-state={state}>
-                <span className="integ-mono on">{monogram(it.id, loc(it.title, lang, it.id))}</span>
-                <div style={{ minWidth: 0 }}>
-                  <div className="ttl">
-                    <b>{loc(it.title, lang, it.id)}</b>
-                    {onCluster(it) && (
-                      <span className="badge green mono" data-testid={`installed-${it.id}`} title={t.add_integ_cluster}>
-                        <Icon name="check" size={11} />{t.integ_target_cluster} {it.installed_version || `(${t.integ_version_unknown})`}
-                      </span>
-                    )}
-                    {(hostPolicies[it.id] || []).map(pid => (
-                      <span key={pid} className="badge green mono" data-testid={`on-policy-${it.id}-${pid}`}>
-                        <Icon name="server" size={11} />{pid}
-                      </span>
-                    ))}
-                    {state === "update" && onCluster(it) && <span className="badge yellow" data-testid={`update-badge-${it.id}`}>{t.integ_update_badge} · {it.version}</span>}
-                    {it.builtin && <span className="badge">{t.integ_builtin}</span>}
-                  </div>
-                  <div className="d">{loc(it.summary, lang, "")}</div>
-                  <div className={rs.live ? "live" : "idle"} style={{ marginTop: 4 }}>{rs.live && <Icon name="spark" size={12} style={{ verticalAlign: -2, marginRight: 4 }} />}{rs.text}</div>
-                  {err && <div className="field-err" data-testid={`error-${it.id}`}>{err}</div>}
-                </div>
-                <div className="acts">
-                  {state === "update" && onCluster(it) && (
-                    <Btn variant="primary" size="sm" icon="arrowUp" disabled={!!working || !!locked}
-                      data-testid={`update-${it.id}`} onClick={() => act(it.id, "install", it.version)}>
-                      {working === "install" ? t.integ_installing : t.integ_update}
-                    </Btn>
-                  )}
-                  {dashUrl && <a href={`${dashUrl}/app/dashboards`} target="_blank" rel="noreferrer" className="btn btn-outline btn-sm">{t.open_dashboard}<Icon name="ext" size={12} /></a>}
-                  {/* One entry per target it is on (configure / remove), plus
-                      "add to another" — the same dialog as the catalog's. */}
-                  <Menu label={t.more_actions} testid={`integ-menu-${it.id}`} items={[
-                    { label: t.integ_add_target, icon: "plus", disabled: !!working || !!locked, testid: `add-more-${it.id}`, onClick: () => openAdd(it, null) },
-                    { sep: true },
-                    ...([...(onCluster(it) ? [CLUSTER_TARGET] : []), ...(hostPolicies[it.id] || [])].flatMap(target => {
-                      const label = target === CLUSTER_TARGET ? t.integ_target_cluster : target;
-                      return [
-                        { label: t.integ_edit_target.replace("{target}", label), icon: "sliders", disabled: !!working || !!locked,
-                          testid: `edit-${it.id}-${target}`, onClick: () => openEdit(it, target) },
-                        { label: t.integ_remove_target.replace("{target}", label), icon: "trash", danger: true, disabled: !!working || !!locked,
-                          testid: target === CLUSTER_TARGET ? `uninstall-${it.id}` : `remove-${it.id}-${target}`, onClick: () => removeFrom(it, target) },
-                      ];
-                    })),
-                  ]} />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* 2. the second collection option (ADR-053) */}
+      {/* The second collection option (ADR-053) */}
       <ObservabilityStackPanel d={d} lang={lang} locked={locked} onToggle={onToggleStack} onToast={onToast} />
 
-      {/* 3. the catalog */}
+      {/* The catalogue is the whole screen: every package, the installed
+          ones in green. What an integration RECEIVES is a fact about the
+          deployment and lives on its overview (ReceivingPanel); which policy
+          collects it is the Mesh's and lives on the policy's card. Here a
+          card answers "is it on?" and offers add / configure / remove. */}
       <div className="section-title" style={{ justifyContent: "space-between" }}>
-        <span>{t.integ_catalog_h}</span>
+        <span>{t.integ_catalog_h} <span className="tab-count">{installedItems.length}/{items.length}</span></span>
         {view.source === "registry"
           ? <span data-testid="catalog-source" data-source="registry" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>{t.integ_src_registry.replace("{age}", age)}</span>
           : null}
@@ -1369,21 +1377,27 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
                   <span>{t[`integ_cat_${c}`]}</span><i>{counts[c]}</i>
                 </button>
               ))}
+              <button type="button" aria-pressed={cat === "installed"} onClick={() => setCat("installed")} data-testid="integ-cat-installed">
+                <span>{t.integ_cat_installed}</span><i>{installedItems.length}</i>
+              </button>
             </nav>
           </div>
           <div>
-            {available.length === 0 ? (
-              <p className="hint" data-testid="integ-no-match">{counts.all === 0 ? t.integ_all_installed : t.integ_no_match}</p>
+            {shown.length === 0 ? (
+              <p className="hint" data-testid="integ-no-match">{t.integ_no_match}</p>
             ) : (
               <div className="integ-grid">
-                {available.map(it => {
+                {shown.map(it => {
                   const working = busy[it.id];
                   const err = itemErr[it.id];
+                  const on = isInstalled(it);
+                  const state = !on ? "available" : (it.update_available && onCluster(it) ? "update" : "installed");
+                  const title = loc(it.title, lang, it.id);
                   return (
-                    <div className="card integ-card" key={it.id} data-testid={`integration-${it.id}`} data-state="available">
+                    <div className={`card integ-card${on ? " on" : ""}`} key={it.id} data-testid={`integration-${it.id}`} data-state={state}>
                       <div className="top">
-                        <span className="integ-mono">{monogram(it.id, loc(it.title, lang, it.id))}</span>
-                        <b title={loc(it.title, lang, it.id)}>{loc(it.title, lang, it.id)}</b>
+                        <span className={`integ-mono${on ? " on" : ""}`}>{monogram(it.id, title)}</span>
+                        <b title={title}>{title}</b>
                       </div>
                       <div className="d">{loc(it.summary, lang, "")}</div>
                       {!it.compatible && (
@@ -1393,11 +1407,43 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
                       )}
                       {err && <div className="field-err" data-testid={`error-${it.id}`}>{err}</div>}
                       <div className="ft">
-                        <Btn variant="outline" size="sm" icon="plus" disabled={!!working || !!locked || !it.compatible}
-                          data-testid={`install-${it.id}`} onClick={() => openAdd(it, null)}>
-                          {t.integ_add}
-                        </Btn>
-                        <span className="badge mono" title={`${t.integ_version} ${it.version}`}>{it.version}</span>
+                        {!on ? (
+                          <Btn variant="outline" size="sm" icon="plus" disabled={!!working || !!locked || !it.compatible}
+                            data-testid={`install-${it.id}`} onClick={() => openAdd(it, null)}>
+                            {t.integ_add}
+                          </Btn>
+                        ) : (
+                          <>
+                            <span className="badge green" data-testid={`installed-${it.id}`}>
+                              <Icon name="check" size={11} />{t.integ_installed_badge}
+                            </span>
+                            {state === "update" && (
+                              <Btn variant="primary" size="sm" icon="arrowUp" disabled={!!working || !!locked}
+                                data-testid={`update-${it.id}`} onClick={() => act(it.id, "install", it.version)}>
+                                {working === "install" ? t.integ_installing : t.integ_update}
+                              </Btn>
+                            )}
+                            <Menu label={t.more_actions} testid={`integ-menu-${it.id}`} items={[
+                              { label: t.integ_add_target, icon: "plus", disabled: !!working || !!locked, testid: `add-more-${it.id}`, onClick: () => openAdd(it, null) },
+                              ...(onCluster(it) ? [
+                                { sep: true },
+                                { label: t.integ_edit_target.replace("{target}", t.integ_target_cluster), icon: "sliders", disabled: !!working || !!locked,
+                                  testid: `edit-${it.id}-${CLUSTER_TARGET}`, onClick: () => openEdit(it, CLUSTER_TARGET) },
+                                { label: t.integ_remove_target.replace("{target}", t.integ_target_cluster), icon: "trash", danger: true, disabled: !!working || !!locked,
+                                  testid: `uninstall-${it.id}`, onClick: () => removeFrom(it, CLUSTER_TARGET) },
+                              ] : []),
+                              ...(hostPolicies[it.id] ? [
+                                { sep: true },
+                                { label: t.integ_policies_link.replace("{n}", hostPolicies[it.id].length), icon: "layers",
+                                  testid: `integ-policies-${it.id}`, onClick: () => onTab("mesh", "policies") },
+                              ] : []),
+                              ...(dashUrl ? [{ sep: true }, { label: t.open_dashboard, icon: "ext", testid: `dash-${it.id}`, onClick: () => window.open(`${dashUrl}/app/dashboards`, "_blank", "noopener") }] : []),
+                            ]} />
+                          </>
+                        )}
+                        {it.builtin && <span className="badge">{t.integ_builtin}</span>}
+                        {state === "update" && <span className="badge yellow" data-testid={`update-badge-${it.id}`}>{t.integ_update_badge} · {it.version}</span>}
+                        <span className="badge mono" title={`${t.integ_version} ${it.version}`}>{on && it.installed_version ? it.installed_version : it.version}</span>
                       </div>
                     </div>
                   );
@@ -1654,7 +1700,8 @@ function DeploymentView({ d, lang, hostNodes = [], tab, sub, integration, policy
       {tab === "overview" && <OverviewTab d={d} lang={lang} onToast={onToast} hostNodes={hostNodes} onTab={onTab} />}
       {tab === "data" && <DataTab d={d} lang={lang} onToggleStack={onToggleStack} onToast={onToast} locked={locked} onTab={onTab}
         intent={integration || policy ? { integration, policy } : null} />}
-      {tab === "mesh" && <MeshTab d={d} lang={lang} sub={sub} onSub={s => onTab("mesh", s)} onToast={onToast} />}
+      {tab === "mesh" && <MeshTab d={d} lang={lang} sub={sub} onSub={(s, extra) => onTab("mesh", s, extra)} onToast={onToast}
+        initialPolicy={policy || null} />}
       {tab === "backup" && <SnapshotTab d={d} lang={lang} onToast={onToast} locked={locked} />}
       {tab === "access" && <AccessTab d={d} lang={lang} onReset={onResetPass} onToast={onToast} locked={locked} />}
       {tab === "config" && <ConfigTab d={d} lang={lang} onSave={onSaveEdit} onToast={onToast} locked={locked} onDeleteRequest={() => setConfirm(true)} />}

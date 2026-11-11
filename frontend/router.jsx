@@ -12,8 +12,9 @@
      /deployments/new           the create wizard
      /deployments/:id           → /deployments/:id/overview
      /deployments/:id/:tab      overview | data | backup | access | config | activity | mesh
-     /deployments/:id/mesh/:sub overview | agents | policies | settings (ADR-072: the Mesh
-                                is the deployment's)
+     /deployments/:id/mesh/:sub overview | policies | settings | add-agent (ADR-072: the
+                                Mesh is the deployment's; `agents` → overview;
+                                add-agent?policy=<id> starts the page on that policy)
      /deployments/:id/data?integration=<id>&policy=<cluster|id>
                                 opens the add-integration dialog on that
                                 integration and/or with that target preselected
@@ -38,7 +39,9 @@ import { useState, useEffect, useCallback } from "react";
 const TABS = ["overview", "data", "backup", "access", "config", "activity", "mesh"];
 // The Mesh tab's sub-screens (ADR-072). Same rule as the deployment tabs:
 // an unknown segment falls back rather than 404ing a bookmark.
-const MESH_TABS = ["overview", "agents", "policies", "settings"];
+const MESH_TABS = ["overview", "policies", "settings", "add-agent"];
+// The pre-merge Agents sub-tab: the fleet is the overview now.
+const MESH_ALIASES = { agents: "overview" };
 const TAB_ALIASES = {
   edit: "config", integrations: "data", snapshot: "backup",
   security: "access", auth: "access",
@@ -60,7 +63,13 @@ function parse(pathname, search) {
       tab = TAB_ALIASES[tab] || tab;
       if (!TABS.includes(tab)) tab = "overview";
       const r = { name: "deployment", id, tab, upgrade: q.get("upgrade") === "1" };
-      if (tab === "mesh") r.sub = MESH_TABS.includes(seg[3]) ? seg[3] : "overview";
+      if (tab === "mesh") {
+        const sub = MESH_ALIASES[seg[3]] || seg[3];
+        r.sub = MESH_TABS.includes(sub) ? sub : "overview";
+        // An aliased sub-tab is replaced on the URL (app.jsx), so the
+        // canonical path is what the bar shows and the Back button keeps.
+        if (MESH_ALIASES[seg[3]]) r.redirect = pathFor(r);
+      }
       // One-shot intents for the Data tab's onboarding (ADR-073): the
       // integration to open the dialog on, and/or the policy to preselect
       // as its target ("cluster" or a policy id). The Mesh tab sends them.

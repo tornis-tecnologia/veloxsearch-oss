@@ -616,7 +616,12 @@ pub async fn checkin(
     config_status: &str,
     config_error: &str,
     health: Option<&serde_json::Value>,
+    attributes: Option<&serde_json::Value>,
 ) -> Result<()> {
+    // `attributes` is merged, not replaced: the enrolment's identifying
+    // facts stay, and the check-in's changing ones (usage, engine version)
+    // overwrite their own keys only. An agent that sends no description
+    // leaves the row's attributes as they were.
     pg.execute(
         "UPDATE mesh_agents SET
              last_seen = $2,
@@ -624,7 +629,8 @@ pub async fn checkin(
              applied_hash = COALESCE($4, applied_hash),
              config_status = $5,
              config_error = $6,
-             health = COALESCE($7, health)
+             health = COALESCE($7, health),
+             attributes = attributes || COALESCE($8, '{}'::jsonb)
          WHERE instance_uid = $1",
         &[
             &instance_uid,
@@ -634,6 +640,7 @@ pub async fn checkin(
             &config_status,
             &config_error,
             &health,
+            &attributes,
         ],
     )
     .await?;

@@ -137,12 +137,12 @@ with sync_playwright() as p:
     if has_mesh:
         chips = page.locator('[data-testid^="mesh-sum-"]')
         check(chips.count() == 5, f"the fleet summary has one chip per status bucket (got {chips.count()})")
-        total = page.locator('[data-testid="mesh-overview-fleet"] tbody tr').count()
+        total = page.locator('[data-testid="mesh-fleet"] tbody tr').count()
         summed = sum(int(chips.nth(i).get_attribute("data-n")) for i in range(chips.count()))
         check(summed == total, f"the chips add up to the configured agents ({summed} = {total})")
-        check(page.locator('[data-testid="mesh-overview-agents"]').count() == 1,
-              "the overview lists the configured agents")
-        check(page.locator('[data-testid="mesh-overview-fleet"] select').count() == 0,
+        check(page.locator('[data-testid="mesh-add-agent"]').count() == 1,
+              "the overview is the fleet, with 'Add agent'")
+        check(page.locator('[data-testid="mesh-fleet"] select').count() == 0,
               "the overview's agent list is read-only")
         check(page.locator('[data-testid="mesh-seats"]').count() == 1,
               "seats are shown as the installation's, not the deployment's")
@@ -246,7 +246,7 @@ with sync_playwright() as p:
         check("undefined" not in body and "mesh_" not in body, "the policy card renders no raw key")
         check(page.locator(f'[data-testid="policy-add-agent-{E2E_POLICY}"]').count() == 1
               and page.locator(f'[data-testid="policy-token-{E2E_POLICY}"]').count() == 0,
-              "the card adds an agent through the dialog; no bare token button")
+              "the card adds an agent through the page; no bare token button")
 
         # "Add integration" on the card picks a package and opens the one
         # dialog with the policy fixed: no "where" step.
@@ -276,47 +276,49 @@ with sync_playwright() as p:
         page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
         check(True, "an integration is removed from the policy on its card")
 
-    # ---- the agents tab: the fleet and the add-agent dialog ---------------
+    # ---- the overview IS the fleet (the Agents tab merged into it), and
+    # "Add agent" is a page in steps, not a dialog ---------------------------
     page.goto(f"{base}/deployments/{dep}/mesh/agents", wait_until="networkidle")
-    page.wait_for_selector('[data-testid="mesh-panel-agents"]', timeout=15000)
+    page.wait_for_selector('[data-testid="mesh-panel-overview"]', timeout=15000)
+    check(page.url.rstrip("/").endswith("/mesh"), f"the old agents sub-tab lands on the overview ({page.url})")
+    check(page.locator('[data-testid="mesh-tab-agents"]').count() == 0, "no Agents sub-tab: the overview is the fleet")
     check(page.locator('[data-testid^="agents-panel-"]').count() == 0,
-          "no inline install guide on the Agents tab: it is behind 'Add agent'")
+          "no inline install guide on the overview: it is behind 'Add agent'")
     if has_mesh:
         page.wait_for_selector('[data-testid="mesh-fleet"], [data-testid="mesh-fleet-empty"]', timeout=15000)
         page.click('[data-testid="mesh-add-agent"]')
-        page.wait_for_selector('[data-testid="add-agent-dialog"]', timeout=10000)
+        page.wait_for_selector('[data-testid="add-agent-page"]', timeout=10000)
+        check("/mesh/add-agent" in page.url, f"'Add agent' is a page with a URL ({page.url})")
         check(page.locator('[data-testid="add-agent-policy"]').count() == 1,
-              "the dialog starts with the policy: every agent runs one")
+              "the page starts with the policy: every agent runs one")
+        check(page.locator('[data-testid="add-agent-next"]').is_disabled(), "no policy chosen: cannot advance")
         page.select_option('[data-testid="add-agent-policy"]', E2E_POLICY)
         page.wait_for_selector('[data-testid="add-agent-endpoints"][data-complete="1"]', timeout=10000)
         check(True, "the chosen policy's endpoints are shown")
-        cmd = page.locator('[data-testid="enroll-cmd"]').inner_text()
-        check(E2E_MESH_URL in cmd and "TOKEN" in cmd,
-              f"the enrol command carries the policy's Mesh address and a token placeholder ({cmd.strip()})")
+        page.click('[data-testid="add-agent-next"]')
+        page.wait_for_selector('[data-testid="add-agent-token-card"]', timeout=10000)
+        check(page.locator('[data-testid="add-agent-next"]').is_disabled(), "step 2 waits for the token")
         page.click('[data-testid="add-agent-token"]')
         page.wait_for_selector('[data-testid="add-agent-token-value"]', timeout=20000)
         tok = page.locator('[data-testid="add-agent-token-value"] pre').inner_text().strip()
+        page.click('[data-testid="add-agent-next"]')
+        page.wait_for_selector('[data-testid="add-agent-install-card"]', timeout=10000)
         cmd = page.locator('[data-testid="enroll-cmd"]').inner_text()
-        check(tok and tok in cmd and "TOKEN" not in cmd, "minting the token completes the enrol command")
-        tabs = page.locator('[data-testid^="agents-tab-"]')
-        check(tabs.count() == len(TARGETS),
-              f"{len(TARGETS)} install targets inside the dialog, mirroring the project's index (got {tabs.count()})")
-        for key, needle in TARGETS.items():
+        check(E2E_MESH_URL in cmd and tok and tok in cmd and "TOKEN" not in cmd,
+              f"the enrol command carries the policy's Mesh address and the minted token ({cmd.strip()[:60]}…)")
+        check(page.locator('[data-testid="add-agent-watch"]').get_attribute("data-seen") == "0",
+              "the page watches the fleet for the new host")
+        for key in TARGETS:
             page.click(f'[data-testid="agents-tab-{key}"]')
-            panel = page.locator(f'[data-testid="agents-panel-{key}"]')
-            panel.wait_for(timeout=5000)
-            body = panel.inner_text()
-            blocks = panel.locator(".cmdblock .codeblock").count()
-            if needle:
-                check(needle in body, f"{key}: the upstream command is verbatim ({needle})")
-                check(blocks >= 4, f"{key}: engine steps plus agent steps (got {blocks} blocks)")
-            else:
-                check(blocks == 3, f"{key}: links out for the engine, keeps the 3 agent steps (got {blocks})")
-                check(panel.locator('a[href*="docs.fluentbit.io"]').count() >= 1,
-                      f"{key}: links to the project's own page")
-            for bad in ("undefined", "mesh_", "{min}"):
-                check(bad not in body, f"{key}: nothing renders {bad!r}")
-        for key in ("debian", "ubuntu"):
+            page.wait_for_selector(f'[data-testid="agents-panel-{key}"]', timeout=5000)
+            check(page.locator(f'[data-testid="agents-panel-{key}"] .ag-step').count() >= 3,
+                  f"{key}: the panel has the install steps")
+            check(page.locator('[data-testid="enroll-cmd"]').count() == 1, f"{key}: one enrol command")
+        for key in ("ubuntu", "debian", "redhat"):
+            page.click(f'[data-testid="agents-tab-{key}"]')
+            body = page.locator(f'[data-testid="agents-panel-{key}"]').inner_text().lower()
+            check("fluent-bit" in body, f"{key}: names the Fluent Bit package")
+        for key in ("ubuntu", "debian"):
             page.click(f'[data-testid="agents-tab-{key}"]')
             body = page.locator(f'[data-testid="agents-panel-{key}"]').inner_text().lower()
             check("não empacotam" in body or "do not package" in body or "no empaquetan" in body,
@@ -324,22 +326,24 @@ with sync_playwright() as p:
         page.click('[data-testid="agents-tab-redhat"]')
         check("EPEL" in page.locator('[data-testid="agents-panel-redhat"]').inner_text(),
               "redhat: names EPEL as the RHEL 9 route")
-        check("3.2" in page.locator('[data-testid="add-agent-dialog"] .ag-facts').inner_text(),
+        check("3.2" in page.locator('[data-testid="add-agent-page"] .ag-facts').inner_text(),
               "the minimum Fluent Bit version is shown")
-        dlg = page.locator('[data-testid="add-agent-dialog"]').inner_text()
-        check("undefined" not in dlg and "mesh_" not in dlg, "the add-agent dialog renders no raw key")
-        page.click('[data-testid="add-agent-close"]')
-        page.wait_for_selector('[data-testid="add-agent-dialog"]', state="detached", timeout=10000)
+        pg = page.locator('[data-testid="add-agent-page"]').inner_text()
+        check("undefined" not in pg and "mesh_" not in pg, "the add-agent page renders no raw key")
+        page.click('[data-testid="add-agent-done"]')
+        page.wait_for_selector('[data-testid="mesh-panel-overview"]', timeout=10000)
+        check(True, "'Done' returns to the fleet")
 
-        # From a policy card too, with the policy preselected.
+        # From a policy card too, with the policy on the URL and chosen.
         page.goto(f"{base}/deployments/{dep}/mesh/policies", wait_until="networkidle")
         page.wait_for_selector(f'[data-testid="policy-add-agent-{E2E_POLICY}"]', timeout=15000)
         page.click(f'[data-testid="policy-add-agent-{E2E_POLICY}"]')
-        page.wait_for_selector('[data-testid="add-agent-dialog"]', timeout=10000)
+        page.wait_for_selector('[data-testid="add-agent-page"]', timeout=10000)
+        check(f"policy={E2E_POLICY}" in page.url, f"a policy card opens the page with the policy on the URL ({page.url})")
         check(page.locator('[data-testid="add-agent-policy"]').input_value() == E2E_POLICY,
-              "a policy card opens the dialog with that policy chosen")
-        page.keyboard.press("Escape")
-        page.wait_for_selector('[data-testid="add-agent-dialog"]', state="detached", timeout=10000)
+              "…and chosen on step 1")
+        page.click('[data-testid="add-agent-back"]')
+        page.wait_for_selector('[data-testid="mesh-panel-overview"]', timeout=10000)
 
     # ---- the one onboarding dialog ----------------------------------------
     page.goto(f"{base}/deployments/{dep}/data" + (f"?policy={E2E_POLICY}" if has_mesh else ""), wait_until="networkidle")
@@ -378,16 +382,37 @@ with sync_playwright() as p:
     page.click('[data-testid="add-integration-save"]')
     page.wait_for_selector('[data-testid="add-integration"]', state="detached", timeout=60000)
     page.wait_for_timeout(1500)
+    # The card turns green and says only "installed": no received-data
+    # facts (those are the overview's) and no policy pills (the policy's
+    # card has them); the menu points at the policies instead.
+    page.wait_for_selector(f'[data-testid="installed-{E2E_INTEG}"]', timeout=60000)
+    card = page.locator(f'[data-testid="integration-{E2E_INTEG}"]')
+    check(card.get_attribute("data-state") in ("installed", "update"), "the catalogue card is in the installed state")
+    body = card.inner_text()
+    check("docs" not in body and "recebendo" not in body.lower() and "receiving" not in body.lower(),
+          "the card carries no received-data facts")
+    check(page.locator('[data-testid^="on-policy-"]').count() == 0, "no policy pills on the Data tab")
+    check(page.locator('[data-testid="integ-cat-installed"]').count() == 1, "the catalogue filters by installed")
     if has_mesh:
-        page.wait_for_selector(f'[data-testid="on-policy-{E2E_INTEG}-{E2E_POLICY}"]', timeout=30000)
-        check(True, f"{E2E_INTEG} shows the policy it is now on")
         page.click(f'[data-testid="integ-menu-{E2E_INTEG}"]')
-        page.click(f'[data-testid="remove-{E2E_INTEG}-{E2E_POLICY}"]')
-        page.wait_for_selector(f'[data-testid="on-policy-{E2E_INTEG}-{E2E_POLICY}"]', state="detached", timeout=30000)
-        check(True, "removal is per target")
+        check(page.locator(f'[data-testid="integ-policies-{E2E_INTEG}"]').count() == 1,
+              "the menu points at the policies for host collection")
+        check(page.locator(f'[data-testid="remove-{E2E_INTEG}-{E2E_POLICY}"]').count() == 0,
+              "per-policy removal is not on the Data tab")
+        page.keyboard.press("Escape")
+        # Received-data facts live on the deployment's overview.
+        page.goto(f"{base}/deployments/{dep}/overview", wait_until="networkidle")
+        page.wait_for_selector(f'[data-testid="ov-receiving-{E2E_INTEG}"]', timeout=30000)
+        row = page.locator(f'[data-testid="ov-receiving-{E2E_INTEG}"]').inner_text()
+        check(E2E_POLICY not in row and ("política" in row or "policy" in row or "polític" in row),
+              f"the overview row says where it is collected, by count ({row.strip()[:60]})")
+        # Removal from the policy is on the policy's card.
+        page.goto(f"{base}/deployments/{dep}/mesh/policies", wait_until="networkidle")
+        page.wait_for_selector(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]', timeout=15000)
+        page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
+        page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
+        check(True, "removal is per target, on the policy's card")
     else:
-        page.wait_for_selector(f'[data-testid="installed-{E2E_INTEG}"]', timeout=60000)
-        check(True, f"{E2E_INTEG} shows the cluster badge")
         page.click(f'[data-testid="integ-menu-{E2E_INTEG}"]')
         page.click(f'[data-testid="uninstall-{E2E_INTEG}"]')
         page.wait_for_selector(f'[data-testid="installed-{E2E_INTEG}"]', state="detached", timeout=60000)
@@ -395,12 +420,21 @@ with sync_playwright() as p:
 
     # ---- the fleet, when a controller is configured ----------------------
     if has_mesh:
-        page.goto(f"{base}/deployments/{dep}/mesh/agents", wait_until="networkidle")
+        page.goto(f"{base}/deployments/{dep}/mesh", wait_until="networkidle")
         page.wait_for_selector('[data-testid="mesh-fleet"], [data-testid="mesh-fleet-empty"]', timeout=15000)
         rows = page.locator('[data-testid="mesh-fleet"] tbody tr')
         check(True, f"the fleet renders ({rows.count()} agent(s))")
         check(page.locator('[data-testid="mesh-fleet"] select').count() == 0,
               "no policy picker on the rows: the policy is changed in the agent's editor")
+        heads = page.locator('[data-testid="mesh-fleet"] thead').inner_text().lower()
+        check("cpu" in heads and ("mem" in heads) and ("vers" in heads),
+              f"Fleet-style columns: CPU, memory, version ({heads.strip()})")
+        for i in range(rows.count()):
+            r = rows.nth(i)
+            if r.get_attribute("data-status") in ("offline", "unenrolled"):
+                continue
+            cpu = r.locator('[data-testid^="fleet-cpu-"]').inner_text().strip()
+            check(cpu.endswith("%") or cpu in ("n/d", "N/A"), f"row {i}: CPU is a percentage or n/a ({cpu})")
         edited = False
         for i in range(rows.count()):
             r = rows.nth(i)
