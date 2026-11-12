@@ -60,11 +60,22 @@ impl EngineFiles {
     /// passes, which is exactly how a config that cannot start got through:
     /// the extension has to be on the end, not in the middle.
     pub fn fluent_bit(state_dir: &Path) -> Self {
+        Self::fluent_bit_as(state_dir, "conf")
+    }
+
+    /// The Spec 2.0 configuration (ADR-074): the compiler emits Fluent Bit
+    /// **YAML** (processors exist only there), so the three files end in
+    /// `.yaml` — the same rule as above, the other parser.
+    pub fn fluent_bit_yaml(state_dir: &Path) -> Self {
+        Self::fluent_bit_as(state_dir, "yaml")
+    }
+
+    fn fluent_bit_as(state_dir: &Path, ext: &str) -> Self {
         let d = state_dir.join("fluent-bit");
         Self {
-            live: d.join("fluent-bit.conf"),
-            staging: d.join("fluent-bit.staging.conf"),
-            previous: d.join("fluent-bit.previous.conf"),
+            live: d.join(format!("fluent-bit.{ext}")),
+            staging: d.join(format!("fluent-bit.staging.{ext}")),
+            previous: d.join(format!("fluent-bit.previous.{ext}")),
         }
     }
 }
@@ -171,18 +182,21 @@ mod tests {
 
     /// The dry-run is only worth running if it parses the file the way the
     /// engine will. Fluent Bit chooses the parser by extension, so staging,
-    /// live and previous must all carry the SAME one — and it must be the
-    /// classic one, because that is the format the compiler emits.
+    /// live and previous must all carry the SAME one, per format.
     #[test]
     fn every_file_parses_as_the_same_format() {
-        let f = EngineFiles::fluent_bit(Path::new("/s"));
-        for p in [&f.live, &f.staging, &f.previous] {
-            assert_eq!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("conf"),
-                "{} would be parsed by a different parser than the others",
-                p.display()
-            );
+        for (f, ext) in [
+            (EngineFiles::fluent_bit(Path::new("/s")), "conf"),
+            (EngineFiles::fluent_bit_yaml(Path::new("/s")), "yaml"),
+        ] {
+            for p in [&f.live, &f.staging, &f.previous] {
+                assert_eq!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some(ext),
+                    "{} would be parsed by a different parser than the others",
+                    p.display()
+                );
+            }
         }
     }
 

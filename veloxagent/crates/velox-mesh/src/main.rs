@@ -200,16 +200,23 @@ async fn opamp(
                     config_map: map
                         .into_iter()
                         .map(|(engine, body)| {
+                            let yaml = engine.ends_with("_yaml");
                             (
                                 engine,
                                 velox_opamp::AgentConfigObject {
-                                    // Fluent Bit's classic format, which is
-                                    // what the packages ship and the compiler
-                                    // assembles — it has no registered media
-                                    // type, and claiming YAML would be a lie
-                                    // the agent could act on.
+                                    // The key says the format: `fluent_bit`
+                                    // is the classic one (no registered media
+                                    // type), `fluent_bit_yaml` the Spec 2.0
+                                    // compiler's YAML (ADR-074). The agent
+                                    // picks the file extension — which is how
+                                    // Fluent Bit picks its parser — from the
+                                    // key, never from a guess at the body.
+                                    content_type: if yaml {
+                                        "application/yaml".into()
+                                    } else {
+                                        "text/plain".into()
+                                    },
                                     body,
-                                    content_type: "text/plain".into(),
                                 },
                             )
                         })
@@ -236,12 +243,21 @@ async fn opamp(
         None => None,
     };
 
+    // Integration secrets, on every check-in for the same reason as the
+    // credential: a retyped password must reach the engine without a new
+    // revision. A read failure sends none rather than failing the check-in.
+    let velox_secrets = match &agent.policy_id {
+        Some(p) => store::policy_secrets(&st.pg, p).await.unwrap_or_default(),
+        None => Default::default(),
+    };
+
     Ok(Json(velox_opamp::ServerToAgent {
         instance_uid: agent.instance_uid,
         remote_config,
         flags: vec![],
         error_response: None,
         velox_output_credential,
+        velox_secrets,
     }))
 }
 
@@ -478,6 +494,54 @@ async fn put_policy_credential(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+struct PutSecretsReq {
+    #[serde(flatten)]
+    dep: store::DeploymentRef,
+    policy_id: String,
+    /// New or retyped values, by secret id.
+    #[serde(default)]
+    set: std::collections::BTreeMap<String, String>,
+    /// Ids whose stored value stays as it is; any other id is dropped.
+    #[serde(default)]
+    keep: Vec<String>,
+}
+
+/// Store a policy's integration secrets (ADR-074 decision 5). Written by the
+/// core on save, served only to agents authenticated on the policy, never
+/// returned on this face — [`policy_secret_ids`] answers which ids exist.
+async fn put_policy_secrets(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<PutSecretsReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    console_auth(&st, &headers)?;
+    store::put_policy_secrets(&st.pg, &req.dep, &req.policy_id, &req.set, &req.keep)
+        .await
+        .map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct SecretIdsReq {
+    #[serde(flatten)]
+    dep: store::DeploymentRef,
+    policy_id: String,
+}
+
+/// Which secret ids a policy holds a value for — ids only.
+async fn policy_secret_ids(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<SecretIdsReq>,
+) -> ApiResult<Json<serde_json::Value>> {
+    console_auth(&st, &headers)?;
+    let ids = store::policy_secret_ids(&st.pg, &req.dep, &req.policy_id)
+        .await
+        .map_err(store_err)?;
+    Ok(Json(serde_json::json!({ "ids": ids })))
+}
+
 /// The deployment is gone: drop its policies and tokens, unenrol its agents
 /// (ADR-072 §4). Called by the core from `delete_cluster`, best-effort there,
 /// so this must be idempotent — a second call finds nothing and says so.
@@ -659,6 +723,8 @@ async fn main() {
             "/api/mesh/put_policy_credential",
             post(put_policy_credential),
         )
+        .route("/api/mesh/put_policy_secrets", post(put_policy_secrets))
+        .route("/api/mesh/policy_secret_ids", post(policy_secret_ids))
         .route("/api/mesh/enrollment_token", post(mint_token))
         .route("/api/mesh/assign_policy", post(assign))
         .route("/api/mesh/unenrol", post(unenrol))

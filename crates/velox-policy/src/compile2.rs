@@ -54,6 +54,12 @@ pub const OTLP_PASSWORD_ENV: &str = "VELOX_OTLP_PASSWORD";
 /// decision 7) — the bare name of [`spec2::STATE_DIR_REF`].
 pub const STATE_DIR_ENV: &str = "VELOX_STATE_DIR";
 
+/// The environment variable a secret id is exported as on the agent —
+/// `VELOX_SECRET_<ID>`, the name the compiled `${...}` reference expands.
+pub fn secret_env(id: &str) -> String {
+    Activation::secret_env(id)
+}
+
 /// Default `metrics_uri` of the `opentelemetry` output when the OTLP endpoint
 /// names no path.
 pub const OTLP_METRICS_PATH: &str = "/v1/metrics";
@@ -110,6 +116,23 @@ impl<'a> Context<'a> {
             storage_path: Some(DEFAULT_STORAGE_PATH),
             state_dir: spec2::STATE_DIR_REF,
             regex_check: None,
+        }
+    }
+}
+
+/// The part of the context value validation needs — shared by the engine
+/// compiler and the backend compiler.
+#[derive(Clone, Copy, Default)]
+pub struct Checks<'a> {
+    pub fluent_bit_version: Option<&'a str>,
+    pub regex_check: Option<RegexCheck<'a>>,
+}
+
+impl<'a> Context<'a> {
+    pub fn checks(&self) -> Checks<'a> {
+        Checks {
+            fluent_bit_version: self.fluent_bit_version,
+            regex_check: self.regex_check,
         }
     }
 }
@@ -369,7 +392,7 @@ fn compile_stream(
     let mut ivals = field_values(
         &stream.input.fields,
         sa.map(|s| &s.input),
-        ctx,
+        &ctx.checks(),
         &format!("{where_}.input"),
         &mut out.secrets,
     )?;
@@ -452,7 +475,8 @@ fn compile_stream(
                 let w = format!("{where_}.processors.{}", d.id);
                 let mut body = Mapping::new();
                 resolve_fixed(&d.fixed, &refs, &mut body, &w)?;
-                let vals = field_values(&d.fields, Some(fields), ctx, &w, &mut out.secrets)?;
+                let vals =
+                    field_values(&d.fields, Some(fields), &ctx.checks(), &w, &mut out.secrets)?;
                 apply_bindings(&d.fields, &vals, &mut body, &w)?;
                 (d.plugin.clone(), body)
             }
@@ -509,7 +533,7 @@ fn compile_stream(
             let w = format!("{where_}.processors.{}", d.id);
             let mut body = Mapping::new();
             resolve_fixed(&d.fixed, &refs, &mut body, &w)?;
-            let vals = field_values(&d.fields, None, ctx, &w, &mut out.secrets)?;
+            let vals = field_values(&d.fields, None, &ctx.checks(), &w, &mut out.secrets)?;
             apply_bindings(&d.fields, &vals, &mut body, &w)?;
             place(
                 catalog,
@@ -662,10 +686,10 @@ fn resolve_fixed(
 /// Fields newer than the agents' Fluent Bit are dropped, given or not, as
 /// the reference compiler does. Passwords become `${VELOX_SECRET_<ID>}` and
 /// their ids are collected.
-fn field_values(
+pub(crate) fn field_values(
     fields: &[Field],
     given: Option<&BTreeMap<String, serde_json::Value>>,
-    ctx: &Context<'_>,
+    checks: &Checks<'_>,
     where_: &str,
     secrets: &mut BTreeSet<String>,
 ) -> Result<BTreeMap<String, Value>> {
@@ -678,7 +702,7 @@ fn field_values(
     }
     let mut out = BTreeMap::new();
     for f in fields {
-        if let (Some(since), Some(fb)) = (&f.since, ctx.fluent_bit_version) {
+        if let (Some(since), Some(fb)) = (&f.since, checks.fluent_bit_version) {
             if !spec2::version_ge(fb, since) {
                 continue;
             }
@@ -707,14 +731,14 @@ fn field_values(
                 continue;
             }
         };
-        check_value(f, &value, ctx).map_err(|r| fail(&w, r))?;
+        check_value(f, &value, checks).map_err(|r| fail(&w, r))?;
         out.insert(f.name.clone(), value);
     }
     Ok(out)
 }
 
 /// Type, multiplicity, bounds, options and pattern of one value (spec §5).
-fn check_value(f: &Field, v: &Value, ctx: &Context<'_>) -> std::result::Result<(), String> {
+fn check_value(f: &Field, v: &Value, checks: &Checks<'_>) -> std::result::Result<(), String> {
     let items: Vec<&Value> = match v {
         Value::Sequence(items) => {
             if !f.multi {
@@ -750,13 +774,13 @@ fn check_value(f: &Field, v: &Value, ctx: &Context<'_>) -> std::result::Result<(
                 // own parsers, which are what the options are.
             }
             FieldType::Regex => {
-                if let (Some(check), Some(s)) = (ctx.regex_check, item.as_str()) {
+                if let (Some(check), Some(s)) = (checks.regex_check, item.as_str()) {
                     check(s).map_err(|e| format!("invalid regular expression: {e}"))?;
                 }
             }
             FieldType::String => {
                 if let (Some(pattern), Some(check), Some(s)) =
-                    (&f.pattern, ctx.regex_check, item.as_str())
+                    (&f.pattern, checks.regex_check, item.as_str())
                 {
                     // The pattern is the package's; the value is the operator's.
                     // Without an engine the pattern is documentation only.
@@ -853,7 +877,7 @@ fn apply_bindings(
     Ok(())
 }
 
-fn visible(f: &Field, values: &BTreeMap<String, Value>) -> bool {
+pub(crate) fn visible(f: &Field, values: &BTreeMap<String, Value>) -> bool {
     let Some(si) = &f.show_if else { return true };
     let v = values.get(&si.field);
     if let Some(eq) = &si.equals {

@@ -230,6 +230,32 @@ pub struct ServerToAgent {
     /// host whose output is rejected.
     #[serde(default)]
     pub velox_output_credential: Option<OutputCredential>,
+    /// Integration secrets of the agent's policy (ADR-074 decision 5), by
+    /// secret id: the values behind the `${VELOX_SECRET_<ID>}` references a
+    /// Spec 2.0 configuration compiles `password` fields to. Ours, like
+    /// `velox_output_credential`, and for the same reason: revisions are
+    /// immutable and widely read, so a password never enters one. The agent
+    /// exports them into the engine's environment only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub velox_secrets: BTreeMap<String, String>,
+}
+
+/// A value that identifies a set of secrets without revealing any of them,
+/// so the agent restarts its engine when one rotates and never logs a value.
+pub fn secrets_fingerprint(secrets: &BTreeMap<String, String>) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    for (k, v) in secrets {
+        h.update(k.as_bytes());
+        h.update([0u8]);
+        h.update(v.as_bytes());
+        h.update([1u8]);
+    }
+    h.finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -341,7 +367,10 @@ mod tests {
     /// * `ServerToAgent.velox_output_credential` — the login the collector
     ///   writes to OpenSearch with. OpAMP has no equivalent: its
     ///   `connection_settings` is about the agent's own link to the server.
-    const VELOX_EXTENSIONS: &[(&str, &str)] = &[("ServerToAgent", "velox_output_credential")];
+    const VELOX_EXTENSIONS: &[(&str, &str)] = &[
+        ("ServerToAgent", "velox_output_credential"),
+        ("ServerToAgent", "velox_secrets"),
+    ];
 
     fn assert_subset_of(
         message_name: &str,
@@ -385,6 +414,7 @@ mod tests {
             flags: vec![],
             error_response: None,
             velox_output_credential: None,
+            velox_secrets: [("k".to_string(), "v".to_string())].into_iter().collect(),
         };
         let ours = json_keys(&s2a);
         for (message, field) in VELOX_EXTENSIONS {
@@ -448,6 +478,9 @@ mod tests {
                 username: "velox_mesh_agent".into(),
                 password: "pw".into(),
             }),
+            velox_secrets: [("api-token".to_string(), "s3cr3t".to_string())]
+                .into_iter()
+                .collect(),
         };
 
         assert_subset(

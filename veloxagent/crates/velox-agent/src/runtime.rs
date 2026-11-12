@@ -44,6 +44,10 @@ const POLL_SECONDS: u64 = velox_opamp::DEFAULT_POLL_SECONDS;
 /// `velox_policy::Engine`'s serialised form.
 const FLUENT_BIT: &str = "fluent_bit";
 
+/// The same engine, Spec 2.0 YAML configuration (ADR-074). Preferred when a
+/// configuration carries both.
+const FLUENT_BIT_YAML: &str = "fluent_bit_yaml";
+
 pub struct Paths {
     pub dir: PathBuf,
 }
@@ -62,8 +66,24 @@ impl Paths {
     pub fn identity(&self) -> PathBuf {
         self.dir.join("identity.json")
     }
+    /// The configuration files in use: the YAML set when a YAML
+    /// configuration is live, else the classic set (also the default before
+    /// anything was applied).
     pub fn engine(&self) -> EngineFiles {
-        EngineFiles::fluent_bit(&self.dir)
+        let yaml = EngineFiles::fluent_bit_yaml(&self.dir);
+        if yaml.live.exists() {
+            yaml
+        } else {
+            EngineFiles::fluent_bit(&self.dir)
+        }
+    }
+
+    /// What `{state_dir}` in a Spec 2.0 package means on this host — tail
+    /// offsets, buffers — exported to the engine as `VELOX_STATE_DIR`
+    /// (ADR-074 decision 7). Under the agent's own state directory, so an
+    /// unprivileged install never needs `/var/lib`.
+    pub fn engine_state(&self) -> PathBuf {
+        self.dir.join("fluent-bit").join("state")
     }
 }
 
@@ -169,9 +189,50 @@ struct Engine {
     /// of every collecting host, which is the thing the `${...}` references in
     /// the compiled config exist to avoid.
     creds: Option<velox_opamp::OutputCredential>,
+    /// Integration secrets by id (ADR-074 decision 5), exported as
+    /// `VELOX_SECRET_<ID>`. Memory only, like `creds`.
+    secrets: std::collections::BTreeMap<String, String>,
+    /// Exported as `VELOX_STATE_DIR`; created before the engine starts.
+    state: PathBuf,
 }
 
 impl Engine {
+    /// The engine's environment: the data-path login, the state directory
+    /// and the integration secrets. Applied to the dry-run as well as to the
+    /// engine, so validation expands `${...}` the way the run will.
+    ///
+    /// Anything of ours not offered now is removed rather than left
+    /// inherited: a value from the agent's own environment would silently
+    /// outlive a credential or secret the Mesh revoked.
+    fn environment(&self, cmd: &mut Command) {
+        match &self.creds {
+            Some(c) => {
+                cmd.env(velox_policy::OS_USER_ENV, &c.username)
+                    .env(velox_policy::OS_PASSWORD_ENV, &c.password);
+            }
+            None => {
+                cmd.env_remove(velox_policy::OS_USER_ENV)
+                    .env_remove(velox_policy::OS_PASSWORD_ENV);
+            }
+        }
+        cmd.env(velox_policy::compile2::STATE_DIR_ENV, &self.state);
+        let ours: std::collections::BTreeMap<String, &String> = self
+            .secrets
+            .iter()
+            .map(|(id, v)| (velox_policy::compile2::secret_env(id), v))
+            .collect();
+        for (k, _) in std::env::vars_os() {
+            if let Some(k) = k.to_str() {
+                if k.starts_with("VELOX_SECRET_") && !ours.contains_key(k) {
+                    cmd.env_remove(k);
+                }
+            }
+        }
+        for (k, v) in ours {
+            cmd.env(k, v);
+        }
+    }
+
     fn alive(&mut self) -> bool {
         match self.child.as_mut() {
             Some(c) => matches!(c.try_wait(), Ok(None)),
@@ -230,7 +291,12 @@ impl Engine {
         {
             let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
             let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-            let ours = cmdline.contains(&self.files.live.display().to_string());
+            // Either format's live file: the predecessor may have run the
+            // classic configuration and this run the YAML one (ADR-074).
+            let dir = self.files.live.parent().unwrap_or(Path::new("."));
+            let ours = ["conf", "yaml"].iter().any(|ext| {
+                cmdline.contains(&dir.join(format!("fluent-bit.{ext}")).display().to_string())
+            });
             if ours {
                 // SIGTERM first: Fluent Bit flushes what it has buffered on a
                 // graceful stop, and a KILL here would drop it.
@@ -282,22 +348,11 @@ impl Engine {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("-c").arg(&self.files.live).stdout(out).stderr(err);
         // Fluent Bit expands `${VAR}` from its own environment at start, so
-        // this is where the credential meets the configuration. The names come
-        // from `velox_policy`, which is also what renders the references into
-        // the config — one definition, so the two cannot drift.
-        match &self.creds {
-            Some(c) => {
-                cmd.env(velox_policy::OS_USER_ENV, &c.username)
-                    .env(velox_policy::OS_PASSWORD_ENV, &c.password);
-            }
-            // Explicitly remove rather than leave inherited: a value from the
-            // agent's own environment would silently outlive a credential the
-            // Mesh revoked, and the engine would keep writing with it.
-            None => {
-                cmd.env_remove(velox_policy::OS_USER_ENV)
-                    .env_remove(velox_policy::OS_PASSWORD_ENV);
-            }
-        }
+        // this is where the credential and the secrets meet the configuration.
+        // The names come from `velox_policy`, which is also what renders the
+        // references into the config — one definition, so the two cannot drift.
+        let _ = std::fs::create_dir_all(&self.state);
+        self.environment(&mut cmd);
         let child = cmd
             .spawn()
             .map_err(|e| format!("cannot start {}: {e}", self.bin.display()))?;
@@ -314,18 +369,47 @@ impl Engine {
 
     /// Write, validate, promote, restart — and put the previous file back if
     /// the engine will not come up on the new one.
+    /// Apply `body` with `files` — the set its format needs. A change of
+    /// format (classic → YAML, ADR-074) swaps the set; when the new one will
+    /// not come up, the old set is put back and the engine restarted on it,
+    /// and when it does, the old set's files are removed so a restart of the
+    /// agent cannot bring the old configuration back.
+    fn apply_as(&mut self, files: EngineFiles, body: &str) -> Result<(), String> {
+        if files == self.files {
+            return self.apply(body);
+        }
+        let old = std::mem::replace(&mut self.files, files);
+        // The engine runs on the old set's file; stop it before the new set
+        // is promoted so two engines never share the state directory.
+        self.stop();
+        match self.apply(body) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&old.live);
+                let _ = std::fs::remove_file(&old.previous);
+                let _ = std::fs::remove_file(&old.staging);
+                Ok(())
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&self.files.live);
+                self.files = old;
+                if self.files.live.exists() {
+                    let _ = self.start();
+                }
+                Err(format!("{e} — kept the previous configuration"))
+            }
+        }
+    }
+
     fn apply(&mut self, body: &str) -> Result<(), String> {
         std::fs::create_dir_all(self.files.live.parent().unwrap_or(Path::new(".")))
             .map_err(|e| e.to_string())?;
         std::fs::write(&self.files.staging, body).map_err(|e| e.to_string())?;
 
         if self.dry_run {
-            let out = Command::new(&self.bin)
-                .arg("--dry-run")
-                .arg("-c")
-                .arg(&self.files.staging)
-                .output()
-                .map_err(|e| e.to_string())?;
+            let mut cmd = Command::new(&self.bin);
+            cmd.arg("--dry-run").arg("-c").arg(&self.files.staging);
+            self.environment(&mut cmd);
+            let out = cmd.output().map_err(|e| e.to_string())?;
             if !out.status.success() {
                 // The engine's own words, but only the ones that say what is
                 // wrong. Fluent Bit opens every run with a copyright notice
@@ -423,6 +507,8 @@ pub async fn run() -> Result<(), String> {
         child: None,
         dry_run,
         creds: None,
+        secrets: Default::default(),
+        state: paths.engine_state(),
     };
     // A restart of the agent must not stop collection: if a live config is
     // already on disk, bring the engine up on it before the first check-in.
@@ -547,10 +633,48 @@ pub async fn run() -> Result<(), String> {
                                 }
                             }
                         }
+                        // Integration secrets: same rule as the credential —
+                        // compare fingerprints, never values, and restart
+                        // only when they changed and no configuration is
+                        // about to restart the engine anyway.
+                        let before = velox_opamp::secrets_fingerprint(&engine.secrets);
+                        let after = velox_opamp::secrets_fingerprint(&s2a.velox_secrets);
+                        if before != after {
+                            engine.secrets = s2a.velox_secrets.clone();
+                            eprintln!(
+                                "velox-agent: {} integration secret(s) in place ({after})",
+                                engine.secrets.len()
+                            );
+                            let config_coming = s2a
+                                .remote_config
+                                .as_ref()
+                                .is_some_and(|c| c.config_hash != applied_hash);
+                            if !config_coming && engine.files.live.exists() {
+                                if let Err(e) = engine.start() {
+                                    error = e;
+                                    eprintln!(
+                                        "velox-agent: could not restart on the new secrets: {error}"
+                                    );
+                                }
+                            }
+                        }
                         if let Some(cfg) = s2a.remote_config {
                             if cfg.config_hash != applied_hash {
-                                match cfg.config.config_map.get(FLUENT_BIT) {
-                                    Some(obj) => match engine.apply(&obj.body) {
+                                // The YAML configuration when the policy has
+                                // one (Spec 2.0), else the classic one.
+                                let chosen = cfg
+                                    .config
+                                    .config_map
+                                    .get(FLUENT_BIT_YAML)
+                                    .map(|o| (EngineFiles::fluent_bit_yaml(&paths.dir), o))
+                                    .or_else(|| {
+                                        cfg.config
+                                            .config_map
+                                            .get(FLUENT_BIT)
+                                            .map(|o| (EngineFiles::fluent_bit(&paths.dir), o))
+                                    });
+                                match chosen {
+                                    Some((files, obj)) => match engine.apply_as(files, &obj.body) {
                                         Ok(()) => {
                                             applied_hash = cfg.config_hash;
                                             status = velox_opamp::RemoteConfigStatuses::Applied;
@@ -570,7 +694,7 @@ pub async fn run() -> Result<(), String> {
                                         applied_hash = cfg.config_hash;
                                         status = velox_opamp::RemoteConfigStatuses::Failed;
                                         error = format!(
-                                            "the policy carries no '{FLUENT_BIT}' configuration"
+                                            "the policy carries no '{FLUENT_BIT}' or '{FLUENT_BIT_YAML}' configuration"
                                         );
                                     }
                                 }
@@ -642,6 +766,12 @@ fn describe(
     non_identifying.insert("velox.engine".to_string(), FLUENT_BIT.to_string());
     non_identifying.insert(
         "velox.engine.version".to_string(),
+        engine_version.to_string(),
+    );
+    // The name Spec 2.0 reads for `since` gates (ADR-074 decision 9),
+    // beside the engine-neutral one the fleet view already shows.
+    non_identifying.insert(
+        "velox.fluent_bit.version".to_string(),
         engine_version.to_string(),
     );
     non_identifying.insert(

@@ -40,6 +40,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "003_deployment_scope",
         include_str!("../../../migrations/003_deployment_scope.sql"),
     ),
+    (
+        "004_policy_secrets",
+        include_str!("../../../migrations/004_policy_secrets.sql"),
+    ),
 ];
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -452,6 +456,92 @@ pub async fn policy_credential(pg: &Client, policy_id: &str) -> Result<Option<(S
         .map(|r| (r.get(0), r.get(1))))
 }
 
+/// A secret id as the activation schema spells it (`^[a-z0-9][a-z0-9_-]{0,63}$`):
+/// it becomes part of an environment variable name on every host.
+fn valid_secret_id(id: &str) -> bool {
+    let mut it = id.bytes();
+    matches!(it.next(), Some(b) if b.is_ascii_lowercase() || b.is_ascii_digit())
+        && id.len() <= 64
+        && it.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Replace a policy's integration secrets (ADR-074 decision 5): `set` is
+/// written (new or retyped values), every other stored id not in `keep` is
+/// dropped — a secret no revision references any more is a password with no
+/// purpose. One statement, so an agent never sees half a set.
+pub async fn put_policy_secrets(
+    pg: &Client,
+    dep: &DeploymentRef,
+    policy_id: &str,
+    set: &BTreeMap<String, String>,
+    keep: &[String],
+) -> Result<()> {
+    dep.check()?;
+    policy_belongs(pg, dep, policy_id).await?;
+    for (id, value) in set {
+        if !valid_secret_id(id) {
+            return Err(Error::Refused(format!("{id:?} is not a secret id")));
+        }
+        if value.is_empty() || value.chars().any(|c| c.is_control()) {
+            return Err(Error::Refused(format!(
+                "secret {id:?} is empty or carries a control character"
+            )));
+        }
+    }
+    let wanted: Vec<String> = set.keys().cloned().chain(keep.iter().cloned()).collect();
+    let ids: Vec<&str> = set.keys().map(String::as_str).collect();
+    let values: Vec<&str> = set.values().map(String::as_str).collect();
+    // One statement, two data-modifying CTEs: atomic on the shared client
+    // without a transaction handle, and the two touch disjoint rows (the
+    // delete spares every id the insert writes).
+    pg.execute(
+        "WITH dropped AS (
+             DELETE FROM mesh_policy_secrets
+              WHERE policy_id = $1 AND NOT (secret_id = ANY($2))
+         )
+         INSERT INTO mesh_policy_secrets (policy_id, secret_id, value, updated_at)
+         SELECT $1, k, v, $5 FROM unnest($3::text[], $4::text[]) AS t(k, v)
+         ON CONFLICT (policy_id, secret_id) DO UPDATE
+            SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at",
+        &[&policy_id, &wanted, &ids, &values, &(now() as i64)],
+    )
+    .await?;
+    Ok(())
+}
+
+/// The ids a policy holds a value for — never the values — so the core can
+/// tell the operator which secret a save still needs.
+pub async fn policy_secret_ids(
+    pg: &Client,
+    dep: &DeploymentRef,
+    policy_id: &str,
+) -> Result<Vec<String>> {
+    dep.check()?;
+    policy_belongs(pg, dep, policy_id).await?;
+    Ok(pg
+        .query(
+            "SELECT secret_id FROM mesh_policy_secrets WHERE policy_id = $1 ORDER BY secret_id",
+            &[&policy_id],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get(0))
+        .collect())
+}
+
+/// What an agent on this policy is handed on check-in.
+pub async fn policy_secrets(pg: &Client, policy_id: &str) -> Result<BTreeMap<String, String>> {
+    Ok(pg
+        .query(
+            "SELECT secret_id, value FROM mesh_policy_secrets WHERE policy_id = $1",
+            &[&policy_id],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // Enrollment
 // ---------------------------------------------------------------------------
@@ -828,7 +918,12 @@ mod tests {
         let versions: Vec<&str> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
         assert_eq!(
             versions,
-            vec!["001_mesh", "002_policy_credentials", "003_deployment_scope"]
+            vec![
+                "001_mesh",
+                "002_policy_credentials",
+                "003_deployment_scope",
+                "004_policy_secrets"
+            ]
         );
         let sql: String = MIGRATIONS.iter().map(|(_, s)| *s).collect();
         for table in [
@@ -837,6 +932,7 @@ mod tests {
             "mesh_enrollment_tokens",
             "mesh_agents",
             "mesh_policy_credentials",
+            "mesh_policy_secrets",
         ] {
             assert!(sql.contains(table), "{table} is not in the migration");
         }
