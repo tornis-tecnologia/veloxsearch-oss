@@ -1198,6 +1198,228 @@ pub async fn verified_package_v2(
     Ok(pkg)
 }
 
+/// Resolve, fetch, verify and catalogue-check one Spec 2.0 package — the one
+/// door both the console's form (`/package_v2`) and the policy save go
+/// through. `version` `None` or empty = the newest GA version this core can
+/// run (`min_mesh_version` against the build); an explicit version must be
+/// in the index and runnable too.
+pub async fn resolve_package_v2(id: &str, version: Option<&str>) -> Result<Arc<spec2::Package>> {
+    let state = index().await;
+    let idx = state.index.with_context(|| {
+        format!(
+            "the registry's package index is unavailable{}",
+            state.error.map(|e| format!(": {e}")).unwrap_or_default()
+        )
+    })?;
+    let entry = idx
+        .package(id)
+        .with_context(|| format!("package {id} is not in the registry index"))?;
+    let core = core_version();
+    let v = match version.filter(|v| !v.is_empty()) {
+        Some(want) => entry
+            .versions
+            .iter()
+            .find(|v| v.version == want)
+            .with_context(|| format!("{id}@{want} is not in the registry index"))?,
+        None => entry
+            .best_version(&spec2::Requirements {
+                mesh_version: core,
+                ..Default::default()
+            })
+            .with_context(|| format!("no GA version of {id} runs on this core ({core})"))?,
+    };
+    if !spec2::version_ge(core, &v.min_mesh_version) {
+        bail!(
+            "{id}@{} needs core {} or newer (this is {core})",
+            v.version,
+            v.min_mesh_version
+        );
+    }
+    let pkg = verified_package_v2(
+        &Registry::from_env(),
+        id,
+        &v.version,
+        Some(&v.manifest_sha256),
+    )
+    .await
+    .with_context(|| format!("refusing unverified package {id}@{}", v.version))?;
+    pkg.check_catalog(spec2::builtin_catalog())
+        .map_err(|e| anyhow!("package {id}@{}: {e}", v.version))?;
+    Ok(pkg)
+}
+
+/// `POST /api/catalog_v2`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CatalogV2Req {
+    #[serde(default)]
+    pub deployment: Option<String>,
+    /// Show beta/experimental versions too (the console hides them by default).
+    #[serde(default)]
+    pub include_prerelease: bool,
+}
+
+/// One package as the catalogue screen lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogV2Item {
+    #[serde(flatten)]
+    pub package: spec2::IndexPackage,
+    /// The version this core would install (`None`: none runs here).
+    pub offered: Option<String>,
+    /// The deployment's policies that activate it — "installed" on screen.
+    pub policies: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogV2View {
+    pub source: CatalogSource,
+    pub age_seconds: Option<u64>,
+    pub error: Option<String>,
+    pub core_version: String,
+    pub packages: Vec<CatalogV2Item>,
+}
+
+/// The Spec 2.0 catalogue screen's read. Never an error (ADR-047): a down
+/// registry is the last index marked stale, or an empty list with `error`.
+pub async fn view_v2(dep: Option<&Deployment>, include_prerelease: bool) -> CatalogV2View {
+    let state = index().await;
+    let using = match dep {
+        Some(d) => crate::mesh::policies_by_integration(d)
+            .await
+            .unwrap_or_default(),
+        None => BTreeMap::new(),
+    };
+    let core = core_version();
+    let packages = state
+        .index
+        .map(|idx| {
+            idx.packages
+                .into_iter()
+                .filter_map(|p| {
+                    let req = spec2::Requirements {
+                        mesh_version: core,
+                        include_prerelease,
+                        ..Default::default()
+                    };
+                    let offered = p.best_version(&req).map(|v| v.version.clone());
+                    // Pre-release-only packages are hidden unless asked for.
+                    if offered.is_none()
+                        && !include_prerelease
+                        && !p.versions.iter().any(|v| v.release == spec2::Release::Ga)
+                    {
+                        return None;
+                    }
+                    let policies = using.get(&p.id).cloned().unwrap_or_default();
+                    Some(CatalogV2Item {
+                        package: p,
+                        offered,
+                        policies,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CatalogV2View {
+        source: state.source,
+        age_seconds: state.age_seconds,
+        error: state.error,
+        core_version: core.to_string(),
+        packages,
+    }
+}
+
+/// `POST /api/package_v2`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PackageV2Req {
+    pub id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// One stream as the form renders it, with the names it will carry.
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamV2View {
+    #[serde(flatten)]
+    pub stream: spec2::Stream,
+    pub tag: String,
+    /// `N` for logs/traces; `None` for metrics (nothing in OpenSearch).
+    pub artifact: Option<String>,
+}
+
+/// Everything the generated form needs, read off the VERIFIED package: the
+/// streams with their fields, the catalogue entries of every plugin a stream
+/// may add (the "add filter/processor" forms), the changelog for the upgrade
+/// screen and the READMEs. The inventory and signature are not repeated.
+#[derive(Debug, Clone, Serialize)]
+pub struct PackageV2View {
+    pub id: String,
+    pub version: String,
+    pub release: spec2::Release,
+    pub title: spec2::I18n,
+    pub summary: spec2::I18n,
+    pub description: Option<spec2::I18n>,
+    pub categories: Vec<String>,
+    pub compatibility: spec2::Compatibility,
+    pub streams: Vec<StreamV2View>,
+    pub plugins: BTreeMap<String, spec2::Plugin>,
+    pub changelog: Vec<spec2::ChangelogEntry>,
+    pub readme: BTreeMap<String, String>,
+}
+
+pub async fn package_v2(id: &str, version: Option<&str>) -> Result<PackageV2View> {
+    let pkg = resolve_package_v2(id, version).await?;
+    let cat = spec2::builtin_catalog();
+    let mut plugins = BTreeMap::new();
+    for s in &pkg.streams {
+        for name in s
+            .processors
+            .allow
+            .iter()
+            .chain(s.processors.defaults.iter().map(|d| &d.plugin))
+        {
+            if let Some(p) = cat.filter_or_processor(name) {
+                plugins.insert(name.clone(), p.clone());
+            }
+        }
+    }
+    let m = &pkg.manifest;
+    let changelog = match &m.changelog {
+        Some(path) => spec2::parse_changelog(&pkg.text(path).map_err(|e| anyhow!("{e}"))?)
+            .map_err(|e| anyhow!("{e}"))?,
+        None => vec![],
+    };
+    let readme = m
+        .docs
+        .iter()
+        .flatten()
+        .filter_map(|(lang, path)| pkg.text(path).ok().map(|t| (lang.clone(), t)))
+        .collect();
+    Ok(PackageV2View {
+        id: m.id.clone(),
+        version: m.version.clone(),
+        release: m.release,
+        title: m.title.clone(),
+        summary: m.summary.clone(),
+        description: m.description.clone(),
+        categories: m.categories.clone(),
+        compatibility: m.compatibility.clone(),
+        streams: pkg
+            .streams
+            .iter()
+            .map(|s| StreamV2View {
+                stream: s.clone(),
+                tag: pkg.stream_tag(s),
+                artifact: s
+                    .event_type
+                    .has_opensearch_backend()
+                    .then(|| pkg.artifact_name(s)),
+            })
+            .collect(),
+        plugins,
+        changelog,
+        readme,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Cache — staleness-tolerant, never a failure
 // ---------------------------------------------------------------------------

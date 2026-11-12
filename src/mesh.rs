@@ -596,6 +596,30 @@ pub async fn policies_using(
         .collect())
 }
 
+/// Integration id → the deployment's policies that activate it (1.x and
+/// Spec 2.0 alike — the Mesh lists both). Empty without a Mesh.
+pub async fn policies_by_integration(
+    dep: &crate::scope::Deployment,
+) -> anyhow::Result<BTreeMap<String, Vec<String>>> {
+    if configured_url().is_none() {
+        return Ok(BTreeMap::new());
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        id: String,
+        #[serde(default)]
+        integrations: Vec<String>,
+    }
+    let rows: Vec<Row> = call_for(dep, "policies", serde_json::json!({})).await?;
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for r in rows {
+        for i in r.integrations {
+            out.entry(i).or_default().push(r.id.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// `(policy id, OpenSearch endpoint id, Mesh endpoint id)` for each of the
 /// deployment's policies — what a settings save checks before removing an
 /// endpoint. Empty when no Mesh is configured (no policy can exist); a
@@ -851,14 +875,6 @@ async fn save_policy_v2(
 
     let os = velox_policy::OsAddress::parse(&os_endpoint.host)
         .map_err(|e| anyhow::anyhow!("OpenSearch endpoint {}: {e}", os_endpoint.id))?;
-    let state = crate::catalog::index().await;
-    let index = state.index.with_context(|| {
-        format!(
-            "the registry's package index is unavailable{}",
-            state.error.map(|e| format!(": {e}")).unwrap_or_default()
-        )
-    })?;
-    let reg = crate::catalog::Registry::from_env();
     let catalog = spec2::builtin_catalog();
 
     let mut packages = Vec::new();
@@ -872,49 +888,10 @@ async fn save_policy_v2(
                 draft.id
             );
         }
-        let entry = index
-            .package(&a.package_id)
-            .with_context(|| format!("package {} is not in the registry index", a.package_id))?;
-        let version = if a.package_version.is_empty() {
-            entry
-                .best_version(&spec2::Requirements {
-                    mesh_version: crate::build_info::VERSION,
-                    ..Default::default()
-                })
-                .map(|v| v.version.clone())
-                .with_context(|| {
-                    format!(
-                        "no GA version of {} runs on this core ({})",
-                        a.package_id,
-                        crate::build_info::VERSION
-                    )
-                })?
-        } else {
-            a.package_version.clone()
-        };
-        let v = entry
-            .versions
-            .iter()
-            .find(|v| v.version == version)
-            .with_context(|| format!("{}@{version} is not in the registry index", a.package_id))?;
-        if !spec2::version_ge(crate::build_info::VERSION, &v.min_mesh_version) {
-            anyhow::bail!(
-                "{}@{version} needs core {} or newer (this is {})",
-                a.package_id,
-                v.min_mesh_version,
-                crate::build_info::VERSION
-            );
-        }
-        let pkg = crate::catalog::verified_package_v2(
-            &reg,
-            &a.package_id,
-            &version,
-            Some(&v.manifest_sha256),
-        )
-        .await
-        .with_context(|| format!("refusing to compile unverified package {}", a.package_id))?;
-        pkg.check_catalog(catalog)
-            .map_err(|e| anyhow::anyhow!("package {}@{version}: {e}", a.package_id))?;
+        let pkg = crate::catalog::resolve_package_v2(&a.package_id, Some(&a.package_version))
+            .await
+            .with_context(|| format!("policy {}: package {}", draft.id, a.package_id))?;
+        let version = pkg.manifest.version.clone();
         let mut act = a.clone();
         act.package_version = version;
         act.spec_version = spec2::SPEC_VERSION.to_string();

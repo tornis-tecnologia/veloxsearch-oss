@@ -118,7 +118,7 @@ fn invalid(file: &str, reason: impl Into<String>) -> Spec2Error {
 
 /// A localised string: `en` is mandatory by schema, `es`/`pt` by R17 on
 /// published packages. [`I18n::get`] falls back to `en`.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct I18n {
     pub en: String,
@@ -138,7 +138,7 @@ impl I18n {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Release {
     Ga,
@@ -146,7 +146,7 @@ pub enum Release {
     Experimental,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Os {
     Linux,
@@ -166,7 +166,7 @@ impl Os {
 }
 
 /// What a stream **is** for the operator (category, filters, dashboards).
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Signal {
     Logs,
@@ -176,7 +176,7 @@ pub enum Signal {
 
 /// What the Fluent Bit plugin **emits**. Decides the output (spec §3, guide
 /// §9): `logs`/`traces` go to `opensearch`, `metrics` to `opentelemetry`.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum EventType {
     Logs,
@@ -200,7 +200,7 @@ impl EventType {
 }
 
 /// The form-control types of spec §6.1.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
     String,
@@ -234,7 +234,7 @@ impl FieldType {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Group {
     #[default]
@@ -246,7 +246,7 @@ pub enum Group {
 /// untagged variants are told apart by their one mandatory key, and
 /// `deny_unknown_fields` on each keeps a stray key from being swallowed by a
 /// looser variant.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum Bind {
     /// A plugin key in the Fluent Bit YAML.
@@ -273,7 +273,7 @@ pub enum Bind {
     Lifecycle { lifecycle: LifecycleKey },
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleKey {
     RolloverMaxSize,
@@ -293,7 +293,7 @@ impl LifecycleKey {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ShowIf {
     pub field: String,
@@ -304,7 +304,7 @@ pub struct ShowIf {
 }
 
 /// A `select` option: a bare scalar or `{value, title}`.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SelectOption {
     Titled {
@@ -323,7 +323,7 @@ impl SelectOption {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum OptionsFrom {
     Parsers,
@@ -331,7 +331,7 @@ pub enum OptionsFrom {
 }
 
 /// One configurable parameter rendered as a form control (spec §6).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Field {
     pub name: String,
@@ -371,7 +371,7 @@ pub struct Field {
 // Manifest
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Compatibility {
     pub min_mesh_version: String,
@@ -380,7 +380,7 @@ pub struct Compatibility {
     pub os: Vec<Os>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
     pub name: String,
@@ -390,7 +390,7 @@ pub struct Owner {
 
 /// One row of the `files:` inventory (R2): the fetcher downloads exactly these
 /// and the signature digest covers exactly these plus the manifest.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileEntry {
     pub path: String,
@@ -398,7 +398,7 @@ pub struct FileEntry {
 }
 
 /// The signature block, carried as data; `catalog.rs` verifies it.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Signature {
     pub algorithm: String,
@@ -407,7 +407,7 @@ pub struct Signature {
 }
 
 /// `packages/<id>/<version>/manifest.yaml` (spec §4).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub spec_version: String,
@@ -572,7 +572,7 @@ impl Manifest {
 /// trap not worth walking into for a two-shape value.
 pub type Fixed = BTreeMap<String, serde_yaml::Value>;
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Input {
     pub plugin: String,
@@ -585,7 +585,7 @@ pub struct Input {
 /// A Fluent Bit parser as the manual spells it. Only `name` and `title` are
 /// modelled; the rest is copied into `parsers:` by the compiler, and the
 /// registry's schema closes the key set.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 pub struct Parser {
     pub name: String,
     #[serde(default)]
@@ -595,7 +595,7 @@ pub struct Parser {
     pub rest: BTreeMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 pub struct MultilineParser {
     pub name: String,
     #[serde(default)]
@@ -608,7 +608,7 @@ pub struct MultilineParser {
     pub rest: BTreeMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MultilineRule {
     pub state: String,
@@ -616,7 +616,7 @@ pub struct MultilineRule {
     pub next_state: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ParserField {
     #[serde(default)]
@@ -627,7 +627,7 @@ pub struct ParserField {
     pub group: Option<Group>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessorItem {
     pub id: String,
@@ -645,7 +645,7 @@ pub struct ProcessorItem {
     pub fields: Vec<Field>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Processors {
     #[serde(default)]
@@ -654,7 +654,7 @@ pub struct Processors {
     pub allow: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Lifecycle {
     #[serde(default)]
@@ -667,7 +667,7 @@ pub struct Lifecycle {
     pub delete_after: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Backend {
     #[serde(default)]
@@ -687,7 +687,7 @@ fn default_true() -> bool {
 }
 
 /// `streams/<id>/stream.yaml` (spec §5).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Stream {
     pub id: String,
@@ -1660,7 +1660,7 @@ fn check_bindings_against(
 // Fluent Bit plugin catalogue (spec §9)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
     Input,
@@ -1670,7 +1670,7 @@ pub enum PluginKind {
     MultilineParser,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, serde::Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Multi {
     #[default]
@@ -1679,7 +1679,7 @@ pub enum Multi {
     Repeat,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Param {
     pub key: String,
@@ -1707,7 +1707,7 @@ pub struct Param {
 }
 
 /// One allow-listed plugin, transcribed from its manual page.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Plugin {
     pub kind: PluginKind,
@@ -1895,7 +1895,7 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 // packages/index.json (spec §10)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct IndexVersion {
     pub version: String,
@@ -1911,7 +1911,7 @@ pub struct IndexVersion {
     pub event_types: Vec<EventType>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct IndexPackage {
     pub id: String,
@@ -1927,7 +1927,7 @@ pub struct IndexPackage {
 
 /// The generated catalogue. A showcase: the signed manifest of each version
 /// is the truth, and `manifest_sha256` is checked against it on fetch.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Index {
     pub spec_version: String,
@@ -2035,7 +2035,7 @@ impl IndexVersion {
 // Changelog
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Change {
     #[serde(rename = "type")]
@@ -2045,7 +2045,7 @@ pub struct Change {
     pub link: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ChangelogEntry {
     pub version: String,

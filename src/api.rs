@@ -2445,6 +2445,33 @@ mod server {
             .map(Json)
             .map_err(ApiError::internal)
     }
+    /// The Spec 2.0 catalogue (ADR-074): `packages/index.json` with the
+    /// version this core would install and the deployment's policies that
+    /// activate each package. ALWAYS 200, like `/catalog`.
+    async fn catalog_v2(
+        scope: Scope,
+        Json(req): Json<crate::catalog::CatalogV2Req>,
+    ) -> Json<crate::catalog::CatalogV2View> {
+        let dep = match req.deployment.as_deref() {
+            Some(name) => scope.resolve(name).await.unwrap_or(None),
+            None => None,
+        };
+        Json(crate::catalog::view_v2(dep.as_ref(), req.include_prerelease).await)
+    }
+
+    /// One Spec 2.0 package as the generated form needs it, read off the
+    /// VERIFIED package (signature + inventory) and checked against the
+    /// vendored plugin catalogue before a byte of it is described.
+    async fn package_v2(
+        _scope: Scope,
+        Json(req): Json<crate::catalog::PackageV2Req>,
+    ) -> Result<Json<crate::catalog::PackageV2View>, ApiError> {
+        integration_id(&req.id)?;
+        crate::catalog::package_v2(&req.id, req.version.as_deref())
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
     // -- end catalog routes (#75) ---------------------------------------
 
     /// Whether this installation has a Velox Mesh (ADR-068). The console
@@ -3481,6 +3508,8 @@ mod server {
         RoutePolicy { path: "/add_integration", policy: TenantScoped, note: "the one onboarding (ADR-073): adds an integration with its inputs to the cluster collector or to one of the deployment's Mesh policies; resolve-before-mutate on both." },
         RoutePolicy { path: "/remove_integration", policy: TenantScoped, note: "takes an integration off one target; the backend half goes only when no other target of the deployment uses it." },
         RoutePolicy { path: "/mesh_create_policy", policy: TenantScoped, note: "creates an empty policy on the deployment (ADR-073); resolve-before-mutate." },
+        RoutePolicy { path: "/catalog_v2", policy: TenantScoped, note: "Spec 2.0 package index (ADR-074): installation-wide; the policies-using overlay is per deployment, and an unowned name reads as no-deployment." },
+        RoutePolicy { path: "/package_v2", policy: TenantScoped, note: "one Spec 2.0 package's streams/fields/plugins, read off the VERIFIED package; installation-wide metadata like /catalog_v2, no deployment named, no write." },
         RoutePolicy { path: "/integration_artifacts", policy: TenantScoped, note: "what a package brings (pipeline/template/index patterns/dashboards), read off the VERIFIED package; installation-wide metadata like /catalog, no deployment named, no write." },
         RoutePolicy { path: "/mesh_status", policy: TenantScoped, note: "whether a Velox Mesh is configured for this installation and reachable (ADR-068) — the two facts a tenant needs to see its deployment's Mesh tab; the URL and the probe error are stripped for a tenant (ADR-072 §7)." },
         RoutePolicy { path: "/mesh_overview", policy: TenantScoped, note: "the DEPLOYMENT's fleet (ADR-072): onboarding step, its policies, its agents' derived status, rollout per policy. Resolve-before-read; the Mesh partitions on the pair the resolved Deployment carries." },
@@ -3590,6 +3619,8 @@ mod server {
             .route(p("/remove_integration"), post(remove_integration))
             .route(p("/mesh_create_policy"), post(mesh_create_policy))
             .route(p("/integration_artifacts"), post(integration_artifacts))
+            .route(p("/catalog_v2"), post(catalog_v2))
+            .route(p("/package_v2"), post(package_v2))
             .route(p("/mesh_status"), get(mesh_status))
             .route(p("/mesh_overview"), post(mesh_overview))
             .route(p("/mesh_save_policy"), post(mesh_save_policy))
