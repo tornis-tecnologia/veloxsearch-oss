@@ -151,6 +151,15 @@ const API = {
   // per row. -> { schema_version, integrations: [CatalogItem], source,
   //               age_seconds, stale, error }
   catalog: (deployment) => call("catalog", { deployment: deployment || null }),
+  // Spec 2.0 (ADR-074): the agent catalogue — packages/index.json with the
+  // version this core would install (`offered`) and the deployment's
+  // policies using each package. Always 200; `source`/`error` say how fresh.
+  catalogV2: (deployment, includePrerelease) =>
+    call("catalog_v2", { deployment: deployment || null, include_prerelease: !!includePrerelease }),
+  // One VERIFIED Spec 2.0 package as the generated form needs it: streams
+  // (fields, parsers, processors, backend), the catalogue entries of every
+  // plugin a stream may add, changelog and READMEs.
+  packageV2: (id, version) => call("package_v2", { id, version: version || null }),
   // Download → verify signature → apply through the engine → record id@version.
   // `version` is an expectation, not a selector: a mismatch is an error rather
   // than a silent downgrade. Both are Result<(), _> → empty body.

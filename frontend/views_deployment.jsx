@@ -32,6 +32,7 @@ import { AuthProviderTab } from "./views_auth_provider.jsx";
 import { SnapshotTab } from "./views_snapshot.jsx";
 import { MeshTab } from "./views_mesh.jsx";
 import { AddIntegrationDialog, CLUSTER_TARGET } from "./views_integration_add.jsx";
+import { AgentCatalogue } from "./views_integration_v2.jsx";
 import { ActivityPanel, ActivityDetails, lockReason, LockNotice } from "./views_activity.jsx";
 import { relAge } from "./views_status.jsx";
 import { Popup } from "./alerts.jsx";
@@ -1352,6 +1353,11 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
           </div>
         </div>
       )}
+
+      {/* Agent collection from Spec 2.0 packages (ADR-074): the Mesh path.
+          The catalogue above stays the cluster's (1.x) until registry F6. */}
+      <AgentCatalogue d={d} lang={lang} mesh={mesh} locked={locked} onToast={onToast}
+        onChanged={() => setMeshTick(x => x + 1)} />
     </div>
   );
 }
