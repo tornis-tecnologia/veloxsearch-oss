@@ -2034,8 +2034,10 @@ pub fn parse_changelog(yaml: &str) -> Result<Vec<ChangelogEntry>> {
 pub enum ProcessorActivation {
     Default {
         id: String,
-        #[serde(default = "default_true")]
-        enabled: bool,
+        /// Absent = the package's own `enabled` (spec §13: a default item
+        /// named by id alone runs as the package ships it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
         #[serde(default)]
         fields: BTreeMap<String, serde_json::Value>,
     },
@@ -2700,7 +2702,7 @@ params:
         );
         let s = &a.streams["log"];
         assert!(
-            matches!(s.processors[0], ProcessorActivation::Default { ref id, enabled: true, .. } if id == "exclude")
+            matches!(s.processors[0], ProcessorActivation::Default { ref id, enabled: Some(true), .. } if id == "exclude")
         );
         assert!(
             matches!(s.processors[1], ProcessorActivation::Added { ref plugin, .. } if plugin == "modify")

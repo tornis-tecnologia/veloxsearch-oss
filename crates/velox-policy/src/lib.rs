@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
+pub mod compile2;
 pub mod os_address;
 pub use os_address::{bind_fluent_bit_output, OsAddress};
 use velox_integrations::Package;

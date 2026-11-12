@@ -26,5 +26,10 @@ doc_lazy_continuation = "allow"
 velox-integrations = { path = "../velox-integrations" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The Spec 2.0 compiler builds the Fluent Bit YAML document as an object and
+# serialises it (ADR-074 decision 6) — never text concatenation. Same crate
+# and major as `velox-integrations`, so a package's YAML and the compiled
+# YAML agree on one parser.
+serde_yaml = "0.9"
 sha2 = "0.10"
 thiserror = "2"
