@@ -1,0 +1,67 @@
+kind: input
+name: docker_events
+title:
+  en: Docker events
+  es: Docker events
+  pt: Docker events
+description:
+  en: Reads Docker daemon events from the Docker socket.
+  es: Lee eventos del demonio Docker desde el socket de Docker.
+  pt: Le eventos do daemon Docker a partir do socket do Docker.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/docker-events
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- docker_socket
+verified: true
+params:
+- key: unix_path
+  type: string
+  description:
+    en: Path to the Docker socket.
+    es: Ruta al socket de Docker.
+    pt: Caminho para o socket do Docker.
+  default: /var/run/docker.sock
+  advanced: true
+- key: buffer_size
+  type: size
+  description:
+    en: Buffer size in bytes used to read Docker events.
+    es: Tamano en bytes del buffer usado para leer eventos de Docker.
+    pt: Tamanho em bytes do buffer usado para ler eventos do Docker.
+  default: 8192
+  advanced: true
+- key: parser
+  type: string
+  description:
+    en: Name of a parser used to structure each entry.
+    es: Nombre de un parser usado para estructurar cada entrada.
+    pt: Nome de um parser usado para estruturar cada entrada.
+- key: key
+  type: string
+  description:
+    en: Key name for unstructured messages when no parser is applied.
+    es: Nombre de la clave para mensajes sin estructura cuando no se aplica parser.
+    pt: Nome da chave para mensagens nao estruturadas quando nenhum parser e aplicado.
+  default: message
+  advanced: true
+- key: reconnect.retry_interval
+  type: integer
+  description:
+    en: Seconds between reconnection attempts.
+    es: Segundos entre intentos de reconexion.
+    pt: Segundos entre tentativas de reconexao.
+  default: 1
+  advanced: true
+- key: reconnect.retry_limits
+  type: integer
+  description:
+    en: Maximum reconnection attempts after an EOF on the Docker socket.
+    es: Maximo de intentos de reconexion tras un EOF en el socket de Docker.
+    pt: Maximo de tentativas de reconexao apos um EOF no socket do Docker.
+  default: 5
+  advanced: true

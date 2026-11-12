@@ -1,0 +1,34 @@
+kind: input
+name: fluentbit_metrics
+title:
+  en: Fluent Bit metrics
+  es: Fluent Bit metrics
+  pt: Fluent Bit metrics
+description:
+  en: Emits Fluent Bit's own internal metrics as metric events.
+  es: Emite las metricas internas de Fluent Bit como eventos de metricas.
+  pt: Emite as metricas internas do proprio Fluent Bit como eventos de metricas.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/fluentbit-metrics
+os:
+- linux
+- windows
+- darwin
+event_types:
+- metrics
+verified: true
+params:
+- key: scrape_interval
+  type: duration
+  description:
+    en: How often Fluent Bit's internal metrics are collected.
+    es: Cada cuanto se recolectan las metricas internas de Fluent Bit.
+    pt: Com que frequencia as metricas internas do Fluent Bit sao coletadas.
+  default: 2s
+- key: scrape_on_start
+  type: bool
+  description:
+    en: Collect metrics at startup so the first round does not wait for the interval.
+    es: Recolecta metricas al iniciar para que la primera ronda no espere al intervalo.
+    pt: Coleta metricas na inicializacao para que a primeira rodada nao espere o intervalo.
+  default: false
+  advanced: true

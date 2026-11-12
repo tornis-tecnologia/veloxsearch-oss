@@ -276,6 +276,17 @@ pub enum LifecycleKey {
     DeleteAfter,
 }
 
+impl LifecycleKey {
+    pub fn name(self) -> &'static str {
+        match self {
+            LifecycleKey::RolloverMaxSize => "rollover_max_size",
+            LifecycleKey::RolloverMaxAge => "rollover_max_age",
+            LifecycleKey::RolloverMaxDocs => "rollover_max_docs",
+            LifecycleKey::DeleteAfter => "delete_after",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ShowIf {
@@ -1843,6 +1854,25 @@ impl PluginCatalog {
     }
 }
 
+/// The catalogue compiled into this binary (ADR-074 decision 2a): the
+/// allowlist a package's plugins and an operator's added processors are
+/// checked against. Vendored from the registry by
+/// `.github/scripts/vendor-plugin-catalog.sh`, parsed once; a vendored file
+/// that does not parse is a build defect, caught by the tests, so this
+/// panics rather than returning a half catalogue.
+pub fn builtin_catalog() -> &'static PluginCatalog {
+    static CAT: std::sync::OnceLock<PluginCatalog> = std::sync::OnceLock::new();
+    CAT.get_or_init(|| {
+        let mut cat = PluginCatalog::default();
+        for (path, yaml) in crate::spec2_catalog::FILES {
+            let plugin = Plugin::parse(path, yaml)
+                .unwrap_or_else(|e| panic!("vendored plugin catalogue: {e}"));
+            cat.insert(plugin);
+        }
+        cat
+    })
+}
+
 /// `*` matches any run of characters; everything else is literal.
 fn glob_match(pattern: &str, text: &str) -> bool {
     fn rec(p: &[u8], t: &[u8]) -> bool {
@@ -2756,6 +2786,49 @@ params:
                 )
         );
         assert!(!glob_match("rdkafka.*", "other.key"));
+    }
+
+    /// The vendored catalogue parses, holds no excluded plugin, and is
+    /// byte-identical to the registry's newest one when a checkout is given.
+    #[test]
+    fn vendored_catalogue_matches_the_registry() {
+        let cat = builtin_catalog();
+        assert!(cat.len() >= 80, "{} plugins", cat.len());
+        for name in EXCLUDED_PLUGINS {
+            assert!(
+                cat.input(name).is_none() && cat.filter_or_processor(name).is_none(),
+                "{name}"
+            );
+        }
+        assert!(cat.input("tail").is_some() && cat.filter_or_processor("grep").is_some());
+        let Some(root) = registry_root() else { return };
+        let dir = root.join("fluent-bit").join(crate::spec2_catalog::VERSION);
+        let mut on_disk = BTreeMap::new();
+        for sub in ["inputs", "filters", "processors", "parsers", "multiline"] {
+            for e in std::fs::read_dir(dir.join(sub))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let p = e.path();
+                if p.extension().is_some_and(|x| x == "yaml") {
+                    let rel = format!("{sub}/{}", p.file_name().unwrap().to_str().unwrap());
+                    on_disk.insert(rel, std::fs::read_to_string(&p).unwrap());
+                }
+            }
+        }
+        let vendored: BTreeMap<String, String> = crate::spec2_catalog::FILES
+            .iter()
+            .map(|(p, y)| (p.to_string(), y.to_string()))
+            .collect();
+        assert_eq!(
+            vendored.keys().collect::<Vec<_>>(),
+            on_disk.keys().collect::<Vec<_>>(),
+            "re-vendor: .github/scripts/vendor-plugin-catalog.sh <registry>"
+        );
+        for (k, v) in &on_disk {
+            assert_eq!(&vendored[k], v, "{k} drifted; re-vendor the catalogue");
+        }
     }
 
     /// Every package the registry publishes parses strictly and passes the

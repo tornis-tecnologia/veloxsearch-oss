@@ -1,0 +1,66 @@
+kind: filter
+name: rewrite_tag
+title:
+  en: Rewrite Tag
+  es: Rewrite Tag
+  pt: Rewrite Tag
+description:
+  en: Re-emits records under a new tag chosen by regex rules; as an input processor it is supported only
+    on inputs (since 5.2 an output placement fails to start).
+  es: Reemite registros con una nueva etiqueta elegida por reglas regex; como processor solo se admite
+    en entradas (desde 5.2 en una salida no arranca).
+  pt: Reemite registros com uma nova tag escolhida por regras regex; como processor só é suportado em
+    entradas (desde 5.2 em uma saída não inicia).
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/rewrite-tag
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: rule
+  type: string
+  required: true
+  multi: repeat
+  description:
+    en: 'Matching rule: $KEY REGEX NEW_TAG KEEP, where KEEP is true or false and has no default.'
+    es: 'Regla de coincidencia: $KEY REGEX NEW_TAG KEEP, donde KEEP es true o false y no tiene valor por
+      defecto.'
+    pt: 'Regra de correspondência: $KEY REGEX NEW_TAG KEEP, onde KEEP é true ou false e não tem padrão.'
+- key: emitter_name
+  type: string
+  advanced: true
+  description:
+    en: Optional name of the internal emitter, which exposes its own metrics.
+    es: Nombre opcional del emisor interno, que expone sus propias métricas.
+    pt: Nome opcional do emissor interno, que expõe suas próprias métricas.
+- key: emitter_mem_buf_limit
+  type: size
+  default: 10M
+  advanced: true
+  description:
+    en: Emitter memory buffer limit; feeding inputs are paused when exceeded.
+    es: Límite del búfer de memoria del emisor; las entradas se pausan al superarlo.
+    pt: Limite do buffer de memória do emissor; as entradas são pausadas ao excedê-lo.
+- key: emitter_storage.type
+  type: select
+  default: memory
+  options:
+  - memory
+  - filesystem
+  advanced: true
+  description:
+    en: 'Emitter buffering mode: memory or filesystem (use filesystem if the destination may apply backpressure).'
+    es: 'Modo de búfer del emisor: memory o filesystem (usar filesystem si el destino puede aplicar contrapresión).'
+    pt: 'Modo de buffer do emissor: memory ou filesystem (use filesystem se o destino puder aplicar contrapressão).'
+- key: batch_size
+  type: integer
+  default: 0
+  since: 5.2.0
+  advanced: true
+  description:
+    en: 'Experimental: max records per input-processor callback grouped by destination tag (0-4096, 0
+      disables); input processor only.'
+    es: 'Experimental: máximo de registros por callback del processor de entrada agrupados por etiqueta
+      de destino (0-4096, 0 desactiva); solo processor de entrada.'
+    pt: 'Experimental: máximo de registros por callback do processor de entrada agrupados por tag de destino
+      (0-4096, 0 desativa); somente processor de entrada.'

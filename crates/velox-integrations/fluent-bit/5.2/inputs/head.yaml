@@ -1,0 +1,77 @@
+kind: input
+name: head
+title:
+  en: Head
+  es: Head
+  pt: Head
+description:
+  en: Reads the first lines of a file at regular intervals, like `head`.
+  es: Lee las primeras líneas de un archivo a intervalos regulares, como `head`.
+  pt: Lê as primeiras linhas de um arquivo em intervalos regulares, como `head`.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/head
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+verified: true
+params:
+- key: file
+  type: string
+  required: true
+  description:
+    en: Absolute path of the file to read, such as /proc/uptime.
+    es: Ruta absoluta del archivo a leer, como /proc/uptime.
+    pt: Caminho absoluto do arquivo a ler, como /proc/uptime.
+- key: lines
+  type: integer
+  default: 0
+  description:
+    en: Number of leading lines to read, similar to head -n.
+    es: Número de primeras líneas a leer, similar a head -n.
+    pt: Número de primeiras linhas a ler, semelhante a head -n.
+- key: key
+  type: string
+  default: head
+  description:
+    en: Name of the key that holds the content.
+    es: Nombre de la clave que contiene el contenido.
+    pt: Nome da chave que contém o conteúdo.
+- key: add_path
+  type: bool
+  default: false
+  description:
+    en: Appends the file path to each record.
+    es: Agrega la ruta del archivo a cada registro.
+    pt: Adiciona o caminho do arquivo a cada registro.
+- key: split_line
+  type: bool
+  default: false
+  description:
+    en: Creates a key-value pair for each line.
+    es: Crea un par clave-valor por cada línea.
+    pt: Cria um par chave-valor para cada linha.
+- key: buf_size
+  type: size
+  default: '256'
+  advanced: true
+  description:
+    en: Size of the read buffer.
+    es: Tamaño del búfer de lectura.
+    pt: Tamanho do buffer de leitura.
+- key: interval_sec
+  type: integer
+  default: 1
+  description:
+    en: Seconds part of the polling interval.
+    es: Parte en segundos del intervalo de sondeo.
+    pt: Parte em segundos do intervalo de coleta.
+- key: interval_nsec
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Nanoseconds part of the polling interval.
+    es: Parte en nanosegundos del intervalo de sondeo.
+    pt: Parte em nanossegundos do intervalo de coleta.

@@ -1,0 +1,129 @@
+kind: input
+name: forward
+title:
+  en: Forward
+  es: Forward
+  pt: Forward
+description:
+  en: Receives events from Fluent Bit or Fluentd over the Forward protocol.
+  es: Recibe eventos de Fluent Bit o Fluentd mediante el protocolo Forward.
+  pt: Recebe eventos do Fluent Bit ou do Fluentd pelo protocolo Forward.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/forward
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+- metrics
+- traces
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  default: 0.0.0.0
+  description:
+    en: Network interface to listen on.
+    es: Interfaz de red en la que escuchar.
+    pt: Interface de rede na qual escutar.
+- key: port
+  type: integer
+  default: 24224
+  description:
+    en: TCP port to listen on.
+    es: Puerto TCP en el que escuchar.
+    pt: Porta TCP na qual escutar.
+- key: unix_path
+  type: string
+  description:
+    en: Unix socket path; when set, listen and port are ignored.
+    es: Ruta del socket Unix; si se define, listen y port se ignoran.
+    pt: Caminho do socket Unix; se definido, listen e port são ignorados.
+- key: unix_perm
+  type: string
+  advanced: true
+  description:
+    en: Octal permissions of the Unix socket file.
+    es: Permisos octales del archivo del socket Unix.
+    pt: Permissões octais do arquivo do socket Unix.
+- key: tag_prefix
+  type: string
+  description:
+    en: Prefix added to the incoming tag.
+    es: Prefijo agregado a la etiqueta entrante.
+    pt: Prefixo adicionado à tag recebida.
+- key: buffer_chunk_size
+  type: size
+  default: '1024000'
+  advanced: true
+  description:
+    en: Memory allocation step for incoming Forward data.
+    es: Paso de asignación de memoria para los datos Forward entrantes.
+    pt: Passo de alocação de memória para os dados Forward recebidos.
+- key: buffer_max_size
+  type: size
+  default: '6144000'
+  advanced: true
+  description:
+    en: Upper memory limit for receiving a single message, including decompressed data.
+    es: Límite superior de memoria para recibir un mensaje, incluidos los datos descomprimidos.
+    pt: Limite superior de memória para receber uma mensagem, incluindo dados descomprimidos.
+- key: shared_key
+  type: password
+  secret: true
+  description:
+    en: Shared key for secure forward authentication.
+    es: Clave compartida para la autenticación de secure forward.
+    pt: Chave compartilhada para a autenticação do secure forward.
+- key: self_hostname
+  type: string
+  default: localhost
+  advanced: true
+  description:
+    en: Hostname used for secure forward authentication.
+    es: Nombre de host usado en la autenticación de secure forward.
+    pt: Hostname usado na autenticação do secure forward.
+- key: empty_shared_key
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Enables secure forward with a zero-length shared key.
+    es: Habilita secure forward con una clave compartida de longitud cero.
+    pt: Habilita o secure forward com uma chave compartilhada de comprimento zero.
+- key: security.users
+  type: password
+  multi: repeat
+  secret: true
+  description:
+    en: Username and password pair for secure forward; requires shared_key or empty_shared_key.
+    es: Par de usuario y contraseña para secure forward; requiere shared_key o empty_shared_key.
+    pt: Par de usuário e senha para o secure forward; requer shared_key ou empty_shared_key.
+- key: msgpack_memory_limit
+  type: size
+  default: '0'
+  since: 5.1.4
+  advanced: true
+  description:
+    en: Memory cap for decoding MessagePack data.
+    es: Límite de memoria para decodificar datos MessagePack.
+    pt: Limite de memória para decodificar dados MessagePack.
+- key: signal_object_memory_limit
+  type: size
+  default: 100M
+  since: 5.1.5
+  advanced: true
+  description:
+    en: Estimated memory cap for decoding metrics or traces in packed payloads.
+    es: Límite estimado de memoria para decodificar métricas o trazas en cargas empaquetadas.
+    pt: Limite estimado de memória para decodificar métricas ou traces em cargas empacotadas.
+- key: workers
+  type: integer
+  default: 1
+  advanced: true
+  description:
+    en: Number of listener workers; must be 1 when unix_path is set.
+    es: Número de workers de escucha; debe ser 1 si se usa unix_path.
+    pt: Número de workers de escuta; deve ser 1 quando unix_path é usado.

@@ -30,6 +30,9 @@ use std::path::Path;
 /// Registry Spec 2.0 packages — the Mesh path (ADR-074). The 1.x contract above
 /// stays for the cluster path until the registry's phase F6 moves it.
 pub mod spec2;
+/// The vendored plugin catalogue `spec2::builtin_catalog` reads (generated).
+#[rustfmt::skip]
+pub mod spec2_catalog;
 
 /// The closed, engine-owned interpolation variable set (`docs/integrations/
 /// interpolation.md`, ADR-039). Exactly these eight names may appear as

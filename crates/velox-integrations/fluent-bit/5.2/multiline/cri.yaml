@@ -1,0 +1,13 @@
+kind: multiline_parser
+name: cri
+title:
+  en: CRI
+  es: CRI
+  pt: CRI
+description:
+  en: Handles CRI-O container engine logs and concatenates partial entries.
+  es: Procesa logs del motor de contenedores CRI-O y concatena entradas parciales.
+  pt: Processa logs do motor de containers CRI-O e concatena entradas parciais.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/parsers/multiline-parsing
+verified: true
+params: []

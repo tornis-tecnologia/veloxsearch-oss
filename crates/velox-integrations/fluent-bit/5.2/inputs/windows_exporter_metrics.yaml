@@ -1,0 +1,116 @@
+kind: input
+name: windows_exporter_metrics
+title:
+  en: Windows Exporter Metrics
+  es: Windows Exporter Metrics
+  pt: Windows Exporter Metrics
+description:
+  en: Collects Windows host metrics through WMI, compatible with the Prometheus Windows Exporter.
+  es: Recopila métricas del host Windows mediante WMI, compatibles con Prometheus Windows Exporter.
+  pt: Coleta métricas do host Windows via WMI, compatíveis com o Prometheus Windows Exporter.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/windows-exporter-metrics
+verified: true
+os:
+- windows
+event_types:
+- metrics
+params:
+- key: scrape_interval
+  type: integer
+  description:
+    en: Global collection rate in seconds.
+    es: Frecuencia global de recolección en segundos.
+    pt: Taxa global de coleta em segundos.
+  default: 1
+- key: enable_collector
+  type: string
+  description:
+    en: Allow-list entry for one collector; can be repeated.
+    es: Entrada de lista permitida para un colector; se puede repetir.
+    pt: Entrada da lista permitida para um coletor; pode ser repetida.
+  multi: repeat
+  advanced: true
+- key: we.logical_disk.allow_disk_regex
+  type: regex
+  description:
+    en: Regex of logical disks to include.
+    es: Regex de discos lógicos a incluir.
+    pt: Regex de discos lógicos a incluir.
+  default: .+
+  advanced: true
+- key: we.logical_disk.deny_disk_regex
+  type: regex
+  description:
+    en: Regex of logical disks to exclude.
+    es: Regex de discos lógicos a excluir.
+    pt: Regex de discos lógicos a excluir.
+  advanced: true
+- key: we.net.allow_nic_regex
+  type: regex
+  description:
+    en: Regex of network interfaces to include by name.
+    es: Regex de interfaces de red a incluir por nombre.
+    pt: Regex de interfaces de rede a incluir por nome.
+  default: .+
+  advanced: true
+- key: we.service.where
+  type: string
+  description:
+    en: WQL where clause to filter service metrics.
+    es: Cláusula WQL where para filtrar métricas de servicios.
+    pt: Cláusula WQL where para filtrar métricas de serviços.
+  advanced: true
+- key: we.service.include
+  type: string
+  description:
+    en: Service include filter.
+    es: Filtro de inclusión de servicios.
+    pt: Filtro de inclusão de serviços.
+  advanced: true
+- key: we.service.exclude
+  type: string
+  description:
+    en: Service exclude filter.
+    es: Filtro de exclusión de servicios.
+    pt: Filtro de exclusão de serviços.
+  advanced: true
+- key: we.process.allow_process_regex
+  type: regex
+  description:
+    en: Regex of processes to include.
+    es: Regex de procesos a incluir.
+    pt: Regex de processos a incluir.
+  default: .+
+  advanced: true
+- key: we.process.deny_process_regex
+  type: regex
+  description:
+    en: Regex of processes to exclude.
+    es: Regex de procesos a excluir.
+    pt: Regex de processos a excluir.
+  advanced: true
+- key: collector.*.scrape_interval
+  type: integer
+  description:
+    en: Per-collector scrape interval override, one key per collector name.
+    es: Intervalo de recolección por colector, una clave por nombre de colector.
+    pt: Intervalo de coleta por coletor, uma chave por nome de coletor.
+  default: 0
+  advanced: true
+- key: performancecounter
+  type: string
+  description:
+    en: Defines a performance counter as metric_name=counter_path; can be repeated.
+    es: Define un contador de rendimiento como metric_name=counter_path; se puede repetir.
+    pt: Define um contador de desempenho como metric_name=counter_path; pode ser repetido.
+  multi: repeat
+  advanced: true
+- key: metrics
+  type: string
+  description:
+    en: Comma-separated list of collectors to run.
+    es: Lista de colectores a ejecutar, separados por comas.
+    pt: Lista de coletores a executar, separados por vírgula.
+  default: cpu,cpu_info,os,net,logical_disk,cs,cache,thermalzone,logon,system,service,tcp
+  multi: join
+  join: ','

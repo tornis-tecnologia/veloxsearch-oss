@@ -1,0 +1,15 @@
+kind: processor
+name: journald_otel
+title:
+  en: Journald OpenTelemetry
+  es: Journald OpenTelemetry
+  pt: Journald OpenTelemetry
+description:
+  en: Maps journald log records to the OpenTelemetry log schema.
+  es: Mapea registros de journald al esquema de logs de OpenTelemetry.
+  pt: Mapeia registros do journald para o esquema de logs do OpenTelemetry.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/processors/journald-otel
+event_types:
+- logs
+verified: true
+params: []

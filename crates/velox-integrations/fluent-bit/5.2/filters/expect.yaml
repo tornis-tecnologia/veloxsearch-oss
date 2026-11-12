@@ -1,0 +1,72 @@
+kind: filter
+name: expect
+title:
+  en: Expect
+  es: Expect
+  pt: Expect
+description:
+  en: Validates records against rules (key presence, null checks, equality) and warns, exits or flags
+    on failure; can be attached to an input as a processor.
+  es: Valida registros contra reglas (presencia de claves, nulos, igualdad) y advierte, sale o marca al
+    fallar; puede adjuntarse a un input como processor.
+  pt: Valida registros contra regras (presença de chaves, nulos, igualdade) e avisa, encerra ou sinaliza
+    ao falhar; pode ser anexado a um input como processor.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/expect
+verified: true
+event_types:
+- logs
+as_processor: true
+params:
+- key: action
+  type: select
+  description:
+    en: Action when a rule fails.
+    es: Acción cuando falla una regla.
+    pt: Ação quando uma regra falha.
+  default: warn
+  options:
+  - warn
+  - exit
+  - result_key
+- key: key_exists
+  type: string
+  description:
+    en: 'Rule: the named key must be present in the record.'
+    es: 'Regla: la clave indicada debe existir en el registro.'
+    pt: 'Regra: a chave indicada deve existir no registro.'
+  multi: repeat
+- key: key_not_exists
+  type: string
+  description:
+    en: 'Rule: the named key must be absent from the record.'
+    es: 'Regla: la clave indicada no debe existir en el registro.'
+    pt: 'Regra: a chave indicada não deve existir no registro.'
+  multi: repeat
+- key: key_val_eq
+  type: string
+  description:
+    en: 'Rule: a key value must equal the given value (KEY VALUE).'
+    es: 'Regla: el valor de una clave debe ser igual al valor dado (KEY VALUE).'
+    pt: 'Regra: o valor de uma chave deve ser igual ao valor dado (KEY VALUE).'
+  multi: repeat
+- key: key_val_is_not_null
+  type: string
+  description:
+    en: 'Rule: the key value must not be null.'
+    es: 'Regla: el valor de la clave no debe ser nulo.'
+    pt: 'Regra: o valor da chave não deve ser nulo.'
+  multi: repeat
+- key: key_val_is_null
+  type: string
+  description:
+    en: 'Rule: the key value must be null.'
+    es: 'Regla: el valor de la clave debe ser nulo.'
+    pt: 'Regra: o valor da chave deve ser nulo.'
+  multi: repeat
+- key: result_key
+  type: string
+  description:
+    en: Field that holds the match result when action is result_key.
+    es: Campo que contiene el resultado de la comprobación cuando action es result_key.
+    pt: Campo que contém o resultado da verificação quando action é result_key.
+  default: matched

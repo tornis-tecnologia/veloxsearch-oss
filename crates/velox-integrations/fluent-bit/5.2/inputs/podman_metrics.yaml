@@ -1,0 +1,58 @@
+kind: input
+name: podman_metrics
+title:
+  en: Podman metrics
+  es: Podman metrics
+  pt: Podman metrics
+description:
+  en: Collects container CPU, memory and network metrics from Podman files.
+  es: Recolecta metricas de CPU, memoria y red de contenedores desde archivos de Podman.
+  pt: Coleta metricas de CPU, memoria e rede de containers a partir de arquivos do Podman.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/podman-metrics
+os:
+- linux
+event_types:
+- metrics
+verified: true
+params:
+- key: scrape_interval
+  type: integer
+  description:
+    en: Seconds between scrapes of Podman data.
+    es: Segundos entre lecturas de datos de Podman.
+    pt: Segundos entre coletas de dados do Podman.
+  default: 30
+- key: scrape_on_start
+  type: bool
+  description:
+    en: Scrapes Podman data at startup.
+    es: Lee datos de Podman al iniciar.
+    pt: Coleta dados do Podman na inicializacao.
+  default: false
+- key: path.config
+  type: string
+  description:
+    en: Location of the Podman containers configuration file.
+    es: Ubicacion del archivo de configuracion de contenedores de Podman.
+    pt: Localizacao do arquivo de configuracao de containers do Podman.
+  default: /var/lib/containers/storage/overlay-containers/containers.json
+  advanced: true
+  operator_settable: false
+- key: path.sysfs
+  type: string
+  description:
+    en: Location of the sysfs cgroup directory.
+    es: Ubicacion del directorio cgroup de sysfs.
+    pt: Localizacao do diretorio cgroup do sysfs.
+  default: /sys/fs/cgroup
+  advanced: true
+  operator_settable: false
+- key: path.procfs
+  type: string
+  description:
+    en: Location of the proc filesystem directory.
+    es: Ubicacion del directorio del sistema de archivos proc.
+    pt: Localizacao do diretorio do sistema de arquivos proc.
+  default: /proc
+  advanced: true
+  operator_settable: false

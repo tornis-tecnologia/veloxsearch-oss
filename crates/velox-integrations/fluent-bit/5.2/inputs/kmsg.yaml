@@ -1,0 +1,34 @@
+kind: input
+name: kmsg
+title:
+  en: Kernel Logs
+  es: Kernel Logs
+  pt: Kernel Logs
+description:
+  en: Reads Linux kernel log messages from /dev/kmsg.
+  es: Lee los mensajes del registro del kernel de Linux desde /dev/kmsg.
+  pt: Lê as mensagens do log do kernel do Linux a partir de /dev/kmsg.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/kernel-logs
+os:
+- linux
+event_types:
+- logs
+verified: true
+params:
+- key: prio_level
+  type: select
+  default: 8
+  options:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  description:
+    en: Drops kernel logs whose priority is above this level; 8 keeps all.
+    es: Descarta los registros del kernel con prioridad superior a este nivel; 8 conserva todos.
+    pt: Descarta logs do kernel com prioridade acima deste nível; 8 mantém todos.

@@ -1,0 +1,59 @@
+kind: input
+name: prometheus_textfile
+title:
+  en: Prometheus textfile
+  es: Prometheus textfile
+  pt: Prometheus textfile
+description:
+  en: Reads Prometheus text exposition files and emits their metrics.
+  es: Lee archivos de texto en formato Prometheus y emite sus metricas.
+  pt: Le arquivos de texto no formato Prometheus e emite suas metricas.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/prometheus-textfile
+os:
+- linux
+- windows
+- darwin
+event_types:
+- metrics
+verified: true
+params:
+- key: path
+  type: string
+  description:
+    en: Files or glob patterns to read, such as /var/lib/prometheus/*.prom.
+    es: Archivos o patrones glob a leer, como /var/lib/prometheus/*.prom.
+    pt: Arquivos ou padroes glob a ler, como /var/lib/prometheus/*.prom.
+  required: true
+  multi: join
+  join: ','
+- key: scrape_interval
+  type: duration
+  description:
+    en: Time between file scans.
+    es: Tiempo entre escaneos de archivos.
+    pt: Tempo entre varreduras de arquivos.
+  default: 10s
+- key: log_suppress_interval
+  type: duration
+  description:
+    en: Suppresses similar log messages within this interval; 0 disables.
+    es: Suprime mensajes de log similares dentro del intervalo; 0 desactiva.
+    pt: Suprime mensagens de log similares dentro do intervalo; 0 desativa.
+  default: 0
+  advanced: true
+- key: mem_buf_limit
+  type: size
+  description:
+    en: Memory buffer limit; 0 disables.
+    es: Limite del buffer de memoria; 0 desactiva.
+    pt: Limite do buffer de memoria; 0 desativa.
+  default: 0
+  advanced: true
+- key: routable
+  type: bool
+  description:
+    en: Whether data can be routed to other plugins.
+    es: Si los datos pueden enrutarse a otros plugins.
+    pt: Se os dados podem ser roteados para outros plugins.
+  default: true
+  advanced: true

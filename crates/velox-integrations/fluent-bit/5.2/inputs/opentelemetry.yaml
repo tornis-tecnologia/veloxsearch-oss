@@ -1,0 +1,427 @@
+kind: input
+name: opentelemetry
+title:
+  en: OpenTelemetry
+  es: OpenTelemetry
+  pt: OpenTelemetry
+description:
+  en: Receives OpenTelemetry logs, metrics and traces over OTLP/HTTP and gRPC.
+  es: Recibe logs, metricas y trazas de OpenTelemetry por OTLP/HTTP y gRPC.
+  pt: Recebe logs, metricas e traces do OpenTelemetry via OTLP/HTTP e gRPC.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/opentelemetry
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+- metrics
+- traces
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  description:
+    en: Address to listen on.
+    es: Direccion de escucha.
+    pt: Endereco de escuta.
+  default: 0.0.0.0
+- key: port
+  type: integer
+  description:
+    en: Listening port.
+    es: Puerto de escucha.
+    pt: Porta de escuta.
+  default: 4318
+- key: host
+  type: string
+  description:
+    en: Host name.
+    es: Nombre de host.
+    pt: Nome do host.
+  default: localhost
+  advanced: true
+- key: buffer_chunk_size
+  type: size
+  description:
+    en: HTTP request buffer chunk size.
+    es: Tamano del chunk del buffer de peticiones HTTP.
+    pt: Tamanho do chunk do buffer de requisicoes HTTP.
+  default: 512K
+  advanced: true
+- key: buffer_max_size
+  type: size
+  description:
+    en: Maximum OTLP payload size.
+    es: Tamano maximo del payload OTLP.
+    pt: Tamanho maximo do payload OTLP.
+  default: 64M
+  advanced: true
+- key: encode_profiles_as_log
+  type: bool
+  description:
+    en: Ingests profiles as text in the logging pipeline.
+    es: Ingiere perfiles como texto en el pipeline de logs.
+    pt: Ingere perfis como texto no pipeline de logs.
+  default: true
+  advanced: true
+- key: http2
+  type: bool
+  description:
+    en: Enables HTTP/2 support.
+    es: Habilita soporte HTTP/2.
+    pt: Habilita suporte a HTTP/2.
+  default: true
+  advanced: true
+- key: log_suppress_interval
+  type: duration
+  description:
+    en: Suppresses similar log messages within this interval; 0 disables.
+    es: Suprime mensajes de log similares dentro del intervalo; 0 desactiva.
+    pt: Suprime mensagens de log similares dentro do intervalo; 0 desativa.
+  default: 0
+  advanced: true
+- key: logs_body_key
+  type: string
+  description:
+    en: Body key used for logs.
+    es: Clave de cuerpo usada para logs.
+    pt: Chave de corpo usada para logs.
+  advanced: true
+- key: logs_max_size
+  type: size
+  description:
+    en: Maximum logs data per request.
+    es: Maximo de datos de logs por peticion.
+    pt: Maximo de dados de logs por requisicao.
+  default: 100M
+  advanced: true
+  since: 5.1.5
+- key: logs_metadata_key
+  type: string
+  description:
+    en: Key that stores logs metadata.
+    es: Clave que almacena los metadatos de logs.
+    pt: Chave que armazena os metadados de logs.
+  default: otlp
+  advanced: true
+- key: mem_buf_limit
+  type: size
+  description:
+    en: Memory buffer limit; 0 disables.
+    es: Limite del buffer de memoria; 0 desactiva.
+    pt: Limite do buffer de memoria; 0 desativa.
+  default: 0
+  advanced: true
+- key: profiles_support
+  type: bool
+  description:
+    en: Experimental profiles support; not for production.
+    es: Soporte experimental de perfiles; no apto para produccion.
+    pt: Suporte experimental a perfis; nao use em producao.
+  default: false
+  advanced: true
+- key: protobuf_decode_max_size
+  type: size
+  description:
+    en: Decode memory budget per request.
+    es: Presupuesto de memoria de decodificacion por peticion.
+    pt: Orcamento de memoria de decodificacao por requisicao.
+  default: 128M
+  advanced: true
+  since: 5.2.0
+- key: raw_traces
+  type: bool
+  description:
+    en: Forwards JSON traces without processing.
+    es: Reenvia trazas JSON sin procesar.
+    pt: Encaminha traces JSON sem processar.
+  default: false
+  advanced: true
+- key: routable
+  type: bool
+  description:
+    en: Whether data can be routed to other plugins.
+    es: Si los datos pueden enrutarse a otros plugins.
+    pt: Se os dados podem ser roteados para outros plugins.
+  default: true
+  advanced: true
+- key: successful_response_code
+  type: select
+  description:
+    en: HTTP status code returned on success.
+    es: Codigo HTTP devuelto en caso de exito.
+    pt: Codigo HTTP retornado em caso de sucesso.
+  default: 201
+  options:
+  - 200
+  - 201
+  - 204
+  advanced: true
+- key: tag_from_uri
+  type: bool
+  description:
+    en: Derives the tag from the request URI when no tag is set.
+    es: Deriva el tag de la URI si no hay tag.
+    pt: Deriva a tag da URI quando nao ha tag.
+  default: true
+  advanced: true
+- key: tag_key
+  type: string
+  description:
+    en: Record accessor key used to generate tags.
+    es: Clave record accessor usada para generar tags.
+    pt: Chave record accessor usada para gerar tags.
+  advanced: true
+- key: http_server.max_connections
+  type: integer
+  description:
+    en: Maximum concurrent connections; 0 means unlimited.
+    es: Maximo de conexiones concurrentes; 0 es ilimitado.
+    pt: Maximo de conexoes concorrentes; 0 e ilimitado.
+  default: 0
+  advanced: true
+- key: http_server.workers
+  type: integer
+  description:
+    en: Number of listener worker threads.
+    es: Numero de hilos de escucha.
+    pt: Numero de threads de escuta.
+  default: 1
+  advanced: true
+- key: http_server.ingress_queue_event_limit
+  type: integer
+  description:
+    en: Maximum deferred queue entries (used with more than one worker).
+    es: Maximo de entradas en la cola diferida (con mas de un worker).
+    pt: Maximo de entradas na fila diferida (com mais de um worker).
+  default: 8192
+  advanced: true
+- key: http_server.ingress_queue_byte_limit
+  type: size
+  description:
+    en: Maximum deferred queue size (used with more than one worker).
+    es: Tamano maximo de la cola diferida (con mas de un worker).
+    pt: Tamanho maximo da fila diferida (com mais de um worker).
+  default: 256M
+  advanced: true
+- key: http_server.max_decoded_body_size
+  type: size
+  description:
+    en: Maximum request body size after decompression.
+    es: Tamano maximo del cuerpo tras descomprimir.
+    pt: Tamanho maximo do corpo apos descompressao.
+  default: 64M
+  advanced: true
+  since: 5.2.0
+- key: net.accept_timeout
+  type: duration
+  description:
+    en: Time allowed to establish a connection, including TLS.
+    es: Tiempo permitido para establecer una conexion, incluido TLS.
+    pt: Tempo permitido para estabelecer uma conexao, incluindo TLS.
+  default: 10s
+  advanced: true
+- key: net.accept_timeout_log_error
+  type: bool
+  description:
+    en: Logs accept timeouts as errors.
+    es: Registra los timeouts de accept como errores.
+    pt: Registra timeouts de accept como erros.
+  default: true
+  advanced: true
+- key: net.backlog
+  type: integer
+  description:
+    en: Listening socket backlog.
+    es: Backlog del socket de escucha.
+    pt: Backlog do socket de escuta.
+  default: 128
+  advanced: true
+- key: net.io_timeout
+  type: duration
+  description:
+    en: Maximum idle time per connection.
+    es: Tiempo inactivo maximo por conexion.
+    pt: Tempo ocioso maximo por conexao.
+  default: 0s
+  advanced: true
+- key: net.keepalive
+  type: bool
+  description:
+    en: Enables keepalive.
+    es: Habilita keepalive.
+    pt: Habilita keepalive.
+  default: true
+  advanced: true
+- key: net.share_port
+  type: bool
+  description:
+    en: Allows several plugins to bind the same port.
+    es: Permite que varios plugins usen el mismo puerto.
+    pt: Permite que varios plugins usem a mesma porta.
+  default: false
+  advanced: true
+- key: oauth2.validate
+  type: bool
+  description:
+    en: Enables JWT validation.
+    es: Habilita la validacion de JWT.
+    pt: Habilita a validacao de JWT.
+  default: false
+- key: oauth2.allowed_audience
+  type: string
+  description:
+    en: Required audience claim.
+    es: Claim de audiencia requerido.
+    pt: Claim de audiencia exigido.
+- key: oauth2.allowed_clients
+  type: string
+  description:
+    en: Allowed client_id or azp values.
+    es: Valores client_id o azp permitidos.
+    pt: Valores client_id ou azp permitidos.
+  multi: repeat
+- key: oauth2.issuer
+  type: string
+  description:
+    en: Expected iss claim.
+    es: Claim iss esperado.
+    pt: Claim iss esperado.
+- key: oauth2.jwks_url
+  type: string
+  description:
+    en: JWKS endpoint with the public keys.
+    es: Endpoint JWKS con las claves publicas.
+    pt: Endpoint JWKS com as chaves publicas.
+- key: oauth2.jwks_buffer_max_size
+  type: size
+  description:
+    en: Maximum JWKS response size.
+    es: Tamano maximo de la respuesta JWKS.
+    pt: Tamanho maximo da resposta JWKS.
+  default: 1M
+  advanced: true
+  since: 5.2.0
+- key: oauth2.jwks_refresh_interval
+  type: integer
+  description:
+    en: Seconds before the keys are fetched again.
+    es: Segundos antes de volver a obtener las claves.
+    pt: Segundos antes de buscar as chaves novamente.
+  default: 300
+  advanced: true
+- key: oauth2.jwks_response_timeout
+  type: duration
+  description:
+    en: Time limit for the JWKS response.
+    es: Limite de tiempo de la respuesta JWKS.
+    pt: Limite de tempo da resposta JWKS.
+  default: 30s
+  advanced: true
+  since: 5.2.0
+- key: tls
+  type: bool
+  description:
+    en: Enables TLS.
+    es: Habilita TLS.
+    pt: Habilita TLS.
+  default: false
+- key: tls.ca_file
+  type: string
+  description:
+    en: CA certificate file.
+    es: Archivo de certificado CA.
+    pt: Arquivo de certificado CA.
+  advanced: true
+- key: tls.ca_path
+  type: string
+  description:
+    en: Directory with CA certificates.
+    es: Directorio con certificados CA.
+    pt: Diretorio com certificados CA.
+  advanced: true
+- key: tls.crt_file
+  type: string
+  description:
+    en: Certificate file.
+    es: Archivo de certificado.
+    pt: Arquivo de certificado.
+  advanced: true
+- key: tls.key_file
+  type: string
+  description:
+    en: Private key file.
+    es: Archivo de clave privada.
+    pt: Arquivo de chave privada.
+  advanced: true
+- key: tls.key_passwd
+  type: password
+  description:
+    en: Password of the key file.
+    es: Contrasena del archivo de clave.
+    pt: Senha do arquivo de chave.
+  advanced: true
+  secret: true
+- key: tls.crl_file
+  type: string
+  description:
+    en: CRL file used to reject revoked certificates.
+    es: Archivo CRL para rechazar certificados revocados.
+    pt: Arquivo CRL para rejeitar certificados revogados.
+  advanced: true
+  since: 5.1.3
+- key: tls.ciphers
+  type: string
+  description:
+    en: Allowed ciphers (up to TLSv1.2).
+    es: Cifrados permitidos (hasta TLSv1.2).
+    pt: Cifras permitidas (ate TLSv1.2).
+  advanced: true
+- key: tls.min_version
+  type: string
+  description:
+    en: Minimum TLS version.
+    es: Version minima de TLS.
+    pt: Versao minima de TLS.
+  advanced: true
+- key: tls.max_version
+  type: string
+  description:
+    en: Maximum TLS version.
+    es: Version maxima de TLS.
+    pt: Versao maxima de TLS.
+  advanced: true
+- key: tls.verify
+  type: bool
+  description:
+    en: Enables certificate validation.
+    es: Habilita la validacion de certificados.
+    pt: Habilita a validacao de certificados.
+  default: true
+  advanced: true
+- key: tls.verify_hostname
+  type: bool
+  description:
+    en: Enables hostname verification.
+    es: Habilita la verificacion del nombre de host.
+    pt: Habilita a verificacao do nome do host.
+  default: false
+  advanced: true
+- key: tls.vhost
+  type: string
+  description:
+    en: SNI hostname.
+    es: Nombre de host SNI.
+    pt: Nome de host SNI.
+  advanced: true
+- key: tls.debug
+  type: integer
+  description:
+    en: TLS debug level, 0 to 4.
+    es: Nivel de depuracion TLS, 0 a 4.
+    pt: Nivel de depuracao TLS, 0 a 4.
+  default: 1
+  advanced: true

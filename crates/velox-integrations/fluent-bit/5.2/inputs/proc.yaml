@@ -1,0 +1,62 @@
+kind: input
+name: proc
+title:
+  en: Process health
+  es: Process health
+  pt: Process health
+description:
+  en: Checks that a process is alive and reports its memory and file descriptors as log records.
+  es: Verifica que un proceso este activo e informa su memoria y descriptores de archivo como registros
+    de log.
+  pt: Verifica se um processo esta ativo e informa memoria e descritores de arquivo como registros de
+    log.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/process
+os:
+- linux
+event_types:
+- logs
+verified: true
+params:
+- key: proc_name
+  type: string
+  description:
+    en: Name of the process to check.
+    es: Nombre del proceso a verificar.
+    pt: Nome do processo a verificar.
+  required: true
+- key: interval_sec
+  type: integer
+  description:
+    en: Seconds between collections.
+    es: Segundos entre recolecciones.
+    pt: Segundos entre coletas.
+  default: 1
+- key: interval_nsec
+  type: integer
+  description:
+    en: Nanosecond part of the interval, added to interval_sec.
+    es: Parte en nanosegundos del intervalo, sumada a interval_sec.
+    pt: Parte em nanossegundos do intervalo, somada a interval_sec.
+  default: 0
+  advanced: true
+- key: alert
+  type: bool
+  description:
+    en: Emits records only when the process is down.
+    es: Emite registros solo cuando el proceso esta caido.
+    pt: Emite registros apenas quando o processo esta parado.
+  default: false
+- key: mem
+  type: bool
+  description:
+    en: Appends the process memory usage to each record.
+    es: Agrega el uso de memoria del proceso a cada registro.
+    pt: Adiciona o uso de memoria do processo a cada registro.
+  default: true
+- key: fd
+  type: bool
+  description:
+    en: Appends the process file descriptor count to each record.
+    es: Agrega la cantidad de descriptores de archivo a cada registro.
+    pt: Adiciona a contagem de descritores de arquivo a cada registro.
+  default: true

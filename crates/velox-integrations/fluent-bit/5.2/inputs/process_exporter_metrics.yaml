@@ -1,0 +1,65 @@
+kind: input
+name: process_exporter_metrics
+title:
+  en: Process exporter metrics
+  es: Process exporter metrics
+  pt: Process exporter metrics
+description:
+  en: Collects per-process metrics from procfs in the style of Prometheus Process Exporter.
+  es: Recolecta metricas por proceso desde procfs al estilo de Prometheus Process Exporter.
+  pt: Coleta metricas por processo do procfs no estilo do Prometheus Process Exporter.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/process-exporter-metrics
+os:
+- linux
+event_types:
+- metrics
+verified: true
+params:
+- key: scrape_interval
+  type: integer
+  description:
+    en: Collection interval in seconds.
+    es: Intervalo de recoleccion en segundos.
+    pt: Intervalo de coleta em segundos.
+  default: 5
+- key: metrics
+  type: select
+  description:
+    en: Process metrics to collect.
+    es: Metricas de proceso a recolectar.
+    pt: Metricas de processo a coletar.
+  default: cpu,io,memory,state,context_switches,fd,start_time,thread_wchan,thread
+  multi: join
+  join: ','
+  options:
+  - cpu
+  - io
+  - memory
+  - state
+  - context_switches
+  - fd
+  - start_time
+  - thread_wchan
+  - thread
+- key: process_include_pattern
+  type: regex
+  description:
+    en: Regex of process names to include.
+    es: Regex de nombres de proceso a incluir.
+    pt: Regex de nomes de processo a incluir.
+  default: .+
+- key: process_exclude_pattern
+  type: regex
+  description:
+    en: Regex of process names to exclude.
+    es: Regex de nombres de proceso a excluir.
+    pt: Regex de nomes de processo a excluir.
+- key: path.procfs
+  type: string
+  description:
+    en: Mount point of procfs.
+    es: Punto de montaje de procfs.
+    pt: Ponto de montagem do procfs.
+  default: /proc
+  advanced: true
+  operator_settable: false

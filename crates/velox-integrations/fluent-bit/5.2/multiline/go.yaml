@@ -1,0 +1,13 @@
+kind: multiline_parser
+name: go
+title:
+  en: Go
+  es: Go
+  pt: Go
+description:
+  en: Joins Go application log entries that span multiple lines.
+  es: Une entradas de log de aplicaciones Go que abarcan varias lineas.
+  pt: Junta entradas de log de aplicacoes Go que ocupam varias linhas.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/parsers/multiline-parsing
+verified: true
+params: []

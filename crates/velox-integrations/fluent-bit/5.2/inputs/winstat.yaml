@@ -1,0 +1,31 @@
+kind: input
+name: winstat
+title:
+  en: Windows System Statistics
+  es: Windows System Statistics
+  pt: Windows System Statistics
+description:
+  en: Collects Windows system statistics from the Performance Counters.
+  es: Recopila estadísticas del sistema Windows desde los contadores de rendimiento.
+  pt: Coleta estatísticas do sistema Windows a partir dos contadores de desempenho.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/windows-system-statistics
+verified: true
+os:
+- windows
+event_types:
+- logs
+params:
+- key: interval_sec
+  type: integer
+  description:
+    en: Polling interval in seconds.
+    es: Intervalo de sondeo en segundos.
+    pt: Intervalo de polling em segundos.
+  default: 1
+- key: interval_nsec
+  type: integer
+  description:
+    en: Additional polling interval in nanoseconds.
+    es: Intervalo de sondeo adicional en nanosegundos.
+    pt: Intervalo de polling adicional em nanossegundos.
+  default: 0

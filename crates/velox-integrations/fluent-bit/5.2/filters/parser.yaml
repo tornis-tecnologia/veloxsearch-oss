@@ -1,0 +1,48 @@
+kind: filter
+name: parser
+title:
+  en: Parser
+  es: Parser
+  pt: Parser
+description:
+  en: Parses a record field with one or more named parsers and merges the result into the record; not
+    listed as an input processor on the processors page.
+  es: Analiza un campo del registro con uno o más parsers con nombre y fusiona el resultado en el registro;
+    no figura como processor de entrada en la página de processors.
+  pt: Analisa um campo do registro com um ou mais parsers nomeados e mescla o resultado no registro; não
+    consta como processor de entrada na página de processors.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/parser
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: key_name
+  type: string
+  required: true
+  description:
+    en: Record field to parse.
+    es: Campo del registro a analizar.
+    pt: Campo do registro a analisar.
+- key: parser
+  type: string
+  required: true
+  multi: repeat
+  description:
+    en: Name of the parser used to interpret the field; may be repeated to try several parsers.
+    es: Nombre del parser usado para interpretar el campo; se puede repetir para probar varios parsers.
+    pt: Nome do parser usado para interpretar o campo; pode ser repetido para tentar vários parsers.
+- key: preserve_key
+  type: bool
+  default: false
+  description:
+    en: Keeps the original key_name field in the parsed output.
+    es: Conserva el campo original key_name en la salida analizada.
+    pt: Mantém o campo original key_name na saída analisada.
+- key: reserve_data
+  type: bool
+  default: false
+  description:
+    en: Keeps all other original fields in the parsed output.
+    es: Conserva todos los demás campos originales en la salida analizada.
+    pt: Mantém todos os demais campos originais na saída analisada.

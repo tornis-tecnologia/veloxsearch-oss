@@ -1,0 +1,130 @@
+kind: input
+name: elasticsearch
+title:
+  en: Elasticsearch
+  es: Elasticsearch
+  pt: Elasticsearch
+description:
+  en: Emulates an Elasticsearch bulk API endpoint to receive records over HTTP.
+  es: Emula un endpoint bulk de Elasticsearch para recibir registros por HTTP.
+  pt: Emula um endpoint bulk do Elasticsearch para receber registros via HTTP.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/elasticsearch
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  description:
+    en: Address to listen on.
+    es: Direccion en la que escuchar.
+    pt: Endereco em que escutar.
+  default: 0.0.0.0
+- key: port
+  type: integer
+  description:
+    en: Port to listen on.
+    es: Puerto en el que escuchar.
+    pt: Porta em que escutar.
+  default: 9200
+- key: hostname
+  type: string
+  description:
+    en: Hostname or FQDN reported when clients sniff cluster nodes.
+    es: Nombre de host o FQDN informado cuando los clientes descubren nodos del cluster.
+    pt: Hostname ou FQDN informado quando clientes descobrem nos do cluster.
+  default: localhost
+  advanced: true
+- key: version
+  type: string
+  description:
+    en: Elasticsearch version reported to clients.
+    es: Version de Elasticsearch informada a los clientes.
+    pt: Versao do Elasticsearch informada aos clientes.
+  default: 8.0.0
+  advanced: true
+- key: tag_key
+  type: string
+  description:
+    en: Key whose value is extracted as the tag.
+    es: Clave cuyo valor se extrae como etiqueta.
+    pt: Chave cujo valor e extraido como tag.
+- key: meta_key
+  type: string
+  description:
+    en: Key name for meta information.
+    es: Nombre de la clave para informacion meta.
+    pt: Nome da chave para informacao meta.
+  default: '@meta'
+  advanced: true
+- key: buffer_max_size
+  type: size
+  description:
+    en: Maximum buffer size (alias of http_server.buffer_max_size).
+    es: Tamano maximo del buffer (alias de http_server.buffer_max_size).
+    pt: Tamanho maximo do buffer (alias de http_server.buffer_max_size).
+  default: 4M
+  advanced: true
+- key: buffer_chunk_size
+  type: size
+  description:
+    en: Buffer chunk size (alias of http_server.buffer_chunk_size).
+    es: Tamano del fragmento del buffer (alias de http_server.buffer_chunk_size).
+    pt: Tamanho do chunk do buffer (alias de http_server.buffer_chunk_size).
+  default: 512K
+  advanced: true
+- key: http2
+  type: bool
+  description:
+    en: Enables HTTP/2 (alias of http_server.http2).
+    es: Habilita HTTP/2 (alias de http_server.http2).
+    pt: Habilita HTTP/2 (alias de http_server.http2).
+  default: true
+  advanced: true
+- key: http_server.max_connections
+  type: integer
+  description:
+    en: Maximum concurrent HTTP connections; 0 is unlimited.
+    es: Maximo de conexiones HTTP concurrentes; 0 es ilimitado.
+    pt: Maximo de conexoes HTTP concorrentes; 0 e ilimitado.
+  default: 0
+  advanced: true
+- key: http_server.workers
+  type: integer
+  description:
+    en: Number of HTTP listener worker threads.
+    es: Numero de hilos de trabajo del listener HTTP.
+    pt: Numero de threads de trabalho do listener HTTP.
+  default: 1
+  advanced: true
+- key: http_server.ingress_queue_event_limit
+  type: integer
+  description:
+    en: Maximum deferred ingress queue entries; only with more than one worker.
+    es: Maximo de entradas diferidas en la cola de ingreso; solo con mas de un worker.
+    pt: Maximo de entradas diferidas na fila de ingresso; apenas com mais de um worker.
+  default: 8192
+  advanced: true
+- key: http_server.ingress_queue_byte_limit
+  type: size
+  description:
+    en: Maximum deferred ingress queue size; only with more than one worker.
+    es: Tamano maximo de la cola de ingreso diferida; solo con mas de un worker.
+    pt: Tamanho maximo da fila de ingresso diferida; apenas com mais de um worker.
+  default: 256M
+  advanced: true
+- key: http_server.max_decoded_body_size
+  type: size
+  description:
+    en: Maximum request body size after decompression; 0 uses the default.
+    es: Tamano maximo del cuerpo de la solicitud tras descomprimir; 0 usa el valor por defecto.
+    pt: Tamanho maximo do corpo da requisicao apos descompressao; 0 usa o padrao.
+  default: 100M
+  since: 5.2.0
+  advanced: true
