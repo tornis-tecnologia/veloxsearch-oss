@@ -70,7 +70,9 @@ pub const OTLP_METRICS_PATH: &str = "/v1/metrics";
 pub const DEFAULT_STORAGE_PATH: &str = "${VELOX_STATE_DIR}/storage";
 
 /// Compiles a regular expression, `Err` with the engine's reason.
-pub type RegexCheck<'a> = &'a dyn Fn(&str) -> std::result::Result<(), String>;
+/// `Sync`, so a context can live across an `.await` in the core's async
+/// save path.
+pub type RegexCheck<'a> = &'a (dyn Fn(&str) -> std::result::Result<(), String> + Sync);
 
 /// The policy's side of the compilation: endpoints, agent settings and the
 /// floor the agents share. Nothing here comes from a package.

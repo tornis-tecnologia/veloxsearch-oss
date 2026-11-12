@@ -119,6 +119,7 @@ fn main() {
             opensearch: Some("published".into()),
             mesh: Some("published".into()),
         },
+        packages: vec![],
     };
 
     let renderer = PackageRenderer {

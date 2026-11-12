@@ -346,7 +346,11 @@ pub async fn list_policies(pg: &Client, dep: &DeploymentRef) -> Result<Vec<Polic
             "SELECT p.id, p.name, p.current_revision, p.updated_at,
                     COALESCE((SELECT array_agg(a->>'package_id' ORDER BY ord)
                                 FROM mesh_policy_revisions r,
-                                     jsonb_array_elements(r.body->'activations')
+                                     -- 1.x activations and Spec 2.0 packages
+                                     -- (ADR-074) both carry `package_id`.
+                                     jsonb_array_elements(
+                                         COALESCE(r.body->'activations', '[]'::jsonb)
+                                         || COALESCE(r.body->'packages', '[]'::jsonb))
                                        WITH ORDINALITY AS t(a, ord)
                                WHERE r.policy_id = p.id AND r.revision = p.current_revision),
                              '{}'::text[]),

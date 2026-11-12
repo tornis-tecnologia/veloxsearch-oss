@@ -448,6 +448,195 @@ pub(crate) async fn teardown_os(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Spec 2.0 backend (ADR-074 decisions 3–4): the objects `velox_policy::backend2`
+// computes, written in its order with the admin login, before the revision.
+// ---------------------------------------------------------------------------
+
+/// Install one activation's Spec 2.0 backend. Idempotent: every write is a
+/// PUT of the same body, the operator's `@custom` objects are created only
+/// when absent, and the data stream is created only when missing. The data
+/// streams are created **here**, with the admin login, so the collector
+/// account needs no data-stream admin action — only writes on the backing
+/// indices (`os_agent_user::role_body`).
+///
+/// Stops at the first failed write: a half-installed backend is reported, and
+/// the save that called this does not store the revision that would make
+/// agents write into it.
+pub async fn install_backend_v2(
+    deployment: &Deployment,
+    backend: &velox_policy::backend2::Backend,
+) -> Result<()> {
+    use velox_policy::backend2::Kind;
+    let (u, p) = crate::k8s::admin_creds(deployment).await;
+    let base = crate::recipes::os_base(deployment);
+    let c = crate::recipes::http()?;
+    let what = |k: &Kind, id: &str| {
+        format!(
+            "{k:?} {id} ({}@{})",
+            backend.package_id, backend.package_version
+        )
+    };
+
+    let mut saved_objects = Vec::new();
+    for o in &backend.objects {
+        let path = match &o.kind {
+            Kind::ComponentTemplate | Kind::ComponentTemplateIfAbsent => {
+                format!("{base}/_component_template/{}", o.id)
+            }
+            Kind::IngestPipeline | Kind::IngestPipelineIfAbsent => {
+                format!("{base}/_ingest/pipeline/{}", o.id)
+            }
+            Kind::IsmPolicy => format!("{base}/_plugins/_ism/policies/{}", o.id),
+            Kind::IndexTemplate => format!("{base}/_index_template/{}", o.id),
+            Kind::IndexPattern => {
+                saved_objects.push(serde_json::json!({
+                    "type": "index-pattern",
+                    "id": o.id,
+                    "attributes": o.body,
+                }));
+                continue;
+            }
+            Kind::SavedObject(_) => {
+                saved_objects.push(o.body.clone());
+                continue;
+            }
+        };
+        let mut url = path.clone();
+        match &o.kind {
+            // The operator's hooks: never overwritten once they exist.
+            Kind::ComponentTemplateIfAbsent | Kind::IngestPipelineIfAbsent => {
+                let probe = c
+                    .get(&path)
+                    .basic_auth(&u, Some(&p))
+                    .send()
+                    .await
+                    .with_context(|| format!("reading {}", what(&o.kind, &o.id)))?;
+                if probe.status().is_success() {
+                    continue;
+                }
+            }
+            // ISM refuses a blind PUT over an existing policy; update it
+            // under optimistic concurrency with what is there.
+            Kind::IsmPolicy => {
+                let probe = c.get(&path).basic_auth(&u, Some(&p)).send().await;
+                if let Ok(r) = probe {
+                    if r.status().is_success() {
+                        let cur: serde_json::Value = r.json().await.unwrap_or_default();
+                        if let (Some(seq), Some(term)) =
+                            (cur["_seq_no"].as_u64(), cur["_primary_term"].as_u64())
+                        {
+                            url = format!("{path}?if_seq_no={seq}&if_primary_term={term}");
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        let res = c
+            .put(&url)
+            .basic_auth(&u, Some(&p))
+            .json(&o.body)
+            .send()
+            .await
+            .with_context(|| format!("writing {}", what(&o.kind, &o.id)))?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            anyhow::bail!("writing {}: {status} {body}", what(&o.kind, &o.id));
+        }
+        // After its template exists, the data stream itself — created now so
+        // the first bulk from an agent never needs to create it.
+        if o.kind == Kind::IndexTemplate {
+            let ds = format!("{base}/_data_stream/{}", o.id);
+            let exists = c
+                .get(&ds)
+                .basic_auth(&u, Some(&p))
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success());
+            if !exists {
+                let res = c
+                    .put(&ds)
+                    .basic_auth(&u, Some(&p))
+                    .send()
+                    .await
+                    .with_context(|| format!("creating data stream {}", o.id))?;
+                if !res.status().is_success() {
+                    let status = res.status();
+                    let body = res.text().await.unwrap_or_default();
+                    // A race with another save is the only benign failure.
+                    if !body.contains("already_exists") {
+                        anyhow::bail!("creating data stream {}: {status} {body}", o.id);
+                    }
+                }
+            }
+        }
+    }
+
+    // Index patterns and dashboards into the deployment's Dashboards, the
+    // same tenant rule as the 1.x path (best-effort: the data lands either
+    // way, and a Dashboards that is restarting must not fail a save).
+    if !saved_objects.is_empty() {
+        let scope = crate::recipes::tenant_scope(deployment).await;
+        if scope.is_some() {
+            crate::recipes::ensure_tenant(deployment).await;
+        }
+        let dash = crate::recipes::dashboards_base(deployment);
+        let mut req = c
+            .post(format!(
+                "{dash}/api/saved_objects/_bulk_create?overwrite=true"
+            ))
+            .basic_auth(&u, Some(&p))
+            .header("osd-xsrf", "true");
+        if let Some(t) = &scope {
+            req = req.header("securitytenant", t);
+        }
+        let _ = req.json(&saved_objects).send().await;
+    }
+    Ok(())
+}
+
+/// Remove one activation's Spec 2.0 backend once nothing on the deployment
+/// uses that package's major any more (ADR-074 decision 4). The data and the
+/// operator's `@custom` objects stay; the data stream keeps its index
+/// template and `@package` component (OpenSearch refuses to delete a
+/// template a live data stream matches, and the data is the operator's to
+/// delete). Best-effort per object, like the 1.x teardown.
+pub async fn teardown_backend_v2(
+    deployment: &Deployment,
+    backend: &velox_policy::backend2::Backend,
+) -> Result<()> {
+    use velox_policy::backend2::Kind;
+    let (u, p) = crate::k8s::admin_creds(deployment).await;
+    let base = crate::recipes::os_base(deployment);
+    let dash = crate::recipes::dashboards_base(deployment);
+    let c = crate::recipes::http()?;
+    let scope = crate::recipes::tenant_scope(deployment).await;
+    for o in &backend.objects {
+        let req = match &o.kind {
+            Kind::IngestPipeline => c.delete(format!("{base}/_ingest/pipeline/{}", o.id)),
+            Kind::IsmPolicy => c.delete(format!("{base}/_plugins/_ism/policies/{}", o.id)),
+            Kind::IndexPattern => c
+                .delete(format!("{dash}/api/saved_objects/index-pattern/{}", o.id))
+                .header("osd-xsrf", "true"),
+            Kind::SavedObject(ty) => c
+                .delete(format!("{dash}/api/saved_objects/{ty}/{}", o.id))
+                .header("osd-xsrf", "true"),
+            Kind::ComponentTemplate
+            | Kind::ComponentTemplateIfAbsent
+            | Kind::IngestPipelineIfAbsent
+            | Kind::IndexTemplate => continue,
+        };
+        let mut req = req.basic_auth(&u, Some(&p));
+        if let (Some(t), Kind::IndexPattern | Kind::SavedObject(_)) = (&scope, &o.kind) {
+            req = req.header("securitytenant", t);
+        }
+        let _ = req.send().await;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 

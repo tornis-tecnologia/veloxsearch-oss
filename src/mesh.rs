@@ -124,6 +124,16 @@ pub struct PolicyDraft {
     /// a draft that names none or names one the settings no longer hold.
     #[serde(default)]
     pub endpoints: velox_policy::PolicyEndpoints,
+    /// Spec 2.0 activations (ADR-074), in the order the operator added them.
+    /// A draft carries these or `integrations`, never both. An empty
+    /// `package_version` means "the newest version this core can run".
+    #[serde(default)]
+    pub packages: Vec<velox_integrations::spec2::Activation>,
+    /// Values for the `password` fields of `packages`, by secret id — only
+    /// those typed in this edit. A referenced id absent here keeps the value
+    /// the Mesh already holds; one the Mesh does not hold is refused.
+    #[serde(default)]
+    pub secrets: BTreeMap<String, String>,
 }
 
 impl PolicyDraft {
@@ -143,6 +153,8 @@ impl PolicyDraft {
                 .map(|a| (a.package_id.clone(), a.selection()))
                 .collect(),
             endpoints: p.endpoints.clone(),
+            packages: p.packages.clone(),
+            secrets: BTreeMap::new(),
         }
     }
 }
@@ -223,6 +235,8 @@ pub async fn create_policy(
         vars: BTreeMap::new(),
         inputs: BTreeMap::new(),
         endpoints,
+        packages: vec![],
+        secrets: BTreeMap::new(),
     };
     save_policy(&draft, dep, tenant_id).await
 }
@@ -655,6 +669,20 @@ pub async fn save_policy(
     let (os_endpoint, _mesh_endpoint) = resolve_endpoints(&settings, &draft.endpoints)
         .with_context(|| format!("policy {} cannot be saved", draft.id))?;
 
+    // Spec 2.0 (ADR-074): its own path, end to end. A policy is one engine
+    // configuration, so it is all Spec 2.0 or all 1.x.
+    if !draft.packages.is_empty() {
+        if !draft.integrations.is_empty() {
+            anyhow::bail!(
+                "policy {} mixes Spec 2.0 packages with 1.x integrations ({}); \
+                 a policy compiles to one configuration format",
+                draft.id,
+                draft.integrations.join(", ")
+            );
+        }
+        return save_policy_v2(draft, dep, tenant_id, os_endpoint).await;
+    }
+
     let mut packages = BTreeMap::new();
     let mut activations = Vec::new();
     for id in &draft.integrations {
@@ -692,6 +720,7 @@ pub async fn save_policy(
         }],
         agent: velox_policy::AgentSettings::default(),
         endpoints: draft.endpoints.clone(),
+        packages: vec![],
     };
     let renderer = velox_policy::PackageRenderer {
         store: &Verified(&packages),
@@ -801,6 +830,244 @@ pub async fn save_policy(
     .await
     .context("handing the collector credential to the Mesh")?;
 
+    Ok(revision)
+}
+
+/// The Spec 2.0 save (ADR-074): resolve each activation's version in the
+/// registry index, fetch and verify the package (signature, then inventory),
+/// check it against the vendored plugin catalogue, compile the YAML and the
+/// backend, settle the secrets, install the backend, and only then store the
+/// revision — agents write on their next check-in, so the templates and data
+/// streams must already exist.
+async fn save_policy_v2(
+    draft: &PolicyDraft,
+    dep: &crate::scope::Deployment,
+    tenant_id: Option<&str>,
+    os_endpoint: &OsEndpoint,
+) -> anyhow::Result<u64> {
+    use anyhow::Context as _;
+    use velox_integrations::spec2;
+    use velox_policy::{backend2, compile2};
+
+    let os = velox_policy::OsAddress::parse(&os_endpoint.host)
+        .map_err(|e| anyhow::anyhow!("OpenSearch endpoint {}: {e}", os_endpoint.id))?;
+    let state = crate::catalog::index().await;
+    let index = state.index.with_context(|| {
+        format!(
+            "the registry's package index is unavailable{}",
+            state.error.map(|e| format!(": {e}")).unwrap_or_default()
+        )
+    })?;
+    let reg = crate::catalog::Registry::from_env();
+    let catalog = spec2::builtin_catalog();
+
+    let mut packages = Vec::new();
+    let mut activations = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for a in &draft.packages {
+        if !seen.insert(a.package_id.clone()) {
+            anyhow::bail!(
+                "package {} is activated twice in policy {}",
+                a.package_id,
+                draft.id
+            );
+        }
+        let entry = index
+            .package(&a.package_id)
+            .with_context(|| format!("package {} is not in the registry index", a.package_id))?;
+        let version = if a.package_version.is_empty() {
+            entry
+                .best_version(&spec2::Requirements {
+                    mesh_version: crate::build_info::VERSION,
+                    ..Default::default()
+                })
+                .map(|v| v.version.clone())
+                .with_context(|| {
+                    format!(
+                        "no GA version of {} runs on this core ({})",
+                        a.package_id,
+                        crate::build_info::VERSION
+                    )
+                })?
+        } else {
+            a.package_version.clone()
+        };
+        let v = entry
+            .versions
+            .iter()
+            .find(|v| v.version == version)
+            .with_context(|| format!("{}@{version} is not in the registry index", a.package_id))?;
+        if !spec2::version_ge(crate::build_info::VERSION, &v.min_mesh_version) {
+            anyhow::bail!(
+                "{}@{version} needs core {} or newer (this is {})",
+                a.package_id,
+                v.min_mesh_version,
+                crate::build_info::VERSION
+            );
+        }
+        let pkg = crate::catalog::verified_package_v2(
+            &reg,
+            &a.package_id,
+            &version,
+            Some(&v.manifest_sha256),
+        )
+        .await
+        .with_context(|| format!("refusing to compile unverified package {}", a.package_id))?;
+        pkg.check_catalog(catalog)
+            .map_err(|e| anyhow::anyhow!("package {}@{version}: {e}", a.package_id))?;
+        let mut act = a.clone();
+        act.package_version = version;
+        act.spec_version = spec2::SPEC_VERSION.to_string();
+        packages.push(pkg);
+        activations.push(act);
+    }
+
+    let ctx = compile2::Context::new(&os);
+    let activated: Vec<compile2::Activated<'_>> = packages
+        .iter()
+        .zip(&activations)
+        .map(|(p, a)| compile2::Activated {
+            package: p,
+            activation: a,
+        })
+        .collect();
+    let compiled = compile2::compile(&activated, &ctx, catalog)
+        .map_err(|e| anyhow::anyhow!("compiling policy {}: {e}", draft.id))?;
+    let backends = packages
+        .iter()
+        .zip(&activations)
+        .map(|(p, a)| backend2::compile(p, a, &ctx.checks()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("compiling the backend of policy {}: {e}", draft.id))?;
+
+    // Secrets: every referenced id needs a value, typed now or already held.
+    // `policy_secret_ids` fails for a policy the Mesh does not have yet —
+    // which then holds nothing.
+    let held: std::collections::BTreeSet<String> = call_for::<serde_json::Value>(
+        dep,
+        "policy_secret_ids",
+        serde_json::json!({ "policy_id": draft.id }),
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<Vec<String>>(v["ids"].clone()).ok())
+    .unwrap_or_default()
+    .into_iter()
+    .collect();
+    let policy_exists = !held.is_empty()
+        || call_for::<serde_json::Value>(
+            dep,
+            "policy",
+            serde_json::json!({ "policy_id": draft.id }),
+        )
+        .await
+        .is_ok();
+    let missing: Vec<&String> = compiled
+        .secrets
+        .iter()
+        .filter(|id| !draft.secrets.contains_key(*id) && !held.contains(*id))
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "policy {} cannot be saved: secret(s) {} need a value",
+            draft.id,
+            missing
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let set: BTreeMap<String, String> = draft
+        .secrets
+        .iter()
+        .filter(|(id, _)| compiled.secrets.contains(*id))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let keep: Vec<String> = compiled
+        .secrets
+        .iter()
+        .filter(|id| !set.contains_key(*id))
+        .cloned()
+        .collect();
+    let secrets_body = serde_json::json!({ "policy_id": draft.id, "set": set, "keep": keep });
+
+    // The collector account (its grant now spans the data streams' backing
+    // indices), then the backend, then — existing policy — the secrets, so a
+    // revision never reaches an agent before what it references.
+    let (os_user, os_password) = crate::os_agent_user::ensure(dep).await.with_context(|| {
+        format!(
+            "preparing the collector account on {} for policy {}",
+            dep.name(),
+            draft.id
+        )
+    })?;
+    for b in &backends {
+        crate::integrations::install_backend_v2(dep, b)
+            .await
+            .with_context(|| {
+                format!(
+                    "installing the backend of {}@{} on {}",
+                    b.package_id,
+                    b.package_version,
+                    dep.name()
+                )
+            })?;
+    }
+    if policy_exists {
+        let _: serde_json::Value = call_for(dep, "put_policy_secrets", secrets_body.clone())
+            .await
+            .context("handing the integration secrets to the Mesh")?;
+    }
+
+    let policy = velox_policy::Policy {
+        id: draft.id.clone(),
+        name: draft.name.clone(),
+        revision: 0,
+        activations: vec![],
+        outputs: vec![velox_policy::Output::OpenSearch {
+            deployment: draft.deployment.clone(),
+        }],
+        agent: velox_policy::AgentSettings::default(),
+        endpoints: draft.endpoints.clone(),
+        packages: activations,
+    };
+    let hash = {
+        use sha2::Digest as _;
+        let mut h = sha2::Sha256::new();
+        h.update(b"fluent_bit_yaml\n");
+        h.update(compiled.yaml.as_bytes());
+        hex::encode(h.finalize())
+    };
+    let out: serde_json::Value = call_for(
+        dep,
+        "put_policy",
+        serde_json::json!({
+            "tenant_id": tenant_id,
+            "id": draft.id,
+            "name": draft.name,
+            "body": policy,
+            "compiled": { "fluent_bit_yaml": compiled.yaml },
+            "compiled_hash": hash,
+        }),
+    )
+    .await?;
+    let revision = out
+        .get("revision")
+        .and_then(|v| v.as_u64())
+        .context("the Mesh did not answer with a revision")?;
+    let _: serde_json::Value = call_for(
+        dep,
+        "put_policy_credential",
+        serde_json::json!({ "policy_id": draft.id, "username": os_user, "password": os_password }),
+    )
+    .await
+    .context("handing the collector credential to the Mesh")?;
+    if !policy_exists {
+        let _: serde_json::Value = call_for(dep, "put_policy_secrets", secrets_body)
+            .await
+            .context("handing the integration secrets to the Mesh")?;
+    }
     Ok(revision)
 }
 

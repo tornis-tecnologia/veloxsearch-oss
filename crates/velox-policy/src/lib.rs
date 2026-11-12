@@ -173,7 +173,7 @@ impl PolicyEndpoints {
 }
 
 /// One immutable revision of a policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Policy {
     pub id: String,
     pub name: String,
@@ -187,6 +187,13 @@ pub struct Policy {
     /// requires them.
     #[serde(default)]
     pub endpoints: PolicyEndpoints,
+    /// Spec 2.0 activations (ADR-074), compiled by [`compile2`] into the
+    /// `fluent_bit_yaml` configuration. A policy carries these **or** 1.x
+    /// `activations`, never both: one engine, one configuration format.
+    /// Password values are `{"$secret": id}` here and live in the Mesh's
+    /// secret store.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<velox_integrations::spec2::Activation>,
 }
 
 /// A rendered piece of collector configuration for one engine.
@@ -603,6 +610,7 @@ mod tests {
             }],
             agent: AgentSettings::default(),
             endpoints: PolicyEndpoints::default(),
+            packages: vec![],
         }
     }
 

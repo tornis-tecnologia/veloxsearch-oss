@@ -63,6 +63,12 @@ pub const EXCLUDED_PLUGINS: &[&str] = &[
 /// The artifact-name prefix ADR-070's grant covers; shared with 1.x.
 pub const ARTIFACT_PREFIX: &str = crate::AGENT_ARTIFACT_PREFIX;
 
+/// The backing indices of every Spec 2.0 data stream (`.ds-<N>-000001`).
+/// A bulk `create` into the data stream `N` lands in them, and the security
+/// plugin checks the write against the backing index, so the collector's
+/// grant names both (ADR-074 decision 3).
+pub const BACKING_INDEX_PATTERN: &str = ".ds-veloxagent-*";
+
 /// What `{state_dir}` compiles to (ADR-074 decision 7): the agent's state
 /// directory is the agent's to know, so the compiler emits an environment
 /// reference and the agent exports it.

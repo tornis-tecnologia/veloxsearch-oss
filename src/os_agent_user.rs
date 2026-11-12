@@ -98,6 +98,9 @@ fn legacy_secret_name(dep: &Deployment) -> String {
 ///    include creating the index, and the first flush into a fresh deployment
 ///    creates one. `read` lets the account see what it wrote — an agent-side
 ///    check, or a Dashboards session opened with it.
+/// 2a. **The same on `.ds-veloxagent-*`** — the backing indices of the
+///    Spec 2.0 data streams (ADR-074); the core creates the data streams
+///    themselves, so no data-stream admin action is granted.
 /// 3. **Nothing else.** No `indices_all`, no `*`, no cluster permission beyond
 ///    bulk. The DaemonSet path's pre-rename indices (`nginx-logs`, …) are
 ///    outside the pattern on purpose: they are history, written by an admin
@@ -107,7 +110,13 @@ pub(crate) fn role_body() -> serde_json::Value {
         "description": "VeloxSearch: read and write on the veloxagent-* artifacts",
         "cluster_permissions": ["indices:data/write/bulk"],
         "index_permissions": [{
-            "index_patterns": [velox_integrations::AGENT_GRANT_PATTERN],
+            // The artifacts, and the backing indices of the Spec 2.0 data
+            // streams named after them (ADR-074): a write into a data stream
+            // is authorised against its `.ds-…` backing index.
+            "index_patterns": [
+                velox_integrations::AGENT_GRANT_PATTERN,
+                velox_integrations::spec2::BACKING_INDEX_PATTERN
+            ],
             "allowed_actions": ["read", "write", "create_index"]
         }],
         "tenant_permissions": []
@@ -358,7 +367,7 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(pats, vec!["veloxagent-*"]);
+        assert_eq!(pats, vec!["veloxagent-*", ".ds-veloxagent-*"]);
         assert_eq!(b["index_permissions"].as_array().unwrap().len(), 1);
     }
 
