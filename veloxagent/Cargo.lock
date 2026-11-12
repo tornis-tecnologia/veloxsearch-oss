@@ -1511,17 +1511,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "velox-license"
-version = "0.1.0"
-dependencies = [
- "aws-lc-rs",
- "base64 0.23.1",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "velox-mesh"
 version = "0.1.0"
 dependencies = [
@@ -1535,7 +1524,6 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "velox-integrations",
- "velox-license",
  "velox-opamp",
  "velox-policy",
 ]

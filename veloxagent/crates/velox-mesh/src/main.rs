@@ -39,7 +39,6 @@ use fleet::{AgentFacts, ConfigStatus, Status};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_postgres::Client;
-use velox_license::{entitlement, Tier};
 
 const ADDR_VAR: &str = "VELOX_MESH_ADDR";
 const DEFAULT_ADDR: &str = "127.0.0.1:4320";
@@ -363,11 +362,6 @@ struct Overview {
     policies: Vec<store::PolicyRow>,
     agents: Vec<AgentView>,
     rollout: std::collections::BTreeMap<String, fleet::Rollout>,
-    /// The installation's seats, and how many of them the whole fleet uses —
-    /// across every deployment, because the free tier is per installation.
-    seats: u32,
-    enrolled_total: u64,
-    tier: &'static str,
 }
 
 /// Everything the deployment's Mesh tab needs on first paint, in one call:
@@ -386,7 +380,6 @@ async fn overview(
     store::adopt_legacy(&st.pg, dep).await.map_err(store_err)?;
     let policies = store::list_policies(&st.pg, dep).await.map_err(store_err)?;
     let agents = agent_views(&st.pg, dep).await.map_err(store_err)?;
-    let enrolled_total = store::enrolled_total(&st.pg).await.map_err(store_err)?;
 
     let mut rollout = std::collections::BTreeMap::new();
     for p in &policies {
@@ -398,7 +391,6 @@ async fn overview(
         rollout.insert(p.id.clone(), fleet::rollout(&statuses));
     }
 
-    let ent = entitlement(None, store::now());
     Ok(Json(Overview {
         // Reachable by definition: this request arrived.
         onboarding: fleet::onboarding(
@@ -409,14 +401,6 @@ async fn overview(
         rollout,
         policies,
         agents,
-        seats: ent.seats,
-        enrolled_total,
-        tier: match ent.tier {
-            Tier::Free => "free",
-            Tier::Licensed => "licensed",
-            Tier::Grace { .. } => "grace",
-            Tier::ReadOnly { .. } => "read-only",
-        },
     }))
 }
 
@@ -663,6 +647,22 @@ async fn unenrol(
         .map_err(store_err)
 }
 
+/// Remove an agent from the deployment's fleet: its row goes, and with it
+/// the credential, so a host still running is refused on its next check-in
+/// exactly as after `unenrol`. What the operator asks for when a decommissioned
+/// or unenrolled host should stop showing at all.
+async fn forget_agent(
+    State(st): App,
+    headers: HeaderMap,
+    Json(req): Json<AgentIdReq>,
+) -> ApiResult<StatusCode> {
+    console_auth(&st, &headers)?;
+    store::forget_agent(&st.pg, &req.dep, &req.instance_uid)
+        .await
+        .map(|_| StatusCode::OK)
+        .map_err(store_err)
+}
+
 #[tokio::main]
 async fn main() {
     let addr = std::env::var(ADDR_VAR).unwrap_or_else(|_| DEFAULT_ADDR.to_string());
@@ -691,18 +691,8 @@ async fn main() {
         );
     }
 
-    let ent = entitlement(None, store::now());
-    eprintln!(
-        "velox-mesh {} — tier {}, {} seats",
-        env!("CARGO_PKG_VERSION"),
-        match ent.tier {
-            Tier::Free => "free",
-            Tier::Licensed => "licensed",
-            Tier::Grace { .. } => "grace",
-            Tier::ReadOnly { .. } => "read-only",
-        },
-        ent.seats
-    );
+    // No agent limit (2026-11-12): the Mesh manages every host enrolled.
+    eprintln!("velox-mesh {}", env!("CARGO_PKG_VERSION"));
 
     let state = Arc::new(AppState { pg, service_token });
     let app = Router::new()
@@ -728,6 +718,7 @@ async fn main() {
         .route("/api/mesh/enrollment_token", post(mint_token))
         .route("/api/mesh/assign_policy", post(assign))
         .route("/api/mesh/unenrol", post(unenrol))
+        .route("/api/mesh/forget_agent", post(forget_agent))
         .route("/api/mesh/delete_policy", post(delete_policy))
         .with_state(state);
 

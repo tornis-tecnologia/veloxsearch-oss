@@ -308,10 +308,11 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Secret `velox-mesh`: the Mesh's database URL and the service token the
   # core authenticates with — the core writes it at install and reads the
-  # token back on every start (mesh::discover).
+  # token back on every start (mesh::discover), and deletes it when an
+  # uninstall purges the Mesh's data.
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create", "update", "patch"]
+    verbs: ["get", "create", "update", "patch", "delete"]
   # Each deployment's agent-face route, `<name>-mesh.<domain>` (ADR-072
   # amendment 4): an Ingress must sit beside the Service it routes to.
   - apiGroups: ["networking.k8s.io"]

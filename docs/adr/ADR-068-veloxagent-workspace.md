@@ -58,6 +58,11 @@ today (`src/agents.rs`, `src/integrations.rs`).
    official build, and the signature detects a forged file, not a removed
    check.
 
+   *Withdrawn 2026-11-12:* there is no agent limit. The Mesh manages every
+   host enrolled, with no licence document; `velox-license` and its keyring
+   (`veloxagent/keys/`) are removed, and the overview no longer reports
+   seats.
+
 ## Consequences
 
 - One repository, one licence, one contribution process. Selling a commercial
@@ -68,6 +73,6 @@ today (`src/agents.rs`, `src/integrations.rs`).
   move with the code.
 - A new CI job builds and tests `veloxagent/` on every PR; `cargo deny` runs
   there with its own allowlist.
-- The seat rules live in `veloxagent/crates/velox-license` and are documented
-  in `veloxagent/docs/ARCHITECTURE.md §6`; the survey, the Fluent Bit critique
+- The seat rules lived in `veloxagent/crates/velox-license` (removed with the
+  limit, decision 5); the survey, the Fluent Bit critique
   and the phased plan are in `veloxagent/docs/PLAN.md`.

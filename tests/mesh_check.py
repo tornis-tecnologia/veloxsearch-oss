@@ -389,79 +389,23 @@ with sync_playwright() as p:
         page.click('[data-testid="add-agent-back"]')
         page.wait_for_selector('[data-testid="mesh-panel-overview"]', timeout=10000)
 
-    # ---- the one onboarding dialog ----------------------------------------
-    page.goto(f"{base}/deployments/{dep}/data" + (f"?policy={E2E_POLICY}" if has_mesh else ""), wait_until="networkidle")
+    # ---- the Data tab: the registry's catalogue is the catalogue ----------
+    # The cluster's 1.x catalogue is gone (2026-11-12): what it installed on
+    # this cluster is still listed, for configure/remove, and nothing else.
+    page.goto(f"{base}/deployments/{dep}/data", wait_until="networkidle")
     page.wait_for_selector('[data-testid="integrations-tab"]', timeout=15000)
-    page.wait_for_selector(f'[data-testid="install-{E2E_INTEG}"], [data-testid="integ-menu-{E2E_INTEG}"]', timeout=20000)
-    already = page.locator(f'[data-testid="integ-menu-{E2E_INTEG}"]').count() == 1
-    if already:
-        page.click(f'[data-testid="integ-menu-{E2E_INTEG}"]')
-        page.click(f'[data-testid="add-more-{E2E_INTEG}"]')
-    else:
-        page.click(f'[data-testid="install-{E2E_INTEG}"]')
-    page.wait_for_selector('[data-testid="add-integration"]', timeout=10000)
-    page.wait_for_selector('[data-testid="add-integration-where"]', timeout=15000)
-    check(page.locator('[data-testid="add-target-cluster"]').count() == 1,
-          "the dialog offers this cluster as a target")
-    if has_mesh:
-        check(page.locator(f'[data-testid="add-target-{E2E_POLICY}"] input').is_checked(),
-              "the policy the Mesh tab sent over is preselected")
-        check(page.locator('[data-testid="add-target-new"]').count() == 1,
-              "a new policy can be created from the dialog")
-        page.wait_for_function("() => !document.querySelector('[data-testid=\"add-target-new\"] input').disabled", timeout=10000)
-        check(True, "with endpoints configured the new-policy option is enabled")
-    else:
-        check(page.locator('[data-testid^="add-target-"]').count() == 1,
-              "without a Mesh the only target is the cluster")
-    page.click('[data-testid="add-integration-next"]')
-    page.wait_for_selector('[data-testid="add-integration-configure"]', timeout=10000)
-    inputs = page.locator('[data-testid^="add-input-"]:not([data-testid^="add-input-toggle-"])')
-    check(inputs.count() >= 1, f"the package's inputs are listed ({inputs.count()})")
-    check(page.locator('[data-testid^="add-input-"][data-on="1"]').count() >= 1,
-          "the package's default input is pre-selected")
-    cfg = page.locator('[data-testid="add-integration-configure"]').inner_text()
-    check("veloxagent-" in cfg, "each input names the index it writes to")
-    for bad in ("undefined", "add_integ_", "integ_"):
-        check(bad not in cfg, f"the dialog renders no raw key ({bad!r})")
-    page.click('[data-testid="add-integration-save"]')
-    page.wait_for_selector('[data-testid="add-integration"]', state="detached", timeout=60000)
-    page.wait_for_timeout(1500)
-    # The card turns green and says only "installed": no received-data
-    # facts (those are the overview's) and no policy pills (the policy's
-    # card has them); the menu points at the policies instead.
-    page.wait_for_selector(f'[data-testid="installed-{E2E_INTEG}"]', timeout=60000)
-    card = page.locator(f'[data-testid="integration-{E2E_INTEG}"]')
-    check(card.get_attribute("data-state") in ("installed", "update"), "the catalogue card is in the installed state")
-    body = card.inner_text()
-    check("docs" not in body and "recebendo" not in body.lower() and "receiving" not in body.lower(),
-          "the card carries no received-data facts")
-    check(page.locator('[data-testid^="on-policy-"]').count() == 0, "no policy pills on the Data tab")
-    check(page.locator('[data-testid="integ-cat-installed"]').count() == 1, "the catalogue filters by installed")
-    if has_mesh:
-        page.click(f'[data-testid="integ-menu-{E2E_INTEG}"]')
-        check(page.locator(f'[data-testid="integ-policies-{E2E_INTEG}"]').count() == 1,
-              "the menu points at the policies for host collection")
-        check(page.locator(f'[data-testid="remove-{E2E_INTEG}-{E2E_POLICY}"]').count() == 0,
-              "per-policy removal is not on the Data tab")
-        page.keyboard.press("Escape")
-        # The deployment's overview no longer carries a received-data table.
-        page.goto(f"{base}/deployments/{dep}/overview", wait_until="networkidle")
-        page.wait_for_selector('[data-testid="tile-docs"]', timeout=30000)
-        check(page.locator('[data-testid="ov-receiving"]').count() == 0, "no 'Data received' panel on the overview")
-        # Removal from the policy is in the policy's settings.
-        page.goto(f"{base}/deployments/{dep}/mesh/policies", wait_until="networkidle")
-        page.wait_for_selector(f'[data-testid="policy-menu-{E2E_POLICY}"]', timeout=15000)
-        page.click(f'[data-testid="policy-menu-{E2E_POLICY}"]')
-        page.click(f'[data-testid="policy-settings-{E2E_POLICY}"]')
-        page.wait_for_selector(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]', timeout=15000)
-        page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
-        page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
-        check(True, "removal is per target, in the policy's settings")
-    else:
-        page.click(f'[data-testid="integ-menu-{E2E_INTEG}"]')
-        page.click(f'[data-testid="uninstall-{E2E_INTEG}"]')
-        page.wait_for_selector(f'[data-testid="installed-{E2E_INTEG}"]', state="detached", timeout=60000)
-        check(True, "removed from the cluster again")
+    page.wait_for_selector('[data-testid="agent-catalogue"]', timeout=30000)
+    check(True, "the registry's catalogue renders on the Data tab")
+    check(page.locator('[data-testid="integ-search"]').count() == 0,
+          "no second, 1.x catalogue beside the registry's")
+    check(page.locator('[data-testid^="install-"]').count() == 0,
+          "no 1.x integration is offered for install")
+    legacy = page.locator('[data-testid="integ-cluster"] [data-testid^="integration-"]')
+    for i in range(legacy.count()):
+        st = legacy.nth(i).get_attribute("data-state")
+        check(st in ("installed", "update"), f"the cluster list holds installed integrations only ({st})")
+    check(page.locator('[data-testid^="add-more-"]').count() == 0,
+          "an old-format integration is not added to new targets")
 
     # ---- the fleet, when a controller is configured ----------------------
     if has_mesh:
@@ -471,6 +415,20 @@ with sync_playwright() as p:
         check(True, f"the fleet renders ({rows.count()} agent(s))")
         check(page.locator('[data-testid="mesh-fleet"] select').count() == 0,
               "no policy picker on the rows: the policy is changed in the agent's editor")
+        # The summary chips filter the table by status, and every row can be
+        # removed from the fleet (row and credential), behind a confirm.
+        page.click('[data-testid="mesh-sum-healthy"]')
+        page.wait_for_timeout(300)
+        healthy_rows = page.locator('[data-testid="mesh-fleet"] tbody tr')
+        check(all(healthy_rows.nth(i).get_attribute("data-status") == "healthy" for i in range(healthy_rows.count())),
+              "the healthy chip shows healthy agents only")
+        page.click('[data-testid="mesh-summary-total"]')
+        page.wait_for_selector('[data-testid="mesh-fleet"], [data-testid="mesh-fleet-empty"]', timeout=5000)
+        check(page.locator('[data-testid="mesh-fleet-filter"]').count() == 0, "the total clears the filter")
+        if rows.count():
+            check(page.locator('[data-testid^="fleet-forget-"]').count() == rows.count(),
+                  "every row offers Remove")
+        check(page.locator('[data-testid="mesh-seats"]').count() == 0, "no agent limit is shown")
         heads = page.locator('[data-testid="mesh-fleet"] thead').inner_text().lower()
         check("cpu" in heads and ("mem" in heads) and ("vers" in heads),
               f"Fleet-style columns: CPU, memory, version ({heads.strip()})")

@@ -1216,6 +1216,12 @@ button.badge { cursor: pointer; }
 .fleet-sum .chip.red .dot { background: var(--danger); }
 .fleet-sum .chip.yellow .dot { background: var(--warn); }
 .fleet-sum .total { margin-right: auto; color: var(--text-3); }
+/* The summary chips are the fleet's status filter: buttons that read as chips. */
+.fleet-sum .chip-btn { font: inherit; background: none; border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; cursor: pointer; }
+.fleet-sum .chip-btn:hover { border-color: var(--border); }
+.fleet-sum .chip-btn[aria-pressed="true"] { border-color: var(--border-strong); background: var(--surface-2, var(--bg-2)); color: var(--text); }
+.fleet-sum .chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.linkbtn { font: inherit; background: none; border: 0; padding: 0; color: var(--accent-text, var(--accent)); cursor: pointer; text-decoration: underline; }
 .fleet-bar { display: flex; height: 6px; border-radius: 99px; overflow: hidden; background: var(--surface-2); margin: 8px 0 0; }
 .fleet-bar span { display: block; height: 100%; background: var(--border-strong); }
 .fleet-bar span.green { background: var(--accent); }

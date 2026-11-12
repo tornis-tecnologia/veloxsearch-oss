@@ -52,8 +52,8 @@ it and tied to the integrations that deployment already has.
    OpenSearch and Kubernetes layers already demand; the Mesh then refuses to
    answer about rows outside that pair. `overview` becomes the deployment's
    overview — its onboarding step, its policies, its fleet, its rollouts.
-   Only the licence and the seat count stay global: the free tier is ten
-   agents per installation, not per deployment.
+   (There is no agent limit since 2026-11-12, so nothing is counted across
+   deployments; ADR-068 decision 5.)
 
 3. **An agent belongs to the deployment it enrolled under, for life.** The
    agent row copies the pair from the policy at enrollment rather than

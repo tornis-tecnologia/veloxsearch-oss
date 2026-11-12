@@ -783,16 +783,6 @@ pub async fn current_revisions(pg: &Client, dep: &DeploymentRef) -> Result<BTree
         .collect())
 }
 
-/// How many agents the installation manages, across every deployment: the
-/// seat count is the installation's (ADR-068 §5), not a deployment's.
-pub async fn enrolled_total(pg: &Client) -> Result<u64> {
-    let n: i64 = pg
-        .query_one("SELECT count(*) FROM mesh_agents WHERE NOT unenrolled", &[])
-        .await?
-        .get(0);
-    Ok(n as u64)
-}
-
 /// Move an agent to another policy **of the same deployment**. The next
 /// check-in sees a different hash and applies it — there is no push, and no
 /// re-enrollment.
@@ -873,6 +863,24 @@ pub async fn unenrol(pg: &Client, dep: &DeploymentRef, instance_uid: &str) -> Re
     let n = pg
         .execute(
             "UPDATE mesh_agents SET unenrolled = true
+              WHERE instance_uid = $1 AND deployment_ns = $2 AND deployment = $3",
+            &[&instance_uid, &dep.deployment_ns, &dep.deployment],
+        )
+        .await?;
+    if n == 0 {
+        return Err(Error::NotFound);
+    }
+    Ok(())
+}
+
+/// Delete one of the deployment's agents — row and credential. Scoped by
+/// the deployment pair like every agent write, so another deployment's
+/// agent is `NotFound`, never removed.
+pub async fn forget_agent(pg: &Client, dep: &DeploymentRef, instance_uid: &str) -> Result<()> {
+    dep.check()?;
+    let n = pg
+        .execute(
+            "DELETE FROM mesh_agents
               WHERE instance_uid = $1 AND deployment_ns = $2 AND deployment = $3",
             &[&instance_uid, &dep.deployment_ns, &dep.deployment],
         )

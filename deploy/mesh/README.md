@@ -19,9 +19,7 @@ The Mesh's contract with its environment (`veloxagent/crates/velox-mesh/src/main
 | `VELOX_MESH_PG_URL` | Secret `velox-mesh`, key `pg-url`. Required: the binary exits without it, and runs its embedded migrations before serving. |
 | `VELOX_MESH_SERVICE_TOKEN` | Secret `velox-mesh`, key `service-token`. The core reads the same key to authenticate. |
 
-There is no licence variable: the binary computes its entitlement with no
-licence document (`entitlement(None, …)`), so every install runs the free
-tier (10 agents) until `velox-mesh license load|activate` exists.
+There is no licence and no agent limit: the Mesh manages every host enrolled.
 
 ## Install from the console (the default)
 
@@ -80,7 +78,6 @@ deploy/mesh/build-image.sh --push     # prints the digest; pin mesh.yaml to it
    kubectl apply -f deploy/mesh/mesh.yaml
    kubectl -n velox-mesh rollout status deploy/velox-mesh
    kubectl -n velox-mesh logs deploy/velox-mesh
-   # velox-mesh 0.1.0 — tier free, 10 seats
    # velox-mesh: listening on http://0.0.0.0:4320
    ```
 
@@ -150,5 +147,5 @@ EOSQL
   service token alone.
 - **Backups.** The Mesh's database rides the control-plane Postgres; nothing
   here schedules a dump of `velox_mesh`.
-- **Licences, the gateway and queue** (ARCHITECTURE.md §5.2), **multi-arch
+- **The gateway and queue** (ARCHITECTURE.md §5.2), **multi-arch
   images** (the build is the host's architecture).

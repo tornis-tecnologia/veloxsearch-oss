@@ -455,6 +455,11 @@ o plano fixa. É um teste, não um número de marketing.
 
 ## 6. Licenciamento e assentos
 
+> **Retirado em 2026-11-12:** não há mais limite de agentes. O Mesh gerencia
+> todo host matriculado, sem documento de licença; o crate `velox-license` e
+> o keyring `veloxagent/keys/` foram removidos (ADR-068, decisão 5). O texto
+> abaixo fica como registro do desenho anterior.
+
 Regras (implementadas e testadas em `velox-license`):
 
 | Regra | Comportamento |

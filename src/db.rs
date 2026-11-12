@@ -297,6 +297,30 @@ pub async fn ensure_mesh_database(password: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drop the Velox Mesh's database and role (uninstall with purge, ADR-072
+/// amendment 5). `WITH (FORCE)` ends the Mesh's own connection if its pod is
+/// still terminating; `IF EXISTS` makes a second purge a no-op.
+pub async fn drop_mesh_database() -> Result<()> {
+    let cfg = PgConfig::from_env()?;
+    let kube = crate::k8s::client().await?;
+    let su = superuser_password(&kube).await?;
+    let admin = PgConfig {
+        dbname: "postgres".into(),
+        user: "postgres".into(),
+        ..cfg
+    };
+    let pg = connect(&admin, &su).await?;
+    for stmt in [
+        "DROP DATABASE IF EXISTS velox_mesh WITH (FORCE)",
+        "DROP ROLE IF EXISTS velox_mesh",
+    ] {
+        pg.batch_execute(stmt)
+            .await
+            .with_context(|| stmt.to_string())?;
+    }
+    Ok(())
+}
+
 /// Open a fresh application connection for a control-plane query (#79).
 ///
 /// Deliberately connection-per-operation rather than a pool: every caller is a

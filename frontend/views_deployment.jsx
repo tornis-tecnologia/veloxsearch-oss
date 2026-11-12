@@ -801,16 +801,6 @@ function ConfigTab({ d, lang, onSave, onToast, locked, onDeleteRequest }) {
    ============================================================ */
 const INTEG_POLL_MS = 15000;
 
-// Integration id → catalog category. The catalog is RUNTIME data (#76); an
-// unknown id lands in "other" rather than hiding.
-const INTEG_CAT = {
-  kubernetes: "k8s", "k8s-events": "k8s",
-  postgres: "db", mysql: "db", mongo: "db", redis: "db",
-  kafka: "mq", rabbitmq: "mq",
-  nginx: "web", traefik: "web",
-  ssh: "sec", "k8s-audit": "sec",
-};
-const CATS = ["all", "k8s", "db", "mq", "web", "sec", "other"];
 function monogram(id, title) {
   const base = (title || id || "?").replace(/[^A-Za-z0-9 ]/g, " ").trim();
   const parts = base.split(/\s+/);
@@ -1120,8 +1110,6 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
   const [loadErr, setLoadErr] = useState("");
   const [busy, setBusy] = useState({});
   const [itemErr, setItemErr] = useState({});
-  const [q, setQ] = useState("");
-  const [cat, setCat] = useState("all");
 
   const reload = useCallback(async () => {
     try {
@@ -1216,13 +1204,6 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
   const age = fmtAge(view.age_seconds, t);
   const dashUrl = d.dashboard_url;
   const installedItems = items.filter(isInstalled);
-  const needle = q.trim().toLowerCase();
-  const catOf = (it) => INTEG_CAT[it.id] || "other";
-  const counts = CATS.reduce((m, c) => { m[c] = items.filter(it => c === "all" || catOf(it) === c).length; return m; }, {});
-  // Installed first within the view, so what is on reads at the top.
-  const shown = items.filter(it => (cat === "all" || (cat === "installed" ? isInstalled(it) : catOf(it) === cat))
-    && (!needle || loc(it.title, lang, it.id).toLowerCase().includes(needle) || it.id.includes(needle) || loc(it.summary, lang, "").toLowerCase().includes(needle)))
-    .sort((a, b) => Number(isInstalled(b)) - Number(isInstalled(a)));
 
   return (
     <div className="view-enter" data-testid="integrations-tab">
@@ -1243,51 +1224,24 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
       {/* The second collection option (ADR-053) */}
       <ObservabilityStackPanel d={d} lang={lang} locked={locked} onToggle={onToggleStack} onToast={onToast} />
 
-      {/* The catalogue is the whole screen: every package, the installed
-          ones in green. What an integration RECEIVES is a fact about the
-          deployment and lives on its overview (ReceivingPanel); which policy
-          collects it is the Mesh's and lives on the policy's card. Here a
-          card answers "is it on?" and offers add / configure / remove. */}
-      <div className="section-title" style={{ justifyContent: "space-between" }}>
-        <span>{t.integ_catalog_h} <span className="tab-count">{installedItems.length}/{items.length}</span></span>
-        {view.source === "registry"
-          ? <span data-testid="catalog-source" data-source="registry" style={{ textTransform: "none", letterSpacing: 0, fontWeight: 400 }}>{t.integ_src_registry.replace("{age}", age)}</span>
-          : null}
-      </div>
-      {view.source !== "registry" && (
-        <Banner tone="warn" testid="catalog-degraded" title={view.source === "cache" ? t.integ_stale_h : t.integ_bootstrap_h}
-          className="catalog-degraded">
-          <span data-source={view.source}>{view.source === "cache" ? t.integ_stale_p.replace("{age}", age) : t.integ_bootstrap_p}</span>
-          {view.error && <pre data-testid="catalog-error-reason">{view.error}</pre>}
-        </Banner>
-      )}
-      {items.length === 0 ? (
-        <p className="hint" data-testid="catalog-empty">{t.integ_empty}</p>
-      ) : (
-        <div className="integ-layout">
-          <div>
-            <label className="search" style={{ position: "relative", display: "flex", alignItems: "center", marginBottom: 10 }}>
-              <Icon name="search" size={14} style={{ position: "absolute", left: 10, color: "var(--text-3)", pointerEvents: "none" }} />
-              <input className="input" style={{ paddingLeft: 32 }} value={q} onChange={e => setQ(e.target.value)}
-                placeholder={t.integ_search_ph} aria-label={t.integ_search_ph} data-testid="integ-search" />
-            </label>
-            <nav className="catnav" aria-label={t.integ_catalog_h}>
-              {CATS.filter(c => c === "all" || counts[c] > 0).map(c => (
-                <button type="button" key={c} aria-pressed={cat === c} onClick={() => setCat(c)}>
-                  <span>{t[`integ_cat_${c}`]}</span><i>{counts[c]}</i>
-                </button>
-              ))}
-              <button type="button" aria-pressed={cat === "installed"} onClick={() => setCat("installed")} data-testid="integ-cat-installed">
-                <span>{t.integ_cat_installed}</span><i>{installedItems.length}</i>
-              </button>
-            </nav>
+      {/* The catalogue is the registry's (ADR-074): the section below. What
+          stays of the cluster's 1.x catalogue is what is INSTALLED on this
+          cluster — shown only so it can still be configured or removed; no
+          new 1.x integration is offered (the user's call, 2026-11-12). */}
+      {installedItems.length > 0 && (
+        <>
+          <div className="section-title" style={{ justifyContent: "space-between" }}>
+            <span>{t.integ_cluster_h} <span className="tab-count">{installedItems.length}</span></span>
           </div>
-          <div>
-            {shown.length === 0 ? (
-              <p className="hint" data-testid="integ-no-match">{t.integ_no_match}</p>
-            ) : (
-              <div className="integ-grid">
-                {shown.map(it => {
+          <p className="hint" style={{ margin: "-4px 0 10px", maxWidth: "70ch" }}>{t.integ_cluster_p}</p>
+          {view.source !== "registry" && view.source === "cache" && (
+            <Banner tone="warn" testid="catalog-degraded" title={t.integ_stale_h} className="catalog-degraded">
+              <span data-source={view.source}>{t.integ_stale_p.replace("{age}", age)}</span>
+              {view.error && <pre data-testid="catalog-error-reason">{view.error}</pre>}
+            </Banner>
+          )}
+          <div className="integ-grid" data-testid="integ-cluster" style={{ marginBottom: 22 }}>
+                {installedItems.map(it => {
                   const working = busy[it.id];
                   const err = itemErr[it.id];
                   const on = isInstalled(it);
@@ -1324,9 +1278,7 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
                               </Btn>
                             )}
                             <Menu label={t.more_actions} testid={`integ-menu-${it.id}`} items={[
-                              { label: t.integ_add_target, icon: "plus", disabled: !!working || !!locked, testid: `add-more-${it.id}`, onClick: () => openAdd(it, null) },
                               ...(onCluster(it) ? [
-                                { sep: true },
                                 { label: t.integ_edit_target.replace("{target}", t.integ_target_cluster), icon: "sliders", disabled: !!working || !!locked,
                                   testid: `edit-${it.id}-${CLUSTER_TARGET}`, onClick: () => openEdit(it, CLUSTER_TARGET) },
                                 { label: t.integ_remove_target.replace("{target}", t.integ_target_cluster), icon: "trash", danger: true, disabled: !!working || !!locked,
@@ -1348,10 +1300,8 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
                     </div>
                   );
                 })}
-              </div>
-            )}
           </div>
-        </div>
+        </>
       )}
 
       {/* Agent collection from Spec 2.0 packages (ADR-074): the Mesh path.

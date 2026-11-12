@@ -280,20 +280,25 @@ const SUMMARY = [
   { key: "unenrolled", tone: "unknown", of: s => s === "unenrolled" },
 ];
 
-function FleetSummary({ t, agents, policies }) {
+/* The chips are also the fleet's status filter (Fleet-style): one pressed
+   chip shows only its bucket, pressing it again — or the total — shows all. */
+function FleetSummary({ t, agents, policies, filter, onFilter }) {
   const rows = agents || [];
   const counts = SUMMARY.map(b => ({ ...b, n: rows.filter(a => b.of(a.status)).length }));
   const total = rows.length;
+  const pick = (k) => onFilter && onFilter(filter === k ? null : k);
   return (
     <div className="card pad" data-testid="mesh-summary" style={{ marginBottom: 18 }}>
       <div className="fleet-sum">
-        <span className="total" data-testid="mesh-summary-total">
+        <button type="button" className="total chip-btn" data-testid="mesh-summary-total" aria-pressed={!filter}
+          onClick={() => onFilter && onFilter(null)} title={t.mesh_filter_all}>
           {t.mesh_sum_total.replace("{n}", total).replace("{p}", (policies || []).length)}
-        </span>
+        </button>
         {counts.map(b => (
-          <span key={b.key} className={`chip ${b.tone}`} data-testid={`mesh-sum-${b.key}`} data-n={b.n}>
+          <button type="button" key={b.key} className={`chip chip-btn ${b.tone}`} data-testid={`mesh-sum-${b.key}`} data-n={b.n}
+            aria-pressed={filter === b.key} onClick={() => pick(b.key)} title={t.mesh_filter_by}>
             <span className="dot" />{b.key === "unhealthy" ? t.mesh_sum_unhealthy : t[`mesh_st_${b.key}`]} <b>{b.n}</b>
-          </span>
+          </button>
         ))}
       </div>
       <div className="fleet-bar" aria-hidden="true">
@@ -319,9 +324,9 @@ function attr(a, key) {
   return v === undefined || v === null || v === "" ? null : String(v);
 }
 
-function FleetTable({ t, lang, agents, onEdit, onUnenrol, testid = "mesh-fleet" }) {
-  if (!agents || agents.length === 0) return <p className="hint" data-testid={`${testid}-empty`}>{t.mesh_fleet_empty}</p>;
-  const actions = !!(onEdit || onUnenrol);
+function FleetTable({ t, lang, agents, onEdit, onUnenrol, onForget, emptyText, testid = "mesh-fleet" }) {
+  if (!agents || agents.length === 0) return <p className="hint" data-testid={`${testid}-empty`}>{emptyText || t.mesh_fleet_empty}</p>;
+  const actions = !!(onEdit || onUnenrol || onForget);
   const na = <span className="hint">{t.mesh_na}</span>;
   return (
     <table className="fleet" data-testid={testid}>
@@ -380,8 +385,12 @@ function FleetTable({ t, lang, agents, onEdit, onUnenrol, testid = "mesh-fleet" 
                         onClick={() => onEdit(a)}>{t.mesh_fleet_edit}</Btn>
                     )}
                     {onUnenrol && live && (
-                      <Btn variant="ghost" size="sm" icon="trash" data-testid={`fleet-unenrol-${short}`}
+                      <Btn variant="ghost" size="sm" icon="x" data-testid={`fleet-unenrol-${short}`}
                         onClick={() => onUnenrol(a.instance_uid)}>{t.mesh_fleet_unenrol}</Btn>
+                    )}
+                    {onForget && (
+                      <Btn variant="ghost" size="sm" icon="trash" data-testid={`fleet-forget-${short}`}
+                        onClick={() => onForget(a)}>{t.mesh_fleet_forget}</Btn>
                     )}
                   </div>
                 </td>
@@ -650,6 +659,8 @@ function MeshInstallGuide({ lang, onToast }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const [tick, setTick] = useState(0);
+  const [removing, setRemoving] = useState(false);
+  const [purge, setPurge] = useState(false);
   useEffect(() => {
     let alive = true;
     API.meshStatus()
@@ -673,6 +684,15 @@ function MeshInstallGuide({ lang, onToast }) {
     } catch (e) { setErr(e.message); }
     finally { setBusy(false); }
   }
+  async function uninstall() {
+    setBusy(true); setErr(null);
+    try {
+      const s = await API.meshUninstall(purge);
+      setStatus(s); setRemoving(false); setPurge(false);
+      if (onToast) onToast(purge ? t.mesh_uninstall_purged : t.mesh_uninstall_ok, true);
+    } catch (e) { setErr(e.message); setRemoving(false); }
+    finally { setBusy(false); }
+  }
   const viaEnv = status && status.source === "env";
   const installed = status && status.source === "installed";
   return (
@@ -683,11 +703,27 @@ function MeshInstallGuide({ lang, onToast }) {
         {viaEnv ? (
           <p className="hint" data-testid="mesh-install-env">{t.mesh_install_env}</p>
         ) : (
-          <Btn variant={installed ? "outline" : "primary"} icon={installed ? "activity" : "download"} disabled={busy || !status}
-            data-testid="mesh-install" onClick={install}>
-            {busy ? t.mesh_installing : installed ? t.mesh_reinstall_btn : t.mesh_install_btn}
-          </Btn>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn variant={installed ? "outline" : "primary"} icon={installed ? "activity" : "download"} disabled={busy || !status}
+              data-testid="mesh-install" onClick={install}>
+              {busy && !removing ? t.mesh_installing : installed ? t.mesh_reinstall_btn : t.mesh_install_btn}
+            </Btn>
+            {installed && (
+              <Btn variant="ghost" icon="trash" disabled={busy} data-testid="mesh-uninstall" onClick={() => setRemoving(true)}>
+                {t.mesh_uninstall_btn}
+              </Btn>
+            )}
+          </div>
         )}
+        <Confirm open={removing} busy={busy} title={t.mesh_uninstall_h} body={t.mesh_uninstall_p}
+          confirmLabel={purge ? t.mesh_uninstall_purge_btn : t.mesh_uninstall_btn} cancelLabel={t.cancel}
+          confirmTestid="mesh-uninstall-confirm" onConfirm={uninstall} onCancel={() => { setRemoving(false); setPurge(false); }}
+          requireText={purge ? "velox-mesh" : undefined} requireLabel={purge ? t.mesh_uninstall_type : undefined}>
+          <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13.5, margin: "4px 0 10px" }}>
+            <input type="checkbox" checked={purge} onChange={e => setPurge(e.target.checked)} data-testid="mesh-uninstall-purge" />
+            <span>{t.mesh_uninstall_purge}</span>
+          </label>
+        </Confirm>
         {err && <Banner tone="danger" title={t.mesh_install_err} style={{ marginTop: 10 }} testid="mesh-install-err">{err}</Banner>}
         <details style={{ marginTop: 14 }}>
           <summary className="hint" style={{ cursor: "pointer" }}>{t.mesh_install_manual}</summary>
@@ -1225,7 +1261,23 @@ function SettingsTab({ t, d, status, overview, settings, onSettings, onToast, on
    endpoints not yet configured. ---------------------------------------- */
 function OverviewTab({ t, lang, dep, status, overview, settings, onReload, onToast, onTab }) {
   const [editing, setEditing] = useState(null);
+  const [filter, setFilter] = useState(null);
+  const [forgetting, setForgetting] = useState(null);
+  const [busy, setBusy] = useState(false);
   const agents = (overview && overview.agents) || [];
+  const bucket = SUMMARY.find(b => b.key === filter);
+  const shown = bucket ? agents.filter(a => bucket.of(a.status)) : agents;
+  const forget = async () => {
+    if (!forgetting) return;
+    setBusy(true);
+    try {
+      await API.meshForgetAgent(dep.id, forgetting.instance_uid);
+      if (onToast) onToast(t.mesh_forgot_toast.replace("{host}", forgetting.hostname || forgetting.instance_uid.slice(0, 12)), true);
+      setForgetting(null);
+      if (onReload) onReload();
+    } catch (e) { if (onToast) onToast(e.message, false); }
+    finally { setBusy(false); }
+  };
   const needEps = settings && ((settings.os_endpoints || []).length === 0 || (settings.mesh_endpoints || []).length === 0);
   const unenrol = async (uid) => {
     try {
@@ -1246,12 +1298,7 @@ function OverviewTab({ t, lang, dep, status, overview, settings, onReload, onToa
 
       {overview && (
         <>
-          <FleetSummary t={t} agents={agents} policies={overview.policies} />
-          {overview.seats != null && (
-            <p className="hint" style={{ margin: "-8px 0 18px" }} data-testid="mesh-seats">
-              {t.mesh_seats.replace("{used}", overview.enrolled_total ?? 0).replace("{seats}", overview.seats)}
-            </p>
-          )}
+          <FleetSummary t={t} agents={agents} policies={overview.policies} filter={filter} onFilter={setFilter} />
           <div className="fleet-head">
             <div>
               <h3 className="ag-h" style={{ marginBottom: 2 }}>{t.mesh_fleet_h}</h3>
@@ -1261,7 +1308,18 @@ function OverviewTab({ t, lang, dep, status, overview, settings, onReload, onToa
               {t.mesh_add_agent}
             </Btn>
           </div>
-          <FleetTable t={t} lang={lang} agents={agents} onEdit={setEditing} onUnenrol={unenrol} />
+          {bucket && (
+            <p className="hint" data-testid="mesh-fleet-filter" style={{ margin: "0 0 8px" }}>
+              {t.mesh_filter_showing.replace("{n}", shown.length).replace("{total}", agents.length)}{" "}
+              <button type="button" className="linkbtn" onClick={() => setFilter(null)} data-testid="mesh-fleet-filter-clear">{t.mesh_filter_clear}</button>
+            </p>
+          )}
+          <FleetTable t={t} lang={lang} agents={shown} onEdit={setEditing} onUnenrol={unenrol} onForget={setForgetting}
+            emptyText={bucket ? t.mesh_filter_none : null} />
+          <Confirm open={!!forgetting} busy={busy} title={t.mesh_forget_h}
+            body={forgetting ? t.mesh_forget_p.replace("{host}", forgetting.hostname || forgetting.instance_uid.slice(0, 12)) : ""}
+            confirmLabel={t.mesh_fleet_forget} cancelLabel={t.cancel} confirmTestid="fleet-forget-confirm"
+            onConfirm={forget} onCancel={() => setForgetting(null)} />
           <AgentDialog open={!!editing} onClose={() => setEditing(null)} t={t} lang={lang} d={dep}
             agent={editing} policies={overview.policies} settings={settings} onDone={onReload} onToast={onToast} />
         </>

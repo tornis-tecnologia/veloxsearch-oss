@@ -11,10 +11,8 @@ Everything here is `AGPL-3.0-only`, like the rest of the repository
 build reasons, not licence reasons: the agent must stay a small static binary,
 and the controller releases on its own cadence (ADR-068).
 
-The official build of Velox Mesh manages up to **10 agents** with no licence
-file. A signed licence file (`velox-mesh license load`) or an activation code
-(`velox-mesh license activate`) raises the count and comes with a support
-subscription.
+Velox Mesh has no agent limit: it manages every host enrolled, with no licence
+file (ADR-068 decision 5, withdrawn 2026-11-12).
 
 ## Layout
 
@@ -25,7 +23,6 @@ veloxagent/
   Cargo.toml                 separate Cargo workspace (not a member of the root crate)
   deny.toml                  cargo-deny policy for this workspace's own graph
   crates/
-    velox-license/           signed licence documents, free tier, seat accounting (pure)
     velox-policy/            policy model + compiler; `PackageRenderer` over velox-integrations (pure)
     velox-opamp/             the OpAMP message subset the agent and the Mesh exchange
     velox-mesh/              the controller binary

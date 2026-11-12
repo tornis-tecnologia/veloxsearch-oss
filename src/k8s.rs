@@ -1811,6 +1811,44 @@ pub async fn install_mesh(image: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Uninstall the Velox Mesh (ADR-072 amendment 5): its workload and every
+/// deployment's agent-face route go; the namespace stays (install.yaml owns
+/// it). With `purge`, its data goes too — Secret, database and role, which
+/// forgets every agent, policy and token; without it a later install picks
+/// the same database back up with the same Secret. Agents in the field stop
+/// checking in either way and keep the configuration they last applied.
+pub async fn uninstall_mesh(purge: bool) -> Result<()> {
+    use crate::mesh::{MESH_NAME, MESH_NAMESPACE};
+    let client = client().await?;
+    for (group, kind) in [
+        ("apps", "Deployment"),
+        ("", "Service"),
+        ("", "ServiceAccount"),
+    ] {
+        delete_dynamic(&client, group, "v1", kind, Some(MESH_NAMESPACE), MESH_NAME).await;
+    }
+    let ingresses = ingress_api(&client, MESH_NAMESPACE);
+    for ing in ingresses.list(&ListParams::default()).await?.items {
+        if annotation_value(&ing, MESH_ROUTE_FOR).is_some() {
+            if let Some(name) = ing.metadata.name.as_deref() {
+                let _ = ingresses.delete(name, &DeleteParams::default()).await;
+            }
+        }
+    }
+    if purge {
+        crate::db::drop_mesh_database()
+            .await
+            .context("dropping the Mesh's database")?;
+        let secrets: Api<Secret> = Api::namespaced(client, MESH_NAMESPACE);
+        match secrets.delete(MESH_NAME, &DeleteParams::default()).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(ae)) if ae.code == 404 => {}
+            Err(e) => return Err(e).context("deleting Secret velox-mesh"),
+        }
+    }
+    Ok(())
+}
+
 /// Light PEM sanity check for a client-injected cert/key pair (issue #54):
 /// both halves present and carrying the right PEM markers. Full chain/key
 /// matching is the ingress controller's job — this only catches swapped or

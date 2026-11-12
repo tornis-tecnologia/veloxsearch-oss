@@ -197,6 +197,9 @@ const API = {
   // Admin: install or reapply the Velox Mesh in the `velox-mesh` namespace
   // (ADR-072 amendment 5); answers the status the screen then shows.
   meshInstall: () => call("mesh_install", {}),
+  // Admin: remove it — workload and routes; `purge` also drops its database,
+  // role and Secret (every agent, policy and token).
+  meshUninstall: (purge) => call("mesh_uninstall", { purge: !!purge }),
   // Everything below is about ONE deployment (ADR-072): its policies, its
   // agents, its tokens. The server resolves `deployment` through the
   // caller's scope before the Mesh is asked anything.
@@ -207,7 +210,7 @@ const API = {
   // column) and each policy's rollout.
   // -> { onboarding, policies: [{id, name, current_revision, integrations}],
   //      agents: [{status, up, applied_revision, current_revision, config_error, ...}],
-  //      rollout: {id: {...}}, seats, enrolled_total, tier }
+  //      rollout: {id: {...}} }
   meshOverview: (deployment) => call("mesh_overview", { deployment }),
   // Compile a policy draft against VERIFIED packages and store it as a new
   // revision. Agents pick it up on their next check-in; nothing is pushed.
@@ -221,6 +224,8 @@ const API = {
   // says to re-enrol.
   meshAssignPolicy: (deployment, instance_uid, policy_id) =>
     call("mesh_assign_policy", { deployment, instance_uid, policy_id }),
+  // Remove an agent from the fleet: row and credential.
+  meshForgetAgent: (deployment, instance_uid) => call("mesh_forget_agent", { deployment, instance_uid }),
   meshUnenrol: (deployment, instance_uid) =>
     call("mesh_unenrol", { deployment, instance_uid }),
   // Refused (400, with the count) while a live agent runs the policy.
