@@ -29,15 +29,28 @@
 //! embedded [`bootstrap_catalog`] floor, always with a 200 and an `error`
 //! string the UI can show. The deployment screen never breaks because the
 //! registry is down.
+//!
+//! **Spec 2.0 (ADR-074)** adds a second surface on the same transport and the
+//! same trust: `packages/index.json` ([`Registry::fetch_index`]) and
+//! `packages/<id>/<version>/` ([`Registry::fetch_package_v2`]). The manifest's
+//! signed `files:` inventory enumerates what is downloaded — exactly those
+//! files, each sha256 checked before the digest is even computed — and
+//! [`verify_package`] is the **same function**: the 2.0 digest is the 1.x
+//! digest with relative paths as keys. A verified `(id, version,
+//! manifest_sha256)` is immutable and cached for the life of the process
+//! ([`verified_package_v2`]); the index is cached staleness-tolerantly like
+//! the 1.x catalog, with no bootstrap floor (no 2.0 package ships in the
+//! binary).
 
 use crate::scope::Deployment;
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use velox_integrations::spec2;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -367,10 +380,80 @@ impl Registry {
             assets,
         })
     }
+
+    /// Spec 2.0 (ADR-074): fetch and strictly parse `packages/index.json`.
+    /// A showcase, not a trust anchor — each version's `manifest_sha256` is
+    /// checked against the manifest [`Registry::fetch_package_v2`] downloads.
+    pub async fn fetch_index(&self) -> Result<spec2::Index> {
+        let bytes = self.get("packages/index.json").await?;
+        let text = String::from_utf8(bytes).context("packages/index.json is not UTF-8")?;
+        spec2::Index::parse(&text).map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Spec 2.0 (ADR-074, spec §3): fetch one **immutable** package version.
+    /// `manifest.yaml` first; its `files:` inventory then names exactly what is
+    /// downloaded — every entry fetched, every sha256 checked, nothing else
+    /// touched. `expected_manifest_sha256` is the index's claim about the
+    /// manifest bytes; a mismatch is refused as tampering rather than trusted
+    /// either way. The result is still **unverified**: [`verify_package`] is
+    /// the trust step, unchanged from 1.x.
+    pub async fn fetch_package_v2(
+        &self,
+        id: &str,
+        version: &str,
+        expected_manifest_sha256: Option<&str>,
+    ) -> Result<FetchedPackage> {
+        if !spec2::is_package_id(id) {
+            bail!("refusing to fetch a package with an unsafe id: {id:?}");
+        }
+        if spec2::semver(version).is_none() || !valid_component(version) {
+            bail!("refusing to fetch package {id} with an unsafe version: {version:?}");
+        }
+        let base = format!("packages/{id}/{version}");
+        let raw = self.get(&format!("{base}/manifest.yaml")).await?;
+        if let Some(expected) = expected_manifest_sha256 {
+            let got = sha256_hex(&raw);
+            if got != expected {
+                bail!(
+                    "package {id}@{version}: manifest.yaml hashes to {got} but the index says \
+                     {expected} — TAMPERED or a stale index; refusing"
+                );
+            }
+        }
+        let manifest_yaml =
+            String::from_utf8(raw).with_context(|| format!("{base}/manifest.yaml is not UTF-8"))?;
+        let manifest = spec2::Manifest::parse(&manifest_yaml)
+            .map_err(|e| anyhow!("package {id}@{version}: {e}"))?;
+        // R1: the manifest names the directory it lives in.
+        if manifest.id != id || manifest.version != version {
+            bail!(
+                "package {id}@{version}: manifest declares {}@{} (R1)",
+                manifest.id,
+                manifest.version
+            );
+        }
+        let mut assets = BTreeMap::new();
+        for entry in &manifest.files {
+            // `is_relpath` held at parse time: alphanumeric-led segments only,
+            // so `..`, absolute paths and hidden files cannot reach the URL.
+            let bytes = self.get(&format!("{base}/{}", entry.path)).await?;
+            assets.insert(entry.path.clone(), bytes);
+        }
+        check_inventory(&manifest, &assets)?;
+        Ok(FetchedPackage {
+            id: id.to_string(),
+            manifest_yaml,
+            assets,
+        })
+    }
 }
 
 /// A package as it came off the wire (or off disk): the manifest text plus each
 /// named asset's raw bytes. Nothing here is trusted until [`verify_package`].
+///
+/// Serves both formats: a 1.x package keys `assets` by filename, a Spec 2.0
+/// package by the inventory's relative path (`streams/log/stream.yaml`). The
+/// digest does not care — it hashes `[key, sha256]` pairs either way.
 #[derive(Debug, Clone)]
 pub struct FetchedPackage {
     pub id: String,
@@ -383,13 +466,33 @@ impl FetchedPackage {
     /// Read a package straight from a directory — the offline route, and what
     /// the tests use against a registry checkout.
     pub fn load_from_dir(dir: &std::path::Path) -> Result<FetchedPackage> {
+        let manifest_yaml = std::fs::read_to_string(dir.join("manifest.yaml"))
+            .with_context(|| format!("reading {}/manifest.yaml", dir.display()))?;
+        if is_spec2_manifest(&manifest_yaml) {
+            // Spec 2.0: the directory is `<id>/<version>/`, the inventory is
+            // the file list, and a stale inventory is refused here exactly as
+            // the wire path refuses it — `velox sign` must never sign a
+            // manifest whose hashes do not describe the files beside it.
+            let manifest = spec2::Manifest::parse(&manifest_yaml)
+                .map_err(|e| anyhow!("{}: {e}", dir.display()))?;
+            let mut assets = BTreeMap::new();
+            for entry in &manifest.files {
+                let bytes = std::fs::read(dir.join(&entry.path))
+                    .with_context(|| format!("reading inventory file {:?}", entry.path))?;
+                assets.insert(entry.path.clone(), bytes);
+            }
+            check_inventory(&manifest, &assets)?;
+            return Ok(FetchedPackage {
+                id: manifest.id,
+                manifest_yaml,
+                assets,
+            });
+        }
         let id = dir
             .file_name()
             .and_then(|s| s.to_str())
             .context("package directory has no name")?
             .to_string();
-        let manifest_yaml = std::fs::read_to_string(dir.join("manifest.yaml"))
-            .with_context(|| format!("reading {}/manifest.yaml", dir.display()))?;
         let mut assets = BTreeMap::new();
         for name in asset_filenames(&manifest_yaml)? {
             let bytes = std::fs::read(dir.join(&name))
@@ -401,6 +504,22 @@ impl FetchedPackage {
             manifest_yaml,
             assets,
         })
+    }
+
+    /// Is this a Spec 2.0 package (ADR-074)?
+    pub fn is_spec2(&self) -> bool {
+        is_spec2_manifest(&self.manifest_yaml)
+    }
+
+    /// Turn a **verified** Spec 2.0 package into the typed [`spec2::Package`]:
+    /// strict parse of manifest and streams plus the R-rules the crate can
+    /// judge. Refuses a 1.x package rather than guessing.
+    pub fn into_spec2(self) -> Result<spec2::Package> {
+        if !self.is_spec2() {
+            bail!("package {} is not a Spec 2.0 package", self.id);
+        }
+        spec2::Package::from_files(&self.manifest_yaml, self.assets)
+            .map_err(|e| anyhow!("package {}: {e}", self.id))
     }
 
     /// Turn a **verified** package into the engine's [`crate::integrations::Package`].
@@ -908,6 +1027,175 @@ pub fn replace_signature_value(manifest_yaml: &str, value: &str) -> Result<Strin
         0 => bail!("manifest.yaml has no `signature.value` line to replace"),
         n => bail!("manifest.yaml has {n} candidate `value:` lines; refusing to guess"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Spec 2.0 (ADR-074) — inventory, index cache, verified-package cache
+// ---------------------------------------------------------------------------
+
+/// Cheap format sniff on the raw manifest, run before any strict parse so a
+/// 1.x manifest is never fed to the 2.0 parser or vice versa.
+fn is_spec2_manifest(manifest_yaml: &str) -> bool {
+    manifest_field(manifest_yaml, "spec_version").as_deref() == Some(spec2::SPEC_VERSION)
+}
+
+/// Spec 2.0 §3 step 3: every inventory entry present with the sha256 the
+/// signed manifest says. A missing or divergent file refuses the **whole**
+/// package as TAMPERED — the inventory is inside the signature, so a wrong
+/// hash here means the bytes are not the ones the registry signed. Files
+/// outside the inventory are simply not here (never fetched), so nothing is
+/// checked for them.
+fn check_inventory(manifest: &spec2::Manifest, assets: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    for entry in &manifest.files {
+        let bytes = assets.get(&entry.path).with_context(|| {
+            format!(
+                "package {}@{}: inventory file {:?} is missing — TAMPERED or incomplete",
+                manifest.id, manifest.version, entry.path
+            )
+        })?;
+        let got = sha256_hex(bytes);
+        if got != entry.sha256 {
+            bail!(
+                "package {}@{}: inventory file {:?} hashes to {got} but the signed manifest says {} \
+                 — TAMPERED",
+                manifest.id,
+                manifest.version,
+                entry.path,
+                entry.sha256
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The outcome of consulting the index cache. `index` is `None` only when
+/// the registry has never been reached in this process: there is no 2.0
+/// bootstrap floor, and inventing one would mean shipping packages in the
+/// binary — the thing ADR-039 forbids.
+pub struct IndexState {
+    pub index: Option<spec2::Index>,
+    pub source: CatalogSource,
+    pub age_seconds: Option<u64>,
+    pub error: Option<String>,
+}
+
+struct CachedIndex {
+    index: spec2::Index,
+    fetched: Instant,
+}
+
+/// The `packages/index.json` cache — the same staleness tolerance as
+/// [`CatalogCache`] (ADR-047): a down registry yields the last index marked
+/// stale, never a 500.
+#[derive(Default)]
+pub struct IndexCache {
+    inner: RwLock<Option<CachedIndex>>,
+}
+
+impl IndexCache {
+    pub const fn new() -> IndexCache {
+        IndexCache {
+            inner: RwLock::new(None),
+        }
+    }
+
+    pub async fn load(&self, reg: &Registry, ttl: Duration) -> IndexState {
+        if let Ok(g) = self.inner.read() {
+            if let Some(c) = g.as_ref() {
+                let age = c.fetched.elapsed();
+                if age < ttl {
+                    return IndexState {
+                        index: Some(c.index.clone()),
+                        source: CatalogSource::Registry,
+                        age_seconds: Some(age.as_secs()),
+                        error: None,
+                    };
+                }
+            }
+        }
+        match reg.fetch_index().await {
+            Ok(index) => {
+                if let Ok(mut g) = self.inner.write() {
+                    *g = Some(CachedIndex {
+                        index: index.clone(),
+                        fetched: Instant::now(),
+                    });
+                }
+                IndexState {
+                    index: Some(index),
+                    source: CatalogSource::Registry,
+                    age_seconds: Some(0),
+                    error: None,
+                }
+            }
+            Err(e) => {
+                let error = Some(format!("{e:#}"));
+                if let Ok(g) = self.inner.read() {
+                    if let Some(c) = g.as_ref() {
+                        return IndexState {
+                            index: Some(c.index.clone()),
+                            source: CatalogSource::Cache,
+                            age_seconds: Some(c.fetched.elapsed().as_secs()),
+                            error,
+                        };
+                    }
+                }
+                IndexState {
+                    index: None,
+                    source: CatalogSource::Bootstrap,
+                    age_seconds: None,
+                    error,
+                }
+            }
+        }
+    }
+}
+
+static INDEX_CACHE: IndexCache = IndexCache::new();
+
+/// The process-wide Spec 2.0 index, from the env-configured registry.
+pub async fn index() -> IndexState {
+    INDEX_CACHE.load(&Registry::from_env(), DEFAULT_TTL).await
+}
+
+/// Verified Spec 2.0 packages by `id@version@manifest_sha256`. A published
+/// version is immutable (R19), so a package that verified once is the same
+/// package for the life of the process; nothing enters this map before
+/// [`verify_package`] and [`check_inventory`] both passed.
+static VERIFIED_V2: RwLock<BTreeMap<String, Arc<spec2::Package>>> = RwLock::new(BTreeMap::new());
+
+/// Fetch, verify and parse one Spec 2.0 package version, served from the
+/// verified cache when the same `(id, version, manifest_sha256)` was already
+/// trusted. `expected_manifest_sha256` is the index's value; pass `None` only
+/// when there is no index to consult (then the key is the manifest's own hash).
+pub async fn verified_package_v2(
+    reg: &Registry,
+    id: &str,
+    version: &str,
+    expected_manifest_sha256: Option<&str>,
+) -> Result<Arc<spec2::Package>> {
+    if let Some(expected) = expected_manifest_sha256 {
+        let key = format!("{id}@{version}@{expected}");
+        if let Some(hit) = VERIFIED_V2.read().ok().and_then(|m| m.get(&key).cloned()) {
+            return Ok(hit);
+        }
+    }
+    let fetched = reg
+        .fetch_package_v2(id, version, expected_manifest_sha256)
+        .await?;
+    verify_package(&fetched.manifest_yaml, &fetched.assets)
+        .with_context(|| format!("package {id}@{version}"))?;
+    let key = format!(
+        "{id}@{version}@{}",
+        expected_manifest_sha256
+            .map(str::to_string)
+            .unwrap_or_else(|| sha256_hex(fetched.manifest_yaml.as_bytes()))
+    );
+    let pkg = Arc::new(fetched.into_spec2()?);
+    if let Ok(mut m) = VERIFIED_V2.write() {
+        m.insert(key, Arc::clone(&pkg));
+    }
+    Ok(pkg)
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,6 +1877,147 @@ mod tests {
             .map(|(_, k)| *k)
             .unwrap();
         assert_eq!(on_disk.trim(), compiled.trim(), "vendored key drifted");
+    }
+
+    // ── Spec 2.0 packages (ADR-074) ─────────────────────────────────────
+
+    /// The registry's `packages/` tree, when the checkout has one.
+    fn packages_root() -> Option<std::path::PathBuf> {
+        let root = checkout()?.join("packages");
+        root.join("index.json").is_file().then_some(root)
+    }
+
+    /// The index parses strictly and every `manifest_sha256` is the hash of
+    /// the manifest bytes actually on disk — the claim the fetcher checks.
+    #[test]
+    fn spec2_index_hashes_match_the_manifests() {
+        let Some(packages) = packages_root() else {
+            return;
+        };
+        let index =
+            spec2::Index::parse(&std::fs::read_to_string(packages.join("index.json")).unwrap())
+                .expect("index parses");
+        let mut n = 0;
+        for p in &index.packages {
+            for v in &p.versions {
+                let raw = std::fs::read(packages.join(&v.path).join("manifest.yaml")).unwrap();
+                assert_eq!(
+                    sha256_hex(&raw),
+                    v.manifest_sha256,
+                    "{}@{}",
+                    p.id,
+                    v.version
+                );
+                n += 1;
+            }
+        }
+        assert!(n >= 30, "found {n} package versions");
+    }
+
+    /// A 2.0 directory loads through the same loader `velox sign` uses: the
+    /// inventory is the file list, and the digest covers exactly it.
+    #[test]
+    fn spec2_package_loads_by_inventory_and_is_unsigned_until_signed() {
+        let Some(packages) = packages_root() else {
+            return;
+        };
+        let pkg = FetchedPackage::load_from_dir(&packages.join("custom-logs/1.0.0")).unwrap();
+        assert!(pkg.is_spec2());
+        assert_eq!(pkg.id, "custom-logs");
+        assert!(pkg.assets.contains_key("streams/log/stream.yaml"));
+        // Only inventory files were loaded — the directory may hold more.
+        let manifest = spec2::Manifest::parse(&pkg.manifest_yaml).unwrap();
+        assert_eq!(pkg.assets.len(), manifest.files.len());
+        // The registry ships the staging placeholder until a maintainer signs.
+        let err = verify_package(&pkg.manifest_yaml, &pkg.assets).unwrap_err();
+        assert!(err.to_string().contains("UNSIGNED"), "{err:#}");
+        // Signing with a throwaway key produces a digest the same bytes verify
+        // (the keyring path is the 1.x test's; the digest is what is 2.0 here).
+        let (key_pem, public_b64) = throwaway_key();
+        let value = sign_package(&pkg.manifest_yaml, &pkg.assets, &key_pem).unwrap();
+        let signed = replace_signature_value(&pkg.manifest_yaml, &value).unwrap();
+        let digest = package_digest(&signed, &pkg.assets).unwrap();
+        let key = base64::engine::general_purpose::STANDARD
+            .decode(&public_b64)
+            .unwrap();
+        aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, &key)
+            .verify(
+                &digest,
+                &base64::engine::general_purpose::STANDARD
+                    .decode(&value)
+                    .unwrap(),
+            )
+            .expect("a freshly signed 2.0 package verifies");
+        // And the typed parse of the whole package holds.
+        let typed = pkg.into_spec2().unwrap();
+        assert_eq!(typed.streams.len(), 1);
+        assert_eq!(
+            typed.artifact_name(&typed.streams[0]),
+            "veloxagent-log.custom-logs-v1"
+        );
+    }
+
+    /// One flipped byte in one inventory file is TAMPERED — before the
+    /// signature is even consulted.
+    #[test]
+    fn spec2_inventory_mismatch_is_tampered() {
+        let Some(packages) = packages_root() else {
+            return;
+        };
+        let mut pkg = FetchedPackage::load_from_dir(&packages.join("custom-logs/1.0.0")).unwrap();
+        let manifest = spec2::Manifest::parse(&pkg.manifest_yaml).unwrap();
+        pkg.assets
+            .get_mut("streams/log/stream.yaml")
+            .unwrap()
+            .push(b'\n');
+        let err = check_inventory(&manifest, &pkg.assets).unwrap_err();
+        assert!(err.to_string().contains("TAMPERED"), "{err:#}");
+        pkg.assets.remove("streams/log/stream.yaml");
+        let err = check_inventory(&manifest, &pkg.assets).unwrap_err();
+        assert!(err.to_string().contains("missing"), "{err:#}");
+    }
+
+    /// The `file://` transport fetches a 2.0 version by inventory, checks the
+    /// index's manifest hash, and refuses a wrong one.
+    #[test]
+    fn spec2_file_transport_fetches_by_inventory() {
+        let Some(root) = checkout() else { return };
+        if packages_root().is_none() {
+            return;
+        }
+        let reg = Registry::new(format!("file://{}", root.display()), None);
+        let index = rt().block_on(reg.fetch_index()).expect("index");
+        let v = &index.package("custom-logs").unwrap().versions[0];
+        let pkg = rt()
+            .block_on(reg.fetch_package_v2("custom-logs", &v.version, Some(&v.manifest_sha256)))
+            .expect("fetch custom-logs");
+        assert!(pkg.is_spec2());
+        assert!(pkg.assets.len() >= 5);
+        let wrong = "0".repeat(64);
+        let err = rt()
+            .block_on(reg.fetch_package_v2("custom-logs", &v.version, Some(&wrong)))
+            .unwrap_err();
+        assert!(err.to_string().contains("TAMPERED"), "{err:#}");
+    }
+
+    /// Ids and versions are validated before they can reach a URL or a path.
+    #[test]
+    fn spec2_unsafe_ids_and_versions_are_refused() {
+        let reg = Registry::new("file:///nonexistent", None);
+        for (id, version) in [
+            ("../etc", "1.0.0"),
+            ("ok", "../1.0.0"),
+            ("ok", "1.0"),
+            ("Bad", "1.0.0"),
+        ] {
+            let err = rt()
+                .block_on(reg.fetch_package_v2(id, version, None))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("unsafe"),
+                "{id}@{version}: {err:#}"
+            );
+        }
     }
 
     // ── signing ─────────────────────────────────────────────────────────

@@ -78,6 +78,8 @@ COMMANDS:
     init        Install VeloxSearch onto the current kubeconfig context
     sign        Sign an integration package, in place (maintainers only)
     verify      Check an integration package against the compiled-in keyring
+                (a 1.x `integrations/<id>` or a Spec 2.0 `packages/<id>/<version>`
+                directory; the format is read off the manifest, ADR-074)
 
 OPTIONS (sign):
     --key <FILE|->             PKCS#8 PEM ed25519 private key. `-` reads stdin,

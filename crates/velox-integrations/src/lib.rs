@@ -27,6 +27,10 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+/// Registry Spec 2.0 packages — the Mesh path (ADR-074). The 1.x contract above
+/// stays for the cluster path until the registry's phase F6 moves it.
+pub mod spec2;
+
 /// The closed, engine-owned interpolation variable set (`docs/integrations/
 /// interpolation.md`, ADR-039). Exactly these eight names may appear as
 /// `{name}` in an asset; any other `{lower_case_token}` is a hard error.
