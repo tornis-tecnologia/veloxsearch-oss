@@ -1233,7 +1233,6 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
           <div className="section-title" style={{ justifyContent: "space-between" }}>
             <span>{t.integ_cluster_h} <span className="tab-count">{installedItems.length}</span></span>
           </div>
-          <p className="hint" style={{ margin: "-4px 0 10px", maxWidth: "70ch" }}>{t.integ_cluster_p}</p>
           {view.source !== "registry" && view.source === "cache" && (
             <Banner tone="warn" testid="catalog-degraded" title={t.integ_stale_h} className="catalog-degraded">
               <span data-source={view.source}>{t.integ_stale_p.replace("{age}", age)}</span>

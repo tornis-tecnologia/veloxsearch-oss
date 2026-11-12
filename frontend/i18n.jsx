@@ -446,7 +446,6 @@ const STR = {
     save: "Salvar alterações", saved: "Alterações salvas",
     integ_lead: "Como os dados chegam neste deployment: integrações do catálogo do registry e, opcionalmente, traces e métricas por OpenTelemetry.",
     integ_cluster_h: "Instaladas no cluster",
-    integ_cluster_p: "Integrações do formato antigo já ativas neste cluster. Novas integrações vêm do catálogo do registry, abaixo.",
     enabled: "ativado", enable: "Ativar", disable: "desativar",
     receiving: "recebendo", docs: "docs", // integrations catalog (#76 — o catálogo vem do registro em tempo de
     // execução, então os estados de degradação são tela, não erro)
@@ -1668,7 +1667,6 @@ const STR = {
     save: "Save changes", saved: "Changes saved",
     integ_lead: "How data gets into this deployment: integrations from the registry's catalogue and, optionally, traces and metrics over OpenTelemetry.",
     integ_cluster_h: "Installed on the cluster",
-    integ_cluster_p: "Integrations of the old format already running on this cluster. New integrations come from the registry's catalogue, below.",
     enabled: "enabled", enable: "Enable", disable: "disable",
     receiving: "receiving", docs: "docs", // integrations catalog (#76 — the catalog is fetched from the registry at
     // runtime, so its degraded states are screens, not errors)
@@ -2889,7 +2887,6 @@ const STR = {
     save: "Guardar cambios", saved: "Cambios guardados",
     integ_lead: "Cómo llegan los datos a este deployment: integraciones del catálogo del registry y, opcionalmente, traces y métricas por OpenTelemetry.",
     integ_cluster_h: "Instaladas en el clúster",
-    integ_cluster_p: "Integraciones del formato anterior ya activas en este clúster. Las nuevas vienen del catálogo del registry, abajo.",
     enabled: "activada", enable: "Activar", disable: "desactivar",
     receiving: "recibiendo", docs: "docs", // catálogo de integraciones (#76 — el catálogo se obtiene del registry en
     // tiempo de ejecución, así que sus estados degradados son pantallas, no errores)
