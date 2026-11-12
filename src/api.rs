@@ -2487,6 +2487,33 @@ mod server {
         Json(s)
     }
 
+    /// Install — or reapply, which upgrades it to the image this core names —
+    /// the Velox Mesh in its own namespace (ADR-072 amendment 5), then find
+    /// it and give every deployment its route. Admin-only: one Mesh serves
+    /// the installation. Answers the status the screen then shows; the pod
+    /// may still be starting, which `reachable: false` says honestly.
+    async fn mesh_install(scope: Scope) -> Result<Json<crate::mesh::MeshStatus>, ApiError> {
+        scope.require_admin()?;
+        if std::env::var("VELOX_MESH_URL").is_ok_and(|v| !v.trim().is_empty()) {
+            return Err(ApiError::bad_request(
+                "this control plane is pointed at a Mesh by VELOX_MESH_URL; unset it to use the one installed here",
+            ));
+        }
+        let image = std::env::var("VELOX_MESH_IMAGE")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        crate::k8s::install_mesh(image.as_deref())
+            .await
+            .map_err(ApiError::internal)?;
+        crate::mesh::discover().await;
+        let cfg = crate::access::get().await.map_err(ApiError::internal)?;
+        crate::access::backfill_ingresses(&cfg, &scope)
+            .await
+            .map_err(ApiError::internal)?;
+        Ok(Json(crate::mesh::status().await))
+    }
+
     /// Every Mesh request about a deployment starts here (ADR-072).
     #[derive(Deserialize)]
     struct MeshDepReq {
@@ -3518,6 +3545,7 @@ mod server {
         RoutePolicy { path: "/catalog_v2", policy: TenantScoped, note: "Spec 2.0 package index (ADR-074): installation-wide; the policies-using overlay is per deployment, and an unowned name reads as no-deployment." },
         RoutePolicy { path: "/package_v2", policy: TenantScoped, note: "one Spec 2.0 package's streams/fields/plugins, read off the VERIFIED package; installation-wide metadata like /catalog_v2, no deployment named, no write." },
         RoutePolicy { path: "/integration_artifacts", policy: TenantScoped, note: "what a package brings (pipeline/template/index patterns/dashboards), read off the VERIFIED package; installation-wide metadata like /catalog, no deployment named, no write." },
+        RoutePolicy { path: "/mesh_install", policy: AdminOnly, note: "installs or reapplies the Velox Mesh in its own namespace — its database, Secret and workload (ADR-072 amendment 5); one Mesh per installation, never a tenant action." },
         RoutePolicy { path: "/mesh_status", policy: TenantScoped, note: "whether a Velox Mesh is configured for this installation and reachable (ADR-068) — the two facts a tenant needs to see its deployment's Mesh tab; the URL and the probe error are stripped for a tenant (ADR-072 §7)." },
         RoutePolicy { path: "/mesh_overview", policy: TenantScoped, note: "the DEPLOYMENT's fleet (ADR-072): onboarding step, its policies, its agents' derived status, rollout per policy. Resolve-before-read; the Mesh partitions on the pair the resolved Deployment carries." },
         RoutePolicy { path: "/mesh_save_policy", policy: TenantScoped, note: "compiles a policy against VERIFIED packages and stores it as a new revision; the destination deployment is resolve-before-mutate, because a policy writes that deployment's data path." },
@@ -3629,6 +3657,7 @@ mod server {
             .route(p("/catalog_v2"), post(catalog_v2))
             .route(p("/package_v2"), post(package_v2))
             .route(p("/mesh_status"), get(mesh_status))
+            .route(p("/mesh_install"), post(mesh_install))
             .route(p("/mesh_overview"), post(mesh_overview))
             .route(p("/mesh_save_policy"), post(mesh_save_policy))
             .route(p("/mesh_enrollment_token"), post(mesh_enrollment_token))

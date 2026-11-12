@@ -261,6 +261,30 @@ the cluster. The rule `<deployment>-<service>.<domain>` now covers both:
   identity. A real domain without a Secret is assumed to sit behind an edge
   with a public certificate and keeps verifying.
 
+## Amendment 5 (2026-11-12): the console installs the Mesh
+
+Installing the controller was a page of `kubectl` and SQL. Now *Settings →
+Velox Mesh → Install in this cluster* has the core do it:
+
+- **Its own namespace, `velox-mesh`**, `restricted` Pod Security, created by
+  `install.yaml` with the core's Role in it (ServiceAccounts, Services,
+  Deployments, Secrets, Ingresses — there and nowhere else). Not
+  `veloxsearch-system`: Deployment create there would let a pod run as the
+  operator's ServiceAccount. The per-deployment routes of amendment 4 live
+  here too.
+- **The manifest is the installer**: deploy/mesh/mesh.yaml is compiled in and
+  applied as is (image replaced only by `VELOX_MESH_IMAGE`), so the button and
+  GitOps produce the same objects. A second press reapplies (an upgrade).
+- **The database** is the one superuser connection the core makes
+  (`db::ensure_mesh_database`): `velox` has no CREATEROLE by design, and the
+  alternative, `pods/exec`, would reach every pod of the namespace. Role
+  created or its password reset to the Secret's; database created when
+  missing; nothing dropped. An existing Secret is kept.
+- **Discovery replaces wiring**: the core finds Service + Secret `velox-mesh`
+  in `velox-mesh` at start, after an install, and when a status read finds no
+  Mesh. `VELOX_MESH_URL` + token still override, and the button refuses while
+  they are set.
+
 ## Consequences
 
 - One schema migration (`003_deployment_scope.sql`) adds the pair to

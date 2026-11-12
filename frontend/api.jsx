@@ -194,6 +194,9 @@ const API = {
   // install guide), configured but unreachable (show the URL and the error),
   // reachable (open the fleet). -> { configured, url, reachable, error }
   meshStatus: () => call("mesh_status", null, "GET"),
+  // Admin: install or reapply the Velox Mesh in the `velox-mesh` namespace
+  // (ADR-072 amendment 5); answers the status the screen then shows.
+  meshInstall: () => call("mesh_install", {}),
   // Everything below is about ONE deployment (ADR-072): its policies, its
   // agents, its tokens. The server resolves `deployment` through the
   // caller's scope before the Mesh is asked anything.

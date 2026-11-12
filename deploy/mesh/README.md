@@ -3,13 +3,13 @@
 Velox Mesh is the fleet controller for Velox Agents (ADR-068, ADR-072). It is
 its own binary (`velox-mesh`, from the `veloxagent/` workspace), its own image
 and its own release; one Mesh serves every deployment of an installation and
-runs in `veloxsearch-system`, beside the core.
+runs in its own namespace, `velox-mesh` (ADR-072 amendment 5).
 
 | File | What it is |
 | --- | --- |
 | `Dockerfile` | Runtime-only image, same base and hardening as `deploy/Dockerfile` (trixie-slim, `apt upgrade`, uid 10001). Expects a prebuilt `velox-mesh` and `LICENSE` in the context. |
 | `build-image.sh` | Builds `velox-mesh` from `veloxagent/` and the image `docker.io/tornistecnologia/veloxsearch-mesh:<veloxagent version>`. `--profile debug\|release`, `--tag`, `--target` (e.g. a static musl build), `--skip-build`, `--push`. Nothing is pushed without `--push`. |
-| `mesh.yaml` | ServiceAccount (no API token), Deployment `velox-mesh`, ClusterIP Service `velox-mesh:4320`, and a commented-out Ingress for the agent face. The header carries every command below, verbatim. |
+| `mesh.yaml` | Namespace `velox-mesh` (Pod Security `restricted`), ServiceAccount (no API token), Deployment `velox-mesh`, ClusterIP Service `velox-mesh:4320`. Compiled into the core: the console's install button applies exactly this file. |
 
 The Mesh's contract with its environment (`veloxagent/crates/velox-mesh/src/main.rs`):
 
@@ -17,26 +17,44 @@ The Mesh's contract with its environment (`veloxagent/crates/velox-mesh/src/main
 | --- | --- |
 | `VELOX_MESH_ADDR` | `0.0.0.0:4320` (the binary's default, `127.0.0.1:4320`, is unreachable in a pod) |
 | `VELOX_MESH_PG_URL` | Secret `velox-mesh`, key `pg-url`. Required: the binary exits without it, and runs its embedded migrations before serving. |
-| `VELOX_MESH_SERVICE_TOKEN` | Secret `velox-mesh`, key `service-token`. Unset would disable the console face; the manifest makes it required. |
+| `VELOX_MESH_SERVICE_TOKEN` | Secret `velox-mesh`, key `service-token`. The core reads the same key to authenticate. |
 
 There is no licence variable: the binary computes its entitlement with no
 licence document (`entitlement(None, …)`), so every install runs the free
 tier (10 agents) until `velox-mesh license load|activate` exists.
 
-## Rollout order
+## Install from the console (the default)
+
+*Settings → Velox Mesh → Install in this cluster.* The core, with rights
+granted in `velox-mesh` only (`deploy/install.yaml`):
+
+1. applies the namespace from `mesh.yaml`;
+2. keeps Secret `velox-mesh` if it exists (its database password and service
+   token are what a running Mesh uses) and generates any missing key;
+3. creates — or resets the password of — the `velox_mesh` role and creates
+   the `velox_mesh` database if missing, on the installation's Postgres. The
+   one superuser connection the core makes (`db::ensure_mesh_database`); it
+   never drops anything;
+4. server-side applies the ServiceAccount, Deployment and Service;
+5. finds the Mesh (`mesh::discover`) and, in public-URL mode, gives every
+   deployment its route `https://<deployment>-mesh.<domain>` (ADR-072
+   amendment 4).
+
+Pressing it again reapplies: an upgrade to the image the core names. That is
+the pinned tag in `mesh.yaml`, or `VELOX_MESH_IMAGE` on the core (a mirror, an
+air-gapped registry, a development build).
+
+## Install by hand (GitOps)
 
 Prerequisites: `deploy/install.yaml` applied, first-run bootstrap complete,
-and `veloxsearch-postgres-0` Ready. The image must be published (or
-side-loaded) at the tag `mesh.yaml` pins:
+`veloxsearch-postgres-0` Ready, and the image published (or mirrored) at the
+tag `mesh.yaml` pins:
 
 ```bash
 deploy/mesh/build-image.sh --push     # prints the digest; pin mesh.yaml to it
 ```
 
-1. **Database and Secret** — one shell, so the generated password reaches
-   both. A separate role and database on the existing Postgres, never the
-   core's `velox` database: both migration runners name their ledger
-   `schema_migrations`, and neither role should read the other's tables.
+1. **Database and Secret**, in one shell so the password reaches both:
 
    ```bash
    MESH_PG_PW="$(openssl rand -hex 32)"
@@ -47,102 +65,55 @@ deploy/mesh/build-image.sh --push     # prints the digest; pin mesh.yaml to it
    REVOKE ALL ON DATABASE velox_mesh FROM PUBLIC;
    EOSQL
 
-   kubectl -n veloxsearch-system create secret generic velox-mesh \
+   kubectl -n velox-mesh create secret generic velox-mesh \
      --from-literal=pg-url="postgres://velox_mesh:${MESH_PG_PW}@veloxsearch-postgres.veloxsearch-system.svc:5432/velox_mesh?sslmode=disable" \
      --from-literal=service-token="$(openssl rand -hex 32)"
    unset MESH_PG_PW
    ```
 
-   `sslmode=disable` is required, not a shortcut: the Mesh connects with
-   `NoTls` (`store.rs`), and the hop never leaves the cluster.
+   `sslmode=disable` is required: the Mesh connects with `NoTls`
+   (`store.rs`), and the hop never leaves the cluster.
 
 2. **Apply**
 
    ```bash
    kubectl apply -f deploy/mesh/mesh.yaml
-   kubectl -n veloxsearch-system rollout status deploy/velox-mesh
-   kubectl -n veloxsearch-system logs deploy/velox-mesh
+   kubectl -n velox-mesh rollout status deploy/velox-mesh
+   kubectl -n velox-mesh logs deploy/velox-mesh
    # velox-mesh 0.1.0 — tier free, 10 seats
    # velox-mesh: listening on http://0.0.0.0:4320
    ```
 
-3. **Wire the core.** The URL goes in `veloxsearch-env` (non-secret, ADR-034;
-   not in `upgrade.yaml`, so upgrades keep it). The token is a `secretKeyRef`
-   from the same Secret, so the two ends cannot drift. `install.yaml` is not
-   edited.
+3. **Nothing to wire.** The core finds Service and Secret `velox-mesh` in
+   `velox-mesh` at start and whenever a status read finds no Mesh.
+   `VELOX_MESH_URL` + `VELOX_MESH_SERVICE_TOKEN` on the core still override
+   discovery, for a Mesh that lives elsewhere.
 
-   ```bash
-   kubectl -n veloxsearch-system patch configmap veloxsearch-env --type merge \
-     -p '{"data":{"VELOX_MESH_URL":"http://velox-mesh.veloxsearch-system.svc:4320"}}'
+## Agents outside the cluster
 
-   kubectl -n veloxsearch-system patch deploy/veloxsearch --patch-file /dev/stdin <<'PATCH'
-   spec:
-     template:
-       spec:
-         containers:
-           - name: veloxsearch
-             env:
-               - name: VELOX_MESH_SERVICE_TOKEN
-                 valueFrom:
-                   secretKeyRef:
-                     name: velox-mesh
-                     key: service-token
-   PATCH
-   ```
+In public-URL mode (*Settings → Access*) each deployment gets
+`https://<deployment>-mesh.<domain>`: an Ingress in `velox-mesh` routing `/v1`
+(enrol + OpAMP) and `/healthz` only, TLS only. It is the deployment's
+*Public URL* Mesh endpoint, beside the matching OpenSearch one. On an
+`sslip.io` domain with no TLS Secret the ingress serves its self-signed
+default certificate: both endpoints are marked insecure, the compiler writes
+`tls.verify Off`, and the enrol command carries `--insecure`. Set a TLS Secret
+(a wildcard for the domain) in *Settings → Access* to verify instead.
 
-   The Deployment patch rolls the core, which also picks up the ConfigMap.
-   Check it in the console: a deployment's *Mesh* tab → *Settings* shows the
-   Mesh as reachable (`GET /healthz`, `src/mesh.rs`) instead of the install
-   guide.
-
-4. **Expose the agent face** (only if agents live outside the cluster, which
-   is the point of the Mesh). Uncomment the Ingress at the bottom of
-   `mesh.yaml`, replace `INGRESS-IP`, and re-apply. It routes only `/v1`
-   (`/v1/enroll`, `/v1/opamp`); `/api/mesh/*` and `/healthz` match nothing.
-   The certificate **must be publicly trusted**: `velox-agent` trusts only the
-   WebPKI roots, so Traefik's default self-signed certificate or an internal
-   CA makes every enrolment fail. Use a Let's Encrypt `ClusterIssuer` on
-   cert-manager (bootstrap installs cert-manager but creates no issuer) or a
-   certificate you already hold as a `kubernetes.io/tls` Secret.
-
-   ```bash
-   curl -sS -o /dev/null -w '%{http_code}\n' https://mesh.<ip>.sslip.io/v1/opamp -X POST   # 4xx from the Mesh, not a TLS error
-   curl -sS -o /dev/null -w '%{http_code}\n' https://mesh.<ip>.sslip.io/api/mesh/overview -X POST   # 404 from Traefik
-   ```
-
-5. **Enrol an agent.** In the console, on the deployment's *Mesh* tab:
-   *Settings* → add a Mesh endpoint `https://mesh.<ip>.sslip.io` (no `:4320`;
-   the ingress listens on 443) and an OpenSearch endpoint; *Policies* → *New
-   policy* bound to both; *Add agent* → mint a token → run the generated
-   install guide on the host, ending in
-
-   ```bash
-   velox-agent enroll --mesh https://mesh.<ip>.sslip.io --token <token>
-   velox-agent doctor
-   ```
-
-   The host appears on the *Overview* (the fleet) on its first check-in.
+```bash
+velox-agent enroll --mesh https://<deployment>-mesh.<ip>.sslip.io:443 --token <token> --insecure
+velox-agent doctor
+```
 
 ## Rollback
 
-Each step undoes independently, newest first:
-
 ```bash
-# un-publish the agent face (enrolled agents start failing check-ins; they keep
-# their last applied config and Fluent Bit keeps shipping)
-kubectl -n veloxsearch-system delete ingress velox-mesh-agents
-
-# unwire the core → the console shows the install guide again
-kubectl -n veloxsearch-system set env deploy/veloxsearch VELOX_MESH_SERVICE_TOKEN-
-kubectl -n veloxsearch-system patch configmap veloxsearch-env --type json \
-  -p '[{"op":"remove","path":"/data/VELOX_MESH_URL"}]'
-kubectl -n veloxsearch-system rollout restart deploy/veloxsearch
-
-# remove the controller (state stays in Postgres)
-kubectl delete -f deploy/mesh/mesh.yaml
+# remove the controller (state stays in Postgres); the console shows the
+# install guide again on its next status read
+kubectl -n velox-mesh delete deploy/velox-mesh svc/velox-mesh sa/velox-mesh
 
 # roll the controller back one image instead of removing it
-kubectl -n veloxsearch-system rollout undo deploy/velox-mesh
+kubectl -n velox-mesh rollout undo deploy/velox-mesh
 ```
 
 Migrations are append-only and there are no down-migrations: an image
@@ -158,7 +129,7 @@ Dropping the data is a separate, deliberate step (it forgets every agent,
 policy and token):
 
 ```bash
-kubectl -n veloxsearch-system delete secret velox-mesh
+kubectl -n velox-mesh delete secret velox-mesh
 kubectl -n veloxsearch-system exec -i veloxsearch-postgres-0 -- \
   psql -v ON_ERROR_STOP=1 -U postgres -d postgres <<'EOSQL'
 DROP DATABASE velox_mesh;
@@ -169,24 +140,15 @@ EOSQL
 ## What is not covered
 
 - **Publishing the image.** `veloxsearch-mesh` is not in `release.yml`: no CI
-  build, no cosign signature, no digest-pinned published `mesh.yaml`, and the
-  console's install guide points at `https://get.veloxsearch.ai/mesh.yaml`,
-  which this repository does not produce. `mesh.yaml` pins `:0.1.0` by tag
-  until then.
+  build, no cosign signature, no digest pin. `mesh.yaml` pins `:0.1.0` by tag
+  until then, and the install button pulls that tag unless the core has
+  `VELOX_MESH_IMAGE`.
 - **Postgres reconnection.** The Mesh opens one connection at start and does
-  not reconnect: if `veloxsearch-postgres` restarts, the Mesh keeps serving
-  `/healthz` (which does not touch the database) while every real request
-  fails, and the probes do not notice. Restart it after any Postgres restart:
-  `kubectl -n veloxsearch-system rollout restart deploy/velox-mesh`.
+  not reconnect; `/healthz` does not touch the database. Restart it after any
+  Postgres restart: `kubectl -n velox-mesh rollout restart deploy/velox-mesh`.
 - **NetworkPolicy.** None is shipped. The console face is protected by the
-  service token alone; any pod in the cluster can reach port 4320. Tenant
-  namespaces (ADR-044) would need an egress rule to the Mesh for in-cluster
-  agents; external agents come in through the Ingress.
-- **Other ingress controllers, NodePort, LoadBalancer.** Only a Traefik
-  Ingress is sketched. VMs on the node network can reach a NodePort instead,
-  but that exposes the console face too and is not provided here.
+  service token alone.
 - **Backups.** The Mesh's database rides the control-plane Postgres; nothing
   here schedules a dump of `velox_mesh`.
 - **Licences, the gateway and queue** (ARCHITECTURE.md §5.2), **multi-arch
-  images** (the build is the host's architecture), and **upgrading** beyond
-  re-tagging the image.
+  images** (the build is the host's architecture).

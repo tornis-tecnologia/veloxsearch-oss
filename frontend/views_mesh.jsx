@@ -639,30 +639,69 @@ function MeshStatusBanners({ t, status, ready = true }) {
 }
 
 /* Installing the controller is an INSTALLATION step (one Mesh serves every
-   deployment, ADR-072 §1), so this sits under Settings for the admin. */
+   deployment, ADR-072 §1), so this sits under Settings for the admin. The
+   button (ADR-072 amendment 5) has the core apply deploy/mesh/mesh.yaml into
+   the `velox-mesh` namespace — database, Secret, workload — and find it; a
+   second press reapplies (an upgrade to the image the core names). The
+   kubectl way stays, for a GitOps install. */
 function MeshInstallGuide({ lang, onToast }) {
   const t = STR[lang] || STR.pt;
   const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [tick, setTick] = useState(0);
   useEffect(() => {
     let alive = true;
     API.meshStatus()
       .then(s => { if (alive) setStatus(s); })
       .catch(() => { if (alive) setStatus({ configured: false }); });
     return () => { alive = false; };
-  }, []);
+  }, [tick]);
+  // Right after an install the pod is still pulling and starting: re-read
+  // until it answers, so the banner turns green on its own.
+  useEffect(() => {
+    if (!status || !status.configured || status.reachable !== false || status.source !== "installed") return undefined;
+    const h = setTimeout(() => setTick(x => x + 1), 5000);
+    return () => clearTimeout(h);
+  }, [status]);
+  async function install() {
+    setBusy(true); setErr(null);
+    try {
+      const s = await API.meshInstall();
+      setStatus(s);
+      if (onToast) onToast(t.mesh_install_ok, true);
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+  const viaEnv = status && status.source === "env";
+  const installed = status && status.source === "installed";
   return (
     <div data-testid="mesh-install-guide">
       <MeshStatusBanners t={t} status={status} />
       <Step n={1} title={t.mesh_j1_h} t={t}>
-        <p className="hint" style={{ margin: "0 0 10px" }}>{t.mesh_j1_p}</p>
-        <CmdBlock t={t} onToast={onToast} text={[
-          "# Velox Mesh runs in the cluster, beside the control plane.",
-          "kubectl apply -f https://get.veloxsearch.ai/mesh.yaml",
-          "",
-          "# Then point this console at it and restart the control plane:",
-          "kubectl -n veloxsearch-system set env deploy/veloxsearch \\",
-          "  VELOX_MESH_URL=http://velox-mesh.veloxsearch-system.svc:4320",
-        ].join("\n")} />
+        <p className="hint" style={{ margin: "0 0 10px" }}>{t.mesh_install_p}</p>
+        {viaEnv ? (
+          <p className="hint" data-testid="mesh-install-env">{t.mesh_install_env}</p>
+        ) : (
+          <Btn variant={installed ? "outline" : "primary"} icon={installed ? "activity" : "download"} disabled={busy || !status}
+            data-testid="mesh-install" onClick={install}>
+            {busy ? t.mesh_installing : installed ? t.mesh_reinstall_btn : t.mesh_install_btn}
+          </Btn>
+        )}
+        {err && <Banner tone="danger" title={t.mesh_install_err} style={{ marginTop: 10 }} testid="mesh-install-err">{err}</Banner>}
+        <details style={{ marginTop: 14 }}>
+          <summary className="hint" style={{ cursor: "pointer" }}>{t.mesh_install_manual}</summary>
+          <div style={{ marginTop: 10 }}>
+            <CmdBlock t={t} onToast={onToast} text={[
+              "# Velox Mesh runs in its own namespace, velox-mesh.",
+              "# Database + Secret first: see the header of deploy/mesh/mesh.yaml.",
+              "kubectl apply -f deploy/mesh/mesh.yaml",
+              "kubectl -n velox-mesh rollout status deploy/velox-mesh",
+              "",
+              "# Nothing to wire: this console finds it by name.",
+            ].join("\n")} />
+          </div>
+        </details>
         <p className="hint" style={{ marginTop: 8 }}>{t.mesh_j1_note}</p>
       </Step>
     </div>

@@ -277,6 +277,61 @@ subjects:
     name: veloxsearch
     namespace: veloxsearch-system
 ---
+# Velox Mesh (ADR-068, ADR-072 amendment 5) lives in its own namespace,
+# pre-created so the Role can bind, `restricted` so nothing the core creates
+# here can be privileged or mount the host. Settings → Velox Mesh → Install
+# applies deploy/mesh/mesh.yaml into it; nothing runs here until then.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velox-mesh
+  labels:
+    app.kubernetes.io/managed-by: veloxsearch
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: veloxsearch-runtime
+  namespace: velox-mesh
+rules:
+  # The Mesh's own objects (deploy/mesh/mesh.yaml): its tokenless
+  # ServiceAccount, its Deployment and its ClusterIP Service. Granted HERE
+  # and not in veloxsearch-system, where a Deployment could run as the
+  # operator's ServiceAccount.
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "services"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Secret `velox-mesh`: the Mesh's database URL and the service token the
+  # core authenticates with — the core writes it at install and reads the
+  # token back on every start (mesh::discover).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+  # Each deployment's agent-face route, `<name>-mesh.<domain>` (ADR-072
+  # amendment 4): an Ingress must sit beside the Service it routes to.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: veloxsearch-runtime
+  namespace: velox-mesh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: veloxsearch-runtime
+subjects:
+  - kind: ServiceAccount
+    name: veloxsearch
+    namespace: veloxsearch-system
+---
 # Bootstrap powers (ADR-014/022). The app revokes this itself after a
 # successful bootstrap — no manual cleanup step (ADR-027).
 apiVersion: rbac.authorization.k8s.io/v1

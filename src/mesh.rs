@@ -34,8 +34,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// What the console needs to decide which Velox Mesh screen to render.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct MeshStatus {
-    /// `VELOX_MESH_URL` is set. False ⇒ the install guide.
+    /// A Mesh is known to this control plane. False ⇒ the install guide.
     pub configured: bool,
+    /// How: `env` (VELOX_MESH_URL + token) or `installed` (found in the
+    /// `velox-mesh` namespace, ADR-072 amendment 5). `None` when not
+    /// configured. The console offers "reapply" only for `installed`.
+    pub source: Option<&'static str>,
     /// The configured base URL, so the screen can name what it tried.
     pub url: Option<String>,
     /// `None` when not configured; otherwise the result of `GET /healthz`.
@@ -44,25 +48,84 @@ pub struct MeshStatus {
     pub error: Option<String>,
 }
 
-/// The configured Mesh base URL, trimmed of a trailing slash so joining a
-/// path never produces `//`.
-pub fn configured_url() -> Option<String> {
+/// Where the console installs the Mesh, and where the core looks for one
+/// (ADR-072 amendment 5): namespace, and the one name its Service, Secret
+/// and Deployment share. Fixed, like `velox-agents`: the core's Role is
+/// granted in this namespace and nowhere else.
+pub const MESH_NAMESPACE: &str = "velox-mesh";
+pub const MESH_NAME: &str = "velox-mesh";
+pub const MESH_PORT: u16 = 4320;
+
+/// The Mesh found in [`MESH_NAMESPACE`]: base URL and service token. Read on
+/// start, after an install, and by a status read that finds none (so a Mesh
+/// applied by hand appears without restarting the core).
+static DISCOVERED: std::sync::RwLock<Option<(String, String)>> = std::sync::RwLock::new(None);
+
+fn env_url() -> Option<String> {
     std::env::var("VELOX_MESH_URL")
         .ok()
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty())
 }
 
-/// Read the status, probing the Mesh when one is configured.
+/// The in-cluster URL of the Mesh the console installs.
+pub fn installed_url() -> String {
+    format!("http://{MESH_NAME}.{MESH_NAMESPACE}.svc:{MESH_PORT}")
+}
+
+/// The configured Mesh base URL, trimmed of a trailing slash so joining a
+/// path never produces `//`: `VELOX_MESH_URL` when set (a Mesh that lives
+/// elsewhere), else the one found installed.
+pub fn configured_url() -> Option<String> {
+    env_url().or_else(|| {
+        DISCOVERED
+            .read()
+            .ok()
+            .and_then(|d| d.as_ref().map(|(u, _)| u.clone()))
+    })
+}
+
+/// Look for the installed Mesh — its Service and the token in its Secret —
+/// and remember it. Both or nothing: a Service without the token is a Mesh
+/// the core cannot authenticate to, so it is not "configured". An API error
+/// keeps what was known (an outage must not make the fleet disappear).
+pub async fn discover() -> bool {
+    match crate::k8s::installed_mesh_token().await {
+        Ok(found) => {
+            let v = found.map(|token| (installed_url(), token));
+            let hit = v.is_some();
+            if let Ok(mut d) = DISCOVERED.write() {
+                *d = v;
+            }
+            hit
+        }
+        Err(e) => {
+            tracing::debug!("velox mesh discovery: {e:#}");
+            configured_url().is_some()
+        }
+    }
+}
+
+/// Read the status, probing the Mesh when one is configured. With none
+/// known, look once — a Mesh applied by hand since the start is found here.
 pub async fn status() -> MeshStatus {
+    if configured_url().is_none() {
+        discover().await;
+    }
     let Some(url) = configured_url() else {
         return MeshStatus::default();
     };
+    let source = Some(if env_url().is_some() {
+        "env"
+    } else {
+        "installed"
+    });
     let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => {
             return MeshStatus {
                 configured: true,
+                source,
                 url: Some(url),
                 reachable: Some(false),
                 error: Some(e.to_string()),
@@ -72,18 +135,21 @@ pub async fn status() -> MeshStatus {
     match client.get(format!("{url}/healthz")).send().await {
         Ok(r) if r.status().is_success() => MeshStatus {
             configured: true,
+            source,
             url: Some(url),
             reachable: Some(true),
             error: None,
         },
         Ok(r) => MeshStatus {
             configured: true,
+            source,
             url: Some(url),
             reachable: Some(false),
             error: Some(format!("the Mesh answered {} at /healthz", r.status())),
         },
         Err(e) => MeshStatus {
             configured: true,
+            source,
             url: Some(url),
             reachable: Some(false),
             // `e.to_string()` on reqwest carries the URL already; the operator
@@ -1214,12 +1280,72 @@ async fn read_mesh<T: serde::de::DeserializeOwned>(res: reqwest::Response) -> an
     Ok(serde_json::from_str(text)?)
 }
 
-/// The token this control plane authenticates to its Mesh with.
+/// The token this control plane authenticates to its Mesh with: the env's
+/// when `VELOX_MESH_URL` is set (the two travel together), else the
+/// installed Mesh's Secret.
 pub fn service_token() -> Option<String> {
-    std::env::var("VELOX_MESH_SERVICE_TOKEN")
+    if env_url().is_some() {
+        return std::env::var("VELOX_MESH_SERVICE_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+    DISCOVERED
+        .read()
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|d| d.as_ref().map(|(_, t)| t.clone()))
+}
+
+// ---------------------------------------------------------------------------
+// Installing the Mesh from the console (ADR-072 amendment 5) — the pure half;
+// `k8s::install_mesh` writes it.
+// ---------------------------------------------------------------------------
+
+/// deploy/mesh/mesh.yaml, compiled in: the button and `kubectl apply` produce
+/// the same objects, and the manifest stays the one place they are described.
+pub const MESH_MANIFEST: &str = include_str!("../deploy/mesh/mesh.yaml");
+
+/// The manifest's objects, with the Mesh container's image replaced when
+/// the installation names another (`VELOX_MESH_IMAGE`: a mirror, a dev
+/// build). Refuses a manifest that would place anything outside
+/// [`MESH_NAMESPACE`] — the core's rights stop there, and so does the button.
+pub fn mesh_objects(image: Option<&str>) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut docs = crate::bootstrap::bundle_docs(MESH_MANIFEST)?;
+    for d in &mut docs {
+        let kind = d["kind"].as_str().unwrap_or("").to_string();
+        let ns = if kind == "Namespace" {
+            d["metadata"]["name"].as_str()
+        } else {
+            d["metadata"]["namespace"].as_str()
+        };
+        if ns != Some(MESH_NAMESPACE) {
+            anyhow::bail!("deploy/mesh/mesh.yaml places a {kind} outside {MESH_NAMESPACE}");
+        }
+        if let (Some(img), "Deployment") = (image, kind.as_str()) {
+            if let Some(cs) = d["spec"]["template"]["spec"]["containers"].as_array_mut() {
+                for c in cs.iter_mut().filter(|c| c["name"] == MESH_NAME) {
+                    c["image"] = serde_json::Value::String(img.to_string());
+                }
+            }
+        }
+    }
+    Ok(docs)
+}
+
+/// The Mesh's database URL on the installation's Postgres, the shape the
+/// manifest's step 2 writes: own role, own database, NoTls in-cluster.
+pub fn mesh_pg_url(app_namespace: &str, password: &str) -> String {
+    format!(
+        "postgres://velox_mesh:{password}@veloxsearch-postgres.{app_namespace}.svc:5432/velox_mesh?sslmode=disable"
+    )
+}
+
+/// The password inside a `pg-url` this module wrote — so a reinstall keeps
+/// the database credential the running Mesh already uses.
+pub fn password_of_pg_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("postgres://velox_mesh:")?;
+    let (pw, _) = rest.split_once('@')?;
+    (!pw.is_empty()).then(|| pw.to_string())
 }
 
 #[cfg(test)]
@@ -1305,6 +1431,62 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    /// ADR-072 amendment 5: the button applies deploy/mesh/mesh.yaml as is —
+    /// four objects, all in the Mesh's namespace, a `restricted` namespace,
+    /// the image replaced only when the installation names one — and the
+    /// URL the core then uses is the one an Ingress can route to.
+    #[test]
+    fn the_install_button_applies_the_manifest_in_its_namespace_only() {
+        let docs = mesh_objects(None).unwrap();
+        let kinds: Vec<&str> = docs.iter().map(|d| d["kind"].as_str().unwrap()).collect();
+        assert_eq!(
+            kinds,
+            ["Namespace", "ServiceAccount", "Deployment", "Service"]
+        );
+        assert_eq!(
+            docs[0]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"],
+            "restricted"
+        );
+        let dep = &docs[2];
+        let c = &dep["spec"]["template"]["spec"]["containers"][0];
+        let pinned = c["image"].as_str().unwrap().to_string();
+        assert!(
+            pinned.starts_with("docker.io/tornistecnologia/veloxsearch-mesh:"),
+            "{pinned}"
+        );
+        assert_eq!(c["securityContext"]["runAsNonRoot"], true);
+        assert_eq!(c["securityContext"]["allowPrivilegeEscalation"], false);
+        assert_eq!(
+            dep["spec"]["template"]["spec"]["automountServiceAccountToken"],
+            false
+        );
+        assert_eq!(c["env"][1]["valueFrom"]["secretKeyRef"]["name"], MESH_NAME);
+        assert_eq!(docs[3]["spec"]["ports"][0]["port"], MESH_PORT);
+
+        let custom = mesh_objects(Some("localhost:5000/velox-mesh:dev")).unwrap();
+        assert_eq!(
+            custom[2]["spec"]["template"]["spec"]["containers"][0]["image"],
+            "localhost:5000/velox-mesh:dev"
+        );
+        assert_eq!(
+            in_cluster_service(&installed_url()),
+            Some((MESH_NAME.into(), MESH_NAMESPACE.into(), MESH_PORT))
+        );
+    }
+
+    /// A reinstall reads back the database password it wrote.
+    #[test]
+    fn the_mesh_pg_url_round_trips_its_password() {
+        let u = mesh_pg_url("veloxsearch-system", "abc123");
+        assert_eq!(
+            u,
+            "postgres://velox_mesh:abc123@veloxsearch-postgres.veloxsearch-system.svc:5432/velox_mesh?sslmode=disable"
+        );
+        assert_eq!(password_of_pg_url(&u).as_deref(), Some("abc123"));
+        assert_eq!(password_of_pg_url("postgres://other:x@h/db"), None);
+        assert_eq!(password_of_pg_url("postgres://velox_mesh:@h/db"), None);
     }
 
     /// ADR-072 amendment 4: only an in-cluster `http://<svc>.<ns>.svc` URL
@@ -1553,6 +1735,7 @@ mod tests {
     fn configured_but_unreachable_is_distinct_from_not_installed() {
         let down = MeshStatus {
             configured: true,
+            source: Some("installed"),
             url: Some("http://velox-mesh:4320".into()),
             reachable: Some(false),
             error: Some("connection refused".into()),

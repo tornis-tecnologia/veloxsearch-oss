@@ -1,28 +1,32 @@
 # Velox Mesh — the fleet controller, one-file manifest (ADR-068, ADR-072).
 #
-# One Mesh serves every deployment of this installation (ADR-072 §1): it runs
-# once, in `veloxsearch-system`, beside the core and `veloxsearch-postgres`.
-# It is a separate image and release from the core (ADR-068), so this file is
-# NOT part of deploy/install.yaml and a core upgrade never restarts it.
-# Full rollout order, rollback and limits: deploy/mesh/README.md.
+# One Mesh serves every deployment of this installation (ADR-072 §1). It runs
+# once, in its OWN namespace `velox-mesh` (Pod Security `restricted`), so the
+# core installs and upgrades it with rights granted in that namespace only —
+# never Deployment/Service create in `veloxsearch-system`, where a pod could
+# borrow the operator's ServiceAccount (ADR-072 amendment 5). It is a
+# separate image and release from the core (ADR-068), so this file is NOT
+# part of deploy/install.yaml and a core upgrade never restarts it.
+# Rollout order, rollback and limits: deploy/mesh/README.md.
 #
-# Prerequisites: deploy/install.yaml applied, and the `veloxsearch-postgres-0`
-# pod Ready. That pod runs whatever VELOX_PG_ENABLED says — the core ensures
-# its credentials Secret either way (src/main.rs) — but on a cluster where
-# the claim waits on Longhorn it is Pending until first-run bootstrap ends.
+# ── The one-click way ────────────────────────────────────────────────────────
+# Settings → Velox Mesh → "Install in this cluster". The core applies THIS
+# file (compiled into its binary), so both ways produce the same objects; it
+# also does steps 1 and 2 below itself, and step 4 is never needed. The image
+# is the one pinned below unless the core has VELOX_MESH_IMAGE set (an air-
+# gapped mirror, a development build).
 #
-# ── 1. Database (one time) ───────────────────────────────────────────────────
-# The Mesh's only state is Postgres (veloxagent/docs/ARCHITECTURE.md §4.1).
-# It gets its OWN role and database on the existing `veloxsearch-postgres`,
-# not a second Postgres and not the core's `velox` database: same backup and
-# storage story as the control plane, but the two schemas never share a
-# `schema_migrations` ledger (both runners name theirs that) and neither
-# role can read the other's tables. Least privilege like the core's `velox`
-# role (ADR-041): no superuser, no CREATEDB, no CREATEROLE. The Mesh runs its
-# embedded migrations itself at start (veloxagent/migrations/, store.rs) and
-# exits if it cannot — so this step is the only manual SQL.
+# ── By hand ──────────────────────────────────────────────────────────────────
+# Prerequisites: deploy/install.yaml applied (it creates the `velox-mesh`
+# namespace and the core's Role in it), `veloxsearch-postgres-0` Ready.
 #
-# Run in ONE shell, so the password reaches both this step and the Secret:
+# 1. Database (one time). Its OWN role and database on the existing
+#    `veloxsearch-postgres`, not a second Postgres and not the core's `velox`
+#    database: same backup story, but the two schemas never share a
+#    `schema_migrations` ledger (both runners name theirs that) and neither
+#    role can read the other's tables. Least privilege like the core's role
+#    (ADR-041). The Mesh runs its embedded migrations at start and exits if
+#    it cannot. Run in ONE shell, so the password reaches step 2:
 #
 #   MESH_PG_PW="$(openssl rand -hex 32)"     # hex: URL-safe in pg-url as-is
 #   kubectl -n veloxsearch-system exec -i veloxsearch-postgres-0 -- \
@@ -32,70 +36,43 @@
 #   REVOKE ALL ON DATABASE velox_mesh FROM PUBLIC;
 #   EOSQL
 #
-# (psql inside the pod connects over the local socket, which the postgres
-# image trusts, so no superuser password is typed; `:'pw'` quoting keeps the
-# password out of SQL-injection reach, as the initdb hook in install.yaml does.)
+# 2. Secret `velox-mesh` in `velox-mesh` (values never live in a manifest,
+#    ADR-023/034). `pg-url` with sslmode=disable (the Mesh connects with
+#    NoTls, the hop is in-cluster); `service-token`, the bearer the core
+#    presents on /api/mesh/* — the core reads it from this same Secret.
 #
-# ── 2. Secret `velox-mesh` (created out of band, never in this file) ────────
-# Values never live in a manifest (ADR-023/034). Two keys:
-#   pg-url         the Mesh's database. sslmode=disable because the Mesh
-#                  connects with NoTls (store.rs) and the hop is in-cluster;
-#                  `require` would refuse to connect.
-#   service-token  the bearer the core's console presents on /api/mesh/*.
-#                  The SAME Secret feeds the core (step 4), so the two ends
-#                  cannot drift.
-#
-#   kubectl -n veloxsearch-system create secret generic velox-mesh \
+#   kubectl -n velox-mesh create secret generic velox-mesh \
 #     --from-literal=pg-url="postgres://velox_mesh:${MESH_PG_PW}@veloxsearch-postgres.veloxsearch-system.svc:5432/velox_mesh?sslmode=disable" \
 #     --from-literal=service-token="$(openssl rand -hex 32)"
 #   unset MESH_PG_PW
 #
-# Vault-sourced installs: provision the same two keys with deploy/secrets/
-# (External Secrets) instead of `create secret`.
-#
-# ── 3. Apply ─────────────────────────────────────────────────────────────────
+# 3. Apply:
 #   kubectl apply -f deploy/mesh/mesh.yaml
-#   kubectl -n veloxsearch-system rollout status deploy/velox-mesh
-#   kubectl -n veloxsearch-system logs deploy/velox-mesh   # "tier free, 10 seats", "listening"
+#   kubectl -n velox-mesh rollout status deploy/velox-mesh
 #
-# ── 4. Wire the core (do NOT edit install.yaml for this) ────────────────────
-# The core reaches the Mesh by VELOX_MESH_URL + VELOX_MESH_SERVICE_TOKEN
-# (src/mesh.rs `configured_url`, `service_token`); both unset = no fleet,
-# and the console shows the install guide.
+# 4. Nothing to wire. The core finds the Mesh by name — Service `velox-mesh`
+#    and Secret `velox-mesh` in namespace `velox-mesh` (src/mesh.rs
+#    `discover`) — at start and when the install button runs; a restarted
+#    core finds it again. VELOX_MESH_URL + VELOX_MESH_SERVICE_TOKEN on the
+#    core still override that, for a Mesh that lives elsewhere.
 #
-# The URL is non-secret config, so it goes in `veloxsearch-env` (ADR-034):
-# that ConfigMap is the operator's and is NOT in upgrade.yaml (ADR-057), so a
-# core upgrade keeps it.
-#
-#   kubectl -n veloxsearch-system patch configmap veloxsearch-env --type merge \
-#     -p '{"data":{"VELOX_MESH_URL":"http://velox-mesh.veloxsearch-system.svc:4320"}}'
-#
-# The token is a secret, so it is a secretKeyRef on the core's Deployment
-# (the same shape as VELOX_SMTP_PASSWORD there). Strategic-merge patch — env
-# merges by `name`, so the existing entries are kept:
-#
-#   kubectl -n veloxsearch-system patch deploy/veloxsearch --patch-file /dev/stdin <<'PATCH'
-#   spec:
-#     template:
-#       spec:
-#         containers:
-#           - name: veloxsearch
-#             env:
-#               - name: VELOX_MESH_SERVICE_TOKEN
-#                 valueFrom:
-#                   secretKeyRef:
-#                     name: velox-mesh
-#                     key: service-token
-#   PATCH
-#
-# The patch rolls the core's pod, which also picks up the ConfigMap change.
-# A later `kubectl apply` of upgrade.yaml keeps this entry: client-side apply
-# only removes env entries that were in its own last-applied set.
-#
-# ── 5. Agent face (OPTIONAL, bottom of this file, commented out) ────────────
-# Agents run on hosts OUTSIDE the cluster and must reach /v1/enroll and
-# /v1/opamp. The Service below is ClusterIP: nothing here is reachable from
-# outside until you publish it. Read the Ingress comment before enabling it.
+# ── Agents outside the cluster ──────────────────────────────────────────────
+# Nothing here is reachable from outside: the Service is ClusterIP. In ingress
+# mode (Settings → Access) the core gives every deployment its own route,
+# `https://<deployment>-mesh.<domain>`, `/v1` and `/healthz` only, TLS only,
+# and offers it as the deployment's Mesh endpoint (ADR-072 amendment 4).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velox-mesh
+  labels:
+    app.kubernetes.io/managed-by: veloxsearch
+    # The Deployment below already meets `restricted`; enforcing it means a
+    # pod the core is tricked into creating here cannot be privileged or
+    # mount the host either.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
 ---
 # Its own ServiceAccount with no API token mounted: the Mesh never talks to
 # the Kubernetes API (it does not compile policies or touch the cluster —
@@ -104,7 +81,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: velox-mesh
-  namespace: veloxsearch-system
+  namespace: velox-mesh
   labels: { app: velox-mesh }
 automountServiceAccountToken: false
 ---
@@ -112,7 +89,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: velox-mesh
-  namespace: veloxsearch-system
+  namespace: velox-mesh
   labels: { app: velox-mesh }
 spec:
   # Stateless — Postgres holds everything (main.rs), so replicas are
@@ -189,12 +166,12 @@ spec:
 ---
 # ClusterIP only: the console face (/api/mesh/*) is for the core alone and
 # must never leave the cluster. The core reaches it as
-# http://velox-mesh.veloxsearch-system.svc:4320 (step 4 above).
+# http://velox-mesh.velox-mesh.svc:4320, found by name (step 4 above).
 apiVersion: v1
 kind: Service
 metadata:
   name: velox-mesh
-  namespace: veloxsearch-system
+  namespace: velox-mesh
   labels: { app: velox-mesh }
 spec:
   type: ClusterIP
@@ -203,64 +180,3 @@ spec:
     - name: http
       port: 4320
       targetPort: 4320
-# ── OPTIONAL: publish the agent face ─────────────────────────────────────────
-# Uncomment (every line from the `---` down) to let hosts outside the cluster
-# enrol. It routes ONLY the `/v1` prefix — /v1/enroll and /v1/opamp, the whole
-# agent face by design (main.rs). /api/mesh/* and /healthz match no rule, so
-# Traefik answers 404 for them: the console face is never exposed, and the
-# service token is never presented to the internet.
-#
-# Host: any name that resolves to the ingress IP. Without DNS, the same
-# sslip.io convention the core uses for deployments (src/access.rs,
-# FALLBACK_DNS_SUFFIX): `mesh.<ingress-ip>.sslip.io` (find the IP with
-# `kubectl -n kube-system get svc traefik`). Lab use only — it relies on a
-# public resolver and leaks the IP in the name.
-#
-# TLS is NOT optional in practice: enrolment tokens and per-agent credentials
-# travel on these requests. And the agent trusts ONLY the public WebPKI roots
-# (reqwest with webpki roots, no custom-CA option in velox-agent today), so:
-#   - Traefik's built-in self-signed default certificate → every enrol fails
-#     with a certificate error;
-#   - an internal CA → same failure;
-#   - a publicly trusted certificate works: a Let's Encrypt ACME ClusterIssuer
-#     on cert-manager (installed by first-run bootstrap; NO issuer is created
-#     by it — you add one) with the annotation below, or a wildcard you
-#     already hold, as a kubernetes.io/tls Secret in veloxsearch-system (the
-#     same Secret the core's ingress mode uses, `tls_secret`, src/access.rs).
-# HTTP-01 needs the host reachable from the internet on :80; behind NAT use
-# DNS-01 or a provided certificate.
-#
-# `router.entrypoints: websecure` keeps Traefik from serving this route on
-# plain :80, so a mistyped http:// --mesh fails loudly instead of sending a
-# token in clear. The Mesh endpoint the console then binds to a policy
-# (Mesh → Settings, ADR-072 amendment 2) is `https://mesh.<ingress-ip>.sslip.io`
-# — no :4320, the ingress listens on 443.
-#
-# ---
-# apiVersion: networking.k8s.io/v1
-# kind: Ingress
-# metadata:
-#   name: velox-mesh-agents
-#   namespace: veloxsearch-system
-#   labels: { app: velox-mesh }
-#   annotations:
-#     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-#     traefik.ingress.kubernetes.io/router.tls: "true"
-#     # With a cert-manager ClusterIssuer you created (omit with a provided Secret):
-#     # cert-manager.io/cluster-issuer: letsencrypt-prod
-# spec:
-#   ingressClassName: traefik
-#   tls:
-#     - hosts: ["mesh.INGRESS-IP.sslip.io"]
-#       secretName: velox-mesh-agents-tls
-#   rules:
-#     - host: mesh.INGRESS-IP.sslip.io
-#       http:
-#         paths:
-#           - path: /v1
-#             pathType: Prefix
-#             backend:
-#               service:
-#                 name: velox-mesh
-#                 port:
-#                   number: 4320

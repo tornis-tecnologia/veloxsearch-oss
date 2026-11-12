@@ -1697,6 +1697,120 @@ async fn delete_mesh_ingress(client: &Client, dep: &Deployment) {
     }
 }
 
+/// The installed Mesh's service token (ADR-072 amendment 5): `Some` when the
+/// Service and the Secret's `service-token` both exist in the Mesh's
+/// namespace, `None` when either is missing, `Err` on an API failure.
+pub async fn installed_mesh_token() -> Result<Option<String>> {
+    use crate::mesh::{MESH_NAME, MESH_NAMESPACE};
+    let client = client().await?;
+    let svcs: Api<k8s_openapi::api::core::v1::Service> =
+        Api::namespaced(client.clone(), MESH_NAMESPACE);
+    if svcs.get_opt(MESH_NAME).await?.is_none() {
+        return Ok(None);
+    }
+    let secrets: Api<Secret> = Api::namespaced(client, MESH_NAMESPACE);
+    Ok(secrets.get_opt(MESH_NAME).await?.and_then(|s| {
+        s.data
+            .and_then(|d| {
+                d.get("service-token")
+                    .map(|b| String::from_utf8_lossy(&b.0).trim().to_string())
+            })
+            .filter(|t| !t.is_empty())
+    }))
+}
+
+fn random_hex32() -> Result<String> {
+    let mut buf = [0u8; 32];
+    getrandom::fill(&mut buf)
+        .map_err(|e| anyhow::anyhow!("OS CSPRNG (getrandom) unavailable: {e}"))?;
+    Ok(hex::encode(buf))
+}
+
+/// Install (or reapply) the Velox Mesh from the console (ADR-072 amendment
+/// 5): deploy/mesh/mesh.yaml's steps, in order, done by the core.
+///
+/// 1. The namespace, from the manifest (`restricted`).
+/// 2. Secret `velox-mesh`: an existing one is KEPT — its database password
+///    and service token are what the running Mesh and its agents use — and
+///    a missing key is generated.
+/// 3. The role and database on the installation's Postgres, with the
+///    Secret's password (`db::ensure_mesh_database`; never drops data).
+/// 4. The ServiceAccount, Deployment and Service, server-side applied —
+///    a reapply is an upgrade to the image this core names.
+///
+/// Then the caller rediscovers the Mesh and backfills each deployment's
+/// route. Nothing outside `velox-mesh` is written except the database.
+pub async fn install_mesh(image: Option<&str>) -> Result<()> {
+    use crate::mesh::{MESH_NAME, MESH_NAMESPACE};
+    let client = client().await?;
+    let docs = crate::mesh::mesh_objects(image)?;
+    let (ns_docs, rest): (Vec<_>, Vec<_>) =
+        docs.into_iter().partition(|d| d["kind"] == "Namespace");
+    for d in &ns_docs {
+        apply_dynamic(&client, "", "v1", "Namespace", None, MESH_NAMESPACE, d)
+            .await
+            .context("applying the velox-mesh namespace")?;
+    }
+
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), MESH_NAMESPACE);
+    let existing = secrets.get_opt(MESH_NAME).await?;
+    let key = |k: &str| {
+        existing
+            .as_ref()
+            .and_then(|s| s.data.as_ref())
+            .and_then(|d| d.get(k))
+            .map(|b| String::from_utf8_lossy(&b.0).trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let password = match key("pg-url").and_then(|u| crate::mesh::password_of_pg_url(&u)) {
+        Some(pw) => pw,
+        None => random_hex32()?,
+    };
+    let token = match key("service-token") {
+        Some(t) => t,
+        None => random_hex32()?,
+    };
+    crate::db::ensure_mesh_database(&password)
+        .await
+        .context("provisioning the Mesh's database")?;
+    let secret = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": MESH_NAME,
+            "namespace": MESH_NAMESPACE,
+            "labels": { "app": MESH_NAME, "app.kubernetes.io/managed-by": "veloxsearch" },
+        },
+        "type": "Opaque",
+        "stringData": {
+            "pg-url": crate::mesh::mesh_pg_url(ns(), &password),
+            "service-token": token,
+        }
+    });
+    secrets
+        .patch(
+            MESH_NAME,
+            &PatchParams::apply("veloxsearch").force(),
+            &Patch::Apply(&secret),
+        )
+        .await
+        .context("writing Secret velox-mesh")?;
+
+    for d in &rest {
+        let kind = d["kind"].as_str().unwrap_or_default();
+        let name = d["metadata"]["name"].as_str().unwrap_or_default();
+        let (group, version) = match kind {
+            "Deployment" => ("apps", "v1"),
+            "ServiceAccount" | "Service" => ("", "v1"),
+            other => anyhow::bail!(
+                "deploy/mesh/mesh.yaml carries a {other} the installer does not apply"
+            ),
+        };
+        apply_dynamic(&client, group, version, kind, Some(MESH_NAMESPACE), name, d).await?;
+    }
+    Ok(())
+}
+
 /// Light PEM sanity check for a client-injected cert/key pair (issue #54):
 /// both halves present and carrying the right PEM markers. Full chain/key
 /// matching is the ingress controller's job — this only catches swapped or
