@@ -18,7 +18,7 @@
 //! configuration safely, and the host preflight. No engine is spawned yet.
 //!
 //! ```text
-//! velox-agent enroll --mesh https://mesh.example:4320 --token <enrollment token>
+//! velox-agent enroll --mesh https://mesh.example:4320 --token <enrollment token> [--insecure]
 //! velox-agent run
 //! velox-agent doctor
 //! velox-agent version
@@ -48,10 +48,19 @@ async fn main() {
         Some("version") => println!("velox-agent {}", env!("CARGO_PKG_VERSION")),
         Some("enroll") => {
             let (Some(mesh), Some(token)) = (flag(&args, "--mesh"), flag(&args, "--token")) else {
-                eprintln!("usage: velox-agent enroll --mesh URL --token TOKEN");
+                eprintln!("usage: velox-agent enroll --mesh URL --token TOKEN [--insecure]");
                 std::process::exit(64);
             };
-            match runtime::enrol(&mesh, &token).await {
+            // Fleet's `--insecure`: accept a Mesh certificate no public CA
+            // signed (an ingress controller's default one). Remembered in the
+            // identity; said out loud, because it is a downgrade.
+            let insecure = args.iter().any(|a| a == "--insecure");
+            if insecure {
+                eprintln!(
+                    "velox-agent: --insecure: the Mesh's TLS certificate will NOT be verified on this host"
+                );
+            }
+            match runtime::enrol(&mesh, &token, insecure).await {
                 Ok(id) => {
                     let paths = runtime::Paths::from_env();
                     if let Err(e) = id.save(&paths) {
@@ -88,7 +97,7 @@ async fn main() {
         }
         _ => {
             eprintln!(
-                "usage: velox-agent <enroll --mesh URL --token TOKEN | run | doctor | version>"
+                "usage: velox-agent <enroll --mesh URL --token TOKEN [--insecure] | run | doctor | version>"
             );
             std::process::exit(64);
         }

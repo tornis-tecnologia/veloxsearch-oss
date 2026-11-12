@@ -1229,6 +1229,11 @@ pub async fn create_cluster(
     let access = crate::access::get().await?;
     ensure_dashboards_ingress(&client, &access, dep).await?;
     ensure_opensearch_ingress(&client, &access, dep).await?;
+    // The Mesh is optional and another component's: its route failing must
+    // not fail a create.
+    if let Err(e) = ensure_mesh_ingress(&client, &access, dep).await {
+        tracing::warn!("mesh route for {}: {e:#}", dep.name());
+    }
     Ok(())
 }
 
@@ -1581,6 +1586,117 @@ pub async fn ensure_opensearch_ingress(
     Ok(())
 }
 
+/// Name of the Mesh agent-face route of a deployment, in the Mesh's namespace.
+fn mesh_route_name(dep: &Deployment) -> String {
+    format!("{}-mesh", dep.name())
+}
+
+/// The annotation that says which deployment a Mesh route serves. The route
+/// lives in the MESH's namespace (an Ingress backend must be a Service of
+/// its own namespace), not the deployment's, so the owner is written down and
+/// checked before a delete — two tenants' deployments may share a name.
+const MESH_ROUTE_FOR: &str = "veloxsearch.ai/mesh-route-for";
+
+fn mesh_route_owner(dep: &Deployment) -> String {
+    format!("{}/{}", dep.namespace(), dep.name())
+}
+
+/// Render the deployment's **Velox Mesh agent face** route (pure): host
+/// `<name>-mesh.<domain>` (ADR-072 amendment 4), only `/v1` (enrol + OpAMP)
+/// and `/healthz` (the settings screen's probe) — the console face
+/// `/api/mesh/*` is never routed, it is the core's alone (deploy/mesh/
+/// mesh.yaml). HTTPS only: on Traefik the router binds to `websecure` and
+/// nothing else, so a mistyped `http://` fails instead of sending a token in
+/// clear; other controllers redirect to TLS when a Secret is set. A plain
+/// Ingress, not an IngressRoute: the Mesh's backend is plain HTTP, which is
+/// the case a plain Ingress handles on every controller.
+fn mesh_ingress_manifest(
+    access: &crate::access::AccessConfig,
+    dep: &Deployment,
+    host: &str,
+    (service, namespace, port): (&str, &str, u16),
+) -> serde_json::Value {
+    let backend = serde_json::json!({ "service": { "name": service, "port": { "number": port } } });
+    let mut spec = serde_json::json!({
+        "ingressClassName": access.ingress_class,
+        "rules": [{
+            "host": host,
+            "http": { "paths": [
+                { "path": "/v1", "pathType": "Prefix", "backend": backend },
+                { "path": "/healthz", "pathType": "Exact", "backend": backend },
+            ]}
+        }]
+    });
+    let tls_secret = access.tls_secret.trim();
+    if !tls_secret.is_empty() {
+        spec["tls"] = serde_json::json!([{ "hosts": [host], "secretName": tls_secret }]);
+    }
+    serde_json::json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "Ingress",
+        "metadata": {
+            "name": mesh_route_name(dep),
+            "namespace": namespace,
+            "labels": dep.owner_labels(),
+            "annotations": {
+                MESH_ROUTE_FOR: mesh_route_owner(dep),
+                "traefik.ingress.kubernetes.io/router.entrypoints": "websecure",
+                "traefik.ingress.kubernetes.io/router.tls": "true",
+            },
+        },
+        "spec": spec
+    })
+}
+
+/// Apply the deployment's Mesh route per the access config. A no-op on
+/// port-forward, without a Mesh, or with a Mesh the core does not reach as
+/// an in-cluster Service (`mesh::in_cluster_service`) — the settings screen
+/// then offers no derived Mesh endpoint either, so nothing points at a route
+/// that does not exist.
+pub async fn ensure_mesh_ingress(
+    client: &Client,
+    access: &crate::access::AccessConfig,
+    dep: &Deployment,
+) -> Result<()> {
+    let Some(host) = access.mesh_host(dep.name()) else {
+        return Ok(());
+    };
+    let Some((svc, ns, port)) =
+        crate::mesh::configured_url().and_then(|u| crate::mesh::in_cluster_service(&u))
+    else {
+        return Ok(());
+    };
+    let ingress = mesh_ingress_manifest(access, dep, &host, (&svc, &ns, port));
+    ingress_api(client, &ns)
+        .patch(
+            &mesh_route_name(dep),
+            &PatchParams::apply("veloxsearch").force(),
+            &Patch::Apply(&ingress),
+        )
+        .await
+        .context("applying the Velox Mesh route")?;
+    Ok(())
+}
+
+/// Remove the deployment's Mesh route — only if it is this deployment's
+/// (the owner annotation), since it lives in a namespace other deployments'
+/// routes share.
+async fn delete_mesh_ingress(client: &Client, dep: &Deployment) {
+    let Some((_, ns, _)) =
+        crate::mesh::configured_url().and_then(|u| crate::mesh::in_cluster_service(&u))
+    else {
+        return;
+    };
+    let api = ingress_api(client, &ns);
+    let name = mesh_route_name(dep);
+    let Ok(Some(obj)) = api.get_opt(&name).await else {
+        return;
+    };
+    if annotation_value(&obj, MESH_ROUTE_FOR).as_deref() == Some(mesh_route_owner(dep).as_str()) {
+        let _ = api.delete(&name, &DeleteParams::default()).await;
+    }
+}
+
 /// Light PEM sanity check for a client-injected cert/key pair (issue #54):
 /// both halves present and carrying the right PEM markers. Full chain/key
 /// matching is the ingress controller's job — this only catches swapped or
@@ -1904,14 +2020,28 @@ pub async fn mesh_settings(dep: &Deployment) -> Result<crate::mesh::MeshSettings
         .get(name)
         .await
         .context("fetching cluster for mesh settings")?;
-    match annotation_value(&obj, LABEL_MESH_SETTINGS) {
+    let stored = match annotation_value(&obj, LABEL_MESH_SETTINGS) {
         Some(doc) => serde_json::from_str(&doc)
-            .with_context(|| format!("the {LABEL_MESH_SETTINGS} annotation does not parse")),
-        None => Ok(crate::mesh::MeshSettings::from_legacy(
+            .with_context(|| format!("the {LABEL_MESH_SETTINGS} annotation does not parse"))?,
+        None => crate::mesh::MeshSettings::from_legacy(
             annotation_value(&obj, LABEL_MESH_OS_HOST),
             annotation_value(&obj, LABEL_MESH_AGENT_URL),
-        )),
-    }
+        ),
+    };
+    // The deployment's public routes, derived on every read (ADR-072
+    // amendment 4). An access-config read failure is an error, not "no
+    // routes": a policy bound to the route endpoint must not compile against
+    // a list that silently lost it.
+    let access = crate::access::get().await?;
+    let mesh_routed = crate::mesh::configured_url()
+        .and_then(|u| crate::mesh::in_cluster_service(&u))
+        .is_some();
+    Ok(crate::mesh::with_route_endpoints(
+        stored,
+        &access,
+        name,
+        mesh_routed,
+    ))
 }
 
 /// The in-cluster address of the deployment's OpenSearch, in the shape an
@@ -1930,7 +2060,9 @@ pub async fn set_mesh_settings(dep: &Deployment, s: &crate::mesh::MeshSettings) 
     let name = dep.name();
     validate_name(name)?;
     let client = client().await?;
-    let doc = serde_json::to_string(s).context("serialising the Mesh settings")?;
+    // The derived route endpoints are never stored (ADR-072 amendment 4).
+    let s = crate::mesh::without_route_endpoints(s.clone());
+    let doc = serde_json::to_string(&s).context("serialising the Mesh settings")?;
     let patch = serde_json::json!({ "metadata": { "annotations": {
         LABEL_MESH_SETTINGS: doc,
         LABEL_MESH_OS_HOST: annotation_patch_value(None),
@@ -1992,6 +2124,7 @@ pub async fn delete_created_objects(dep: &Deployment) -> Result<()> {
         &format!("{name}-ipallow"),
     )
     .await;
+    delete_mesh_ingress(&client, dep).await;
     let secrets: Api<Secret> = Api::namespaced(client.clone(), dep.namespace());
     for s in owned_secret_names(name) {
         let _ = secrets.delete(&s, &dp).await;
@@ -9442,6 +9575,53 @@ mod tests {
             hosts.contains(&"prod.example.com"),
             "the SSO host was dropped: {hosts:?}"
         );
+    }
+
+    /// ADR-072 amendment 4: the Mesh route is the agent face only, on TLS
+    /// only, in the Mesh's namespace, and says whose it is.
+    #[test]
+    fn the_mesh_route_is_the_agent_face_over_tls_only() {
+        let m = mesh_ingress_manifest(
+            &ingress_access("wild-tls"),
+            &test_dep(),
+            "prod-mesh.example.com",
+            ("velox-mesh", "veloxsearch-system", 4320),
+        );
+        assert_eq!(m["metadata"]["name"], "prod-mesh");
+        assert_eq!(m["metadata"]["namespace"], "veloxsearch-system");
+        assert_eq!(
+            m["metadata"]["annotations"][MESH_ROUTE_FOR],
+            mesh_route_owner(&test_dep())
+        );
+        assert_eq!(
+            m["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"],
+            "websecure"
+        );
+        let rule = &m["spec"]["rules"][0];
+        assert_eq!(rule["host"], "prod-mesh.example.com");
+        let paths: Vec<&str> = rule["http"]["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            ["/v1", "/healthz"],
+            "the console face must never be routed"
+        );
+        assert_eq!(
+            rule["http"]["paths"][0]["backend"]["service"]["port"]["number"],
+            4320
+        );
+        assert_eq!(m["spec"]["tls"][0]["secretName"], "wild-tls");
+        let bare = mesh_ingress_manifest(
+            &ingress_access(""),
+            &test_dep(),
+            "h",
+            ("velox-mesh", "veloxsearch-system", 4320),
+        );
+        assert!(bare["spec"]["tls"].is_null());
     }
 
     #[test]

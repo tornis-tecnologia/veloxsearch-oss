@@ -311,6 +311,20 @@ pub struct OsEndpoint {
     pub id: String,
     pub name: String,
     pub host: String,
+    /// Derived by the core from the access configuration, never stored
+    /// (ADR-072 amendment 4): the deployment's public route. Read-only on
+    /// the settings screen; a save drops it before writing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub managed: bool,
+    /// The address answers with a certificate hosts cannot verify (an
+    /// ingress controller's self-signed default): the compiler writes
+    /// `tls.verify Off` on the output bound to it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub insecure: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One address at which hosts reach the Mesh: the `--mesh` of `velox-agent
@@ -323,6 +337,14 @@ pub struct MeshEndpoint {
     pub id: String,
     pub name: String,
     pub url: String,
+    /// As on [`OsEndpoint`]: derived from the access configuration.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub managed: bool,
+    /// The agent must be told `--insecure` to enrol against it; the console
+    /// writes the flag into the enrol command and the probe skips
+    /// verification for it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub insecure: bool,
 }
 
 /// The deployment's Mesh settings (ADR-072 §5, amendment 2): the endpoints
@@ -352,6 +374,7 @@ impl MeshSettings {
                     id: LEGACY_ENDPOINT_ID.into(),
                     name: "Published".into(),
                     host: h.trim().to_string(),
+                    ..Default::default()
                 })
                 .into_iter()
                 .collect(),
@@ -361,6 +384,7 @@ impl MeshSettings {
                     id: LEGACY_ENDPOINT_ID.into(),
                     name: "Published".into(),
                     url: u.trim().trim_end_matches('/').to_string(),
+                    ..Default::default()
                 })
                 .into_iter()
                 .collect(),
@@ -370,6 +394,84 @@ impl MeshSettings {
 
 /// The id the pre-list `os_host`/`mesh_url` values are read under.
 pub const LEGACY_ENDPOINT_ID: &str = "published";
+
+/// The id of the endpoints derived from the deployment's public routes
+/// (ADR-072 amendment 4). Reserved: an operator's endpoint cannot take it.
+pub const ROUTE_ENDPOINT_ID: &str = "ingress";
+
+/// The in-cluster Service a `VELOX_MESH_URL` names — `http://<svc>.<ns>.svc
+/// [.<cluster domain>][:port]` — as `(service, namespace, port)`: what an
+/// Ingress backend for the Mesh's agent face needs. `None` for any other
+/// shape (a loopback dev Mesh, an external URL, an https backend), and then
+/// no route is made: an Ingress can only point at a Service in its own
+/// namespace over plain HTTP, which is what the Mesh serves in-cluster.
+pub fn in_cluster_service(url: &str) -> Option<(String, String, u16)> {
+    let rest = url.trim().strip_prefix("http://")?;
+    let authority = rest.split('/').next()?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().ok().filter(|p| *p != 0)?),
+        None => (authority, 80),
+    };
+    let mut parts = host.split('.');
+    let svc = parts.next()?;
+    let ns = parts.next()?;
+    if parts.next()? != "svc" || svc.is_empty() || ns.is_empty() {
+        return None;
+    }
+    Some((svc.to_string(), ns.to_string(), port))
+}
+
+/// The settings as the deployment's policies and screens see them: what the
+/// operator stored, plus — in ingress mode — the deployment's public routes
+/// as one endpoint of each kind, first, under [`ROUTE_ENDPOINT_ID`]
+/// (ADR-072 amendment 4). The OpenSearch one is `https://<name>-opensearch.
+/// <domain>:443`; the Mesh one `https://<name>-mesh.<domain>:443`, only when
+/// `mesh_routed` (the core can route to the Mesh at all). Derived on every
+/// read, never stored, so a changed base domain moves every policy bound to
+/// them at its next save, and leaving ingress mode takes them away (a policy
+/// still bound to one is then refused at compile, by name).
+pub fn with_route_endpoints(
+    mut stored: MeshSettings,
+    access: &crate::access::AccessConfig,
+    name: &str,
+    mesh_routed: bool,
+) -> MeshSettings {
+    stored.os_endpoints.retain(|e| e.id != ROUTE_ENDPOINT_ID);
+    stored.mesh_endpoints.retain(|e| e.id != ROUTE_ENDPOINT_ID);
+    let insecure = access.routes_self_signed();
+    if let Some(host) = access.opensearch_endpoint(name) {
+        stored.os_endpoints.insert(
+            0,
+            OsEndpoint {
+                id: ROUTE_ENDPOINT_ID.into(),
+                name: "Public URL".into(),
+                host,
+                managed: true,
+                insecure,
+            },
+        );
+    }
+    if let Some(url) = access.mesh_endpoint(name).filter(|_| mesh_routed) {
+        stored.mesh_endpoints.insert(
+            0,
+            MeshEndpoint {
+                id: ROUTE_ENDPOINT_ID.into(),
+                name: "Public URL".into(),
+                url,
+                managed: true,
+                insecure,
+            },
+        );
+    }
+    stored
+}
+
+/// What a save writes: the operator's endpoints alone.
+pub fn without_route_endpoints(mut s: MeshSettings) -> MeshSettings {
+    s.os_endpoints.retain(|e| !e.managed);
+    s.mesh_endpoints.retain(|e| !e.managed);
+    s
+}
 
 /// An endpoint id is a slug: it travels in JSON on a CR annotation and in a
 /// policy document, and is matched by equality. Same shape as a component id.
@@ -396,6 +498,11 @@ pub fn validate_settings(s: &MeshSettings) -> Result<(), String> {
         if !seen.insert(e.id.as_str()) {
             return Err(format!("OpenSearch endpoint id {:?} is repeated", e.id));
         }
+        if e.id == ROUTE_ENDPOINT_ID && !e.managed {
+            return Err(format!(
+                "endpoint id {ROUTE_ENDPOINT_ID:?} is reserved for the deployment's public URL"
+            ));
+        }
         if e.name.trim().is_empty() {
             return Err(format!("OpenSearch endpoint {} needs a name", e.id));
         }
@@ -413,6 +520,11 @@ pub fn validate_settings(s: &MeshSettings) -> Result<(), String> {
         }
         if !seen.insert(e.id.as_str()) {
             return Err(format!("Velox Mesh endpoint id {:?} is repeated", e.id));
+        }
+        if e.id == ROUTE_ENDPOINT_ID && !e.managed {
+            return Err(format!(
+                "endpoint id {ROUTE_ENDPOINT_ID:?} is reserved for the deployment's public URL"
+            ));
         }
         if e.name.trim().is_empty() {
             return Err(format!("Velox Mesh endpoint {} needs a name", e.id));
@@ -484,11 +596,18 @@ pub struct EndpointProbe {
 /// Probe every configured Mesh endpoint, in parallel. The controller the
 /// core itself uses is `status()`; this is about the addresses hosts use.
 pub async fn probe_endpoints(s: &MeshSettings) -> Vec<EndpointProbe> {
-    let client = reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
-        .redirect(reqwest::redirect::Policy::none())
-        .build();
-    let Ok(client) = client else {
+    // Two clients: an endpoint marked `insecure` is probed the way its agents
+    // will talk to it (`velox-agent enroll --insecure`), every other one with
+    // verification — so "reachable" means what it will mean on the host.
+    let build = |insecure: bool| {
+        reqwest::Client::builder()
+            .timeout(PROBE_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .danger_accept_invalid_certs(insecure)
+            .build()
+    };
+    let clients = build(false).and_then(|v| build(true).map(|i| (v, i)));
+    let Ok((verifying, lenient)) = clients else {
         return s
             .mesh_endpoints
             .iter()
@@ -501,7 +620,7 @@ pub async fn probe_endpoints(s: &MeshSettings) -> Vec<EndpointProbe> {
             .collect();
     };
     let probes = s.mesh_endpoints.iter().map(|e| {
-        let client = client.clone();
+        let client = if e.insecure { &lenient } else { &verifying }.clone();
         let id = e.id.clone();
         let url = format!("{}/healthz", e.url.trim_end_matches('/'));
         async move {
@@ -899,7 +1018,10 @@ async fn save_policy_v2(
         activations.push(act);
     }
 
-    let ctx = compile2::Context::new(&os);
+    let mut ctx = compile2::Context::new(&os);
+    // An endpoint served under a certificate hosts cannot verify (the
+    // deployment's public route on a lab domain, ADR-072 amendment 4).
+    ctx.opensearch_tls_verify = !os_endpoint.insecure;
     let activated: Vec<compile2::Activated<'_>> = packages
         .iter()
         .zip(&activations)
@@ -1170,6 +1292,7 @@ mod tests {
                     id: id.to_string(),
                     name: id.to_uppercase(),
                     host: host.to_string(),
+                    ..Default::default()
                 })
                 .collect(),
             mesh_endpoints: mesh
@@ -1178,9 +1301,100 @@ mod tests {
                     id: id.to_string(),
                     name: id.to_uppercase(),
                     url: url.to_string(),
+                    ..Default::default()
                 })
                 .collect(),
         }
+    }
+
+    /// ADR-072 amendment 4: only an in-cluster `http://<svc>.<ns>.svc` URL
+    /// names a Service an Ingress can point at.
+    #[test]
+    fn the_mesh_service_is_read_off_an_in_cluster_url_only() {
+        assert_eq!(
+            in_cluster_service("http://velox-mesh.veloxsearch-system.svc:4320"),
+            Some(("velox-mesh".into(), "veloxsearch-system".into(), 4320))
+        );
+        assert_eq!(
+            in_cluster_service("http://velox-mesh.ops.svc.cluster.local:4320/"),
+            Some(("velox-mesh".into(), "ops".into(), 4320))
+        );
+        assert_eq!(
+            in_cluster_service("http://mesh.ops.svc"),
+            Some(("mesh".into(), "ops".into(), 80))
+        );
+        for no in [
+            "http://127.0.0.1:4320",
+            "https://velox-mesh.veloxsearch-system.svc:4320",
+            "http://mesh.example.com:4320",
+            "http://velox-mesh.veloxsearch-system.svc:0",
+            "",
+        ] {
+            assert_eq!(in_cluster_service(no), None, "{no}");
+        }
+    }
+
+    /// In ingress mode the deployment's public routes come first, managed,
+    /// marked insecure on a lab domain; an operator's endpoint under the
+    /// reserved id is replaced, and a save writes the operator's alone.
+    #[test]
+    fn route_endpoints_are_derived_first_and_never_stored() {
+        let access = crate::access::AccessConfig {
+            mode: "ingress".into(),
+            base_domain: "192.168.1.200.sslip.io".into(),
+            ingress_class: "traefik".into(),
+            tls_secret: String::new(),
+        };
+        let stored = settings(
+            &[("lan", "10.0.0.5"), (ROUTE_ENDPOINT_ID, "stale")],
+            &[("lan", "http://10.0.0.5:4320")],
+        );
+        let s = with_route_endpoints(stored.clone(), &access, "tornis-096o", true);
+        assert_eq!(s.os_endpoints.len(), 2);
+        let os = &s.os_endpoints[0];
+        assert_eq!(os.id, ROUTE_ENDPOINT_ID);
+        assert_eq!(
+            os.host,
+            "https://tornis-096o-opensearch.192.168.1.200.sslip.io:443"
+        );
+        assert!(os.managed && os.insecure);
+        let mesh = &s.mesh_endpoints[0];
+        assert_eq!(
+            mesh.url,
+            "https://tornis-096o-mesh.192.168.1.200.sslip.io:443"
+        );
+        assert!(mesh.managed && mesh.insecure);
+        // The derived addresses parse as their consumers read them.
+        let a = velox_policy::OsAddress::parse(&os.host).unwrap();
+        assert_eq!((a.port, a.tls), (443, true));
+        assert_eq!(validate_settings(&s), Ok(()));
+
+        let saved = without_route_endpoints(s);
+        assert_eq!(saved.os_endpoints.len(), 1);
+        assert_eq!(saved.os_endpoints[0].id, "lan");
+        assert_eq!(saved.mesh_endpoints.len(), 1);
+        assert!(!serde_json::to_string(&saved).unwrap().contains("managed"));
+
+        // No Mesh route without a routable Mesh; nothing at all on port-forward.
+        let no_mesh = with_route_endpoints(stored.clone(), &access, "x", false);
+        assert!(no_mesh.mesh_endpoints.iter().all(|e| !e.managed));
+        let pf = with_route_endpoints(stored, &crate::access::AccessConfig::default(), "x", true);
+        assert!(pf.os_endpoints.iter().all(|e| !e.managed));
+
+        // A TLS Secret means a certificate hosts can verify.
+        let mut tls = access.clone();
+        tls.tls_secret = "wildcard".into();
+        let v = with_route_endpoints(MeshSettings::default(), &tls, "x", true);
+        assert!(!v.os_endpoints[0].insecure && !v.mesh_endpoints[0].insecure);
+    }
+
+    /// The reserved id is the core's: an operator's endpoint cannot take it.
+    #[test]
+    fn the_route_endpoint_id_is_reserved() {
+        let s = settings(&[(ROUTE_ENDPOINT_ID, "10.0.0.5")], &[]);
+        assert!(validate_settings(&s).unwrap_err().contains("reserved"));
+        let s = settings(&[], &[(ROUTE_ENDPOINT_ID, "http://10.0.0.5:4320")]);
+        assert!(validate_settings(&s).unwrap_err().contains("reserved"));
     }
 
     /// Each address in the shape its consumer expects — `host`,

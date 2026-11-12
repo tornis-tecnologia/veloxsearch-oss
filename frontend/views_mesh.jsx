@@ -165,6 +165,12 @@ function policyEndpoints(ids, settings) {
   return { osId, meshId, os, mesh, complete: !!(os && mesh) };
 }
 
+/* An endpoint's name as shown: the core names the derived public-route
+   endpoint in English (it is data on the wire), the screen in its language. */
+function epName(t, e) {
+  return e && e.managed ? t.mesh_ep_route_name : (e ? e.name : "");
+}
+
 function slugOf(n) {
   return n.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
 }
@@ -216,7 +222,7 @@ function OsAddressHint({ t, value, testid }) {
 function EndpointValue({ t, id, ep }) {
   if (!id) return <span className="hint" data-state="missing">{t.mesh_ep_missing}</span>;
   if (!ep) return <span className="hint" data-state="gone" title={id}><span className="mono">{id}</span> · {t.mesh_ep_gone}</span>;
-  return <span data-state="ok">{ep.name} <span className="mono hint">{ep.host || ep.url}</span></span>;
+  return <span data-state="ok">{epName(t, ep)} <span className="mono hint">{ep.host || ep.url}</span></span>;
 }
 
 /* The two endpoints of a policy, as the card, the agent's editor and the
@@ -669,7 +675,7 @@ function MeshInstallGuide({ lang, onToast }) {
    inside the add-agent dialog with the policy already chosen, so the enrol
    command is complete when a token has been minted and a placeholder
    otherwise. ---------------------------------------------------------- */
-function InstallGuide({ t, target, onTarget, meshUrl, token, onToast }) {
+function InstallGuide({ t, target, onTarget, meshUrl, insecure, token, onToast }) {
   const d = TARGETS.find(x => x.key === target) || TARGETS[0];
   const mesh = meshUrl || "MESH_URL";
   const tok = token || "TOKEN";
@@ -729,8 +735,9 @@ function InstallGuide({ t, target, onTarget, meshUrl, token, onToast }) {
         </Step>
         <Step n={++n} title={t.mesh_step_enroll} t={t}>
           <CmdBlock testid="enroll-cmd" t={t} onToast={onToast}
-            text={(d.enroll || "sudo velox-agent enroll --mesh MESH_URL --token TOKEN").replace("MESH_URL", mesh).replace("TOKEN", tok)} />
+            text={(d.enroll || "sudo velox-agent enroll --mesh MESH_URL --token TOKEN").replace("MESH_URL", mesh).replace("TOKEN", tok) + (insecure ? " --insecure" : "")} />
           {(!meshUrl || !token) && <p className="hint" style={{ marginTop: 8 }}>{t.mesh_placeholder_note}</p>}
+          {insecure && <p className="hint" style={{ marginTop: 8 }} data-testid="enroll-insecure-note">{t.mesh_enroll_insecure}</p>}
         </Step>
         <Step n={++n} title={t.mesh_step_verify} t={t}>
           <p className="hint" style={{ margin: "0 0 8px" }}>{t.mesh_step_verify_p}</p>
@@ -868,7 +875,7 @@ function AddAgentPage({ t, lang, d, overview, settings, initialPolicy, onBack, o
           <div className="view-enter" data-testid="add-agent-install-card">
             <h4 className="section-title">{t.mesh_add_agent_steps_h}</h4>
             <InstallGuide t={t} target={target} onTarget={setTarget} onToast={onToast}
-              meshUrl={eps.mesh ? eps.mesh.url : null} token={token} />
+              meshUrl={eps.mesh ? eps.mesh.url : null} insecure={!!(eps.mesh && eps.mesh.insecure)} token={token} />
             <div data-testid="add-agent-watch" data-seen={arrived.length ? "1" : "0"} style={{ marginTop: 16 }}>
               <Banner tone={arrived.length ? "ok" : "info"} title={arrived.length ? t.mesh_add_agent_seen_h : t.mesh_add_agent_watch_h}>
                 {arrived.length
@@ -900,13 +907,13 @@ function EndpointPickers({ t, settings, os, mesh, onOs, onMesh, disabled, prefix
       <Field label={t.mesh_pol_os_endpoint} htmlFor={`${prefix}-os`}>
         <select className="select" id={`${prefix}-os`} value={os} onChange={e => onOs(e.target.value)} disabled={disabled} data-testid={`${prefix}-os-endpoint`}>
           <option value="" disabled>{t.mesh_add_agent_pick}</option>
-          {osEps.map(e => <option key={e.id} value={e.id}>{e.name} · {e.host}</option>)}
+          {osEps.map(e => <option key={e.id} value={e.id}>{epName(t, e)} · {e.host}</option>)}
         </select>
       </Field>
       <Field label={t.mesh_pol_mesh_endpoint} htmlFor={`${prefix}-mesh`}>
         <select className="select" id={`${prefix}-mesh`} value={mesh} onChange={e => onMesh(e.target.value)} disabled={disabled} data-testid={`${prefix}-mesh-endpoint`}>
           <option value="" disabled>{t.mesh_add_agent_pick}</option>
-          {meshEps.map(e => <option key={e.id} value={e.id}>{e.name} · {e.url}</option>)}
+          {meshEps.map(e => <option key={e.id} value={e.id}>{epName(t, e)} · {e.url}</option>)}
         </select>
       </Field>
     </div>
@@ -980,15 +987,21 @@ function EndpointListEditor({ t, kind, items, onChange, usage, suggest, disabled
           <tbody>
             {items.map(e => (
               <tr key={e.id} data-testid={`${testid}-row-${e.id}`}>
-                <td>{e.name} <span className="hint mono" style={{ fontSize: 11 }}>{e.id}</span></td>
+                <td>
+                  {epName(t, e)} <span className="hint mono" style={{ fontSize: 11 }}>{e.id}</span>
+                  {e.managed && <div><span className="pill sm" data-testid={`${testid}-row-${e.id}-auto`} title={t.mesh_ep_auto_hint}>{t.mesh_ep_auto}</span></div>}
+                </td>
                 <td className="mono">
                   {e[addrKey]}
+                  {e.insecure && <div style={{ fontFamily: "var(--font-sans)" }}><span className="hint" data-testid={`${testid}-row-${e.id}-insecure`}>{t.mesh_ep_insecure}</span></div>}
                   {kind === "os" && <div style={{ fontFamily: "var(--font-sans)" }}><OsAddressHint t={t} value={e.host} testid={`${testid}-row-${e.id}-resolved`} /></div>}
                 </td>
                 <td className="hint">{t.mesh_ep_in_use.replace("{n}", (usage && usage[e.id]) || 0)}</td>
                 <td style={{ textAlign: "right" }}>
-                  <Btn variant="ghost" size="sm" icon="trash" disabled={disabled} data-testid={`${testid}-remove-${e.id}`}
-                    onClick={() => onChange(items.filter(x => x.id !== e.id))}>{t.mesh_ep_remove}</Btn>
+                  {!e.managed && (
+                    <Btn variant="ghost" size="sm" icon="trash" disabled={disabled} data-testid={`${testid}-remove-${e.id}`}
+                      onClick={() => onChange(items.filter(x => x.id !== e.id))}>{t.mesh_ep_remove}</Btn>
+                  )}
                 </td>
               </tr>
             ))}
@@ -1060,7 +1073,7 @@ function DaemonsTable({ t, status, settings, probes, policies, agents, onRefresh
             const c = count(e.id);
             return (
               <tr key={e.id} data-testid={`mesh-daemon-${e.id}`} data-reachable={pr ? (pr.reachable ? "1" : "0") : ""}>
-                <td>{e.name} <span className="hint mono" style={{ fontSize: 11 }}>{e.id}</span></td>
+                <td>{epName(t, e)} <span className="hint mono" style={{ fontSize: 11 }}>{e.id}</span></td>
                 <td className="mono">{e.url}</td>
                 <td>{pr ? state(pr.reachable, pr.error) : <span className="hint">{t.mesh_daemon_probing}</span>}</td>
                 <td className="mono">{c.policies}</td>

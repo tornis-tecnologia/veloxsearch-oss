@@ -94,6 +94,14 @@ pub struct Identity {
     pub mesh: String,
     pub instance_uid: String,
     pub credential: String,
+    /// Enrolled with `--insecure`: the Mesh's certificate is not verified on
+    /// any request this identity makes. For a Mesh behind an ingress that
+    /// serves its controller's self-signed default certificate (a lab on
+    /// sslip.io, ADR-072 amendment 4) — the operator's explicit choice at
+    /// enrol, remembered so `run` keeps talking to the same Mesh the same way.
+    /// Absent in identities written before it existed: verify, as they did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure: bool,
 }
 
 impl Identity {
@@ -125,7 +133,7 @@ impl Identity {
 /// that running it again enrols a SECOND agent — the Mesh has no way to know
 /// two enrollments are the same host, and silently reusing an identity would
 /// hide a cloned image.
-pub async fn enrol(mesh: &str, token: &str) -> Result<Identity, String> {
+pub async fn enrol(mesh: &str, token: &str, insecure: bool) -> Result<Identity, String> {
     let mesh = mesh.trim_end_matches('/').to_string();
     let hostname = hostname();
     let body = serde_json::json!({
@@ -137,7 +145,7 @@ pub async fn enrol(mesh: &str, token: &str) -> Result<Identity, String> {
             "velox.agent.version": env!("CARGO_PKG_VERSION"),
         }
     });
-    let res = client()?
+    let res = client(insecure)?
         .post(format!("{mesh}/v1/enroll"))
         .json(&body)
         .send()
@@ -158,12 +166,17 @@ pub async fn enrol(mesh: &str, token: &str) -> Result<Identity, String> {
         mesh,
         instance_uid: out.instance_uid,
         credential: out.credential,
+        insecure,
     })
 }
 
-fn client() -> Result<reqwest::Client, String> {
+/// The HTTP client every Mesh request goes through. WebPKI roots only
+/// (reqwest's `rustls-tls-webpki-roots-no-provider`), so `insecure` is the one
+/// way past a certificate no public CA signed — chosen at enrol, never implied.
+fn client(insecure: bool) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
+        .danger_accept_invalid_certs(insecure)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -516,7 +529,7 @@ pub async fn run() -> Result<(), String> {
         let _ = engine.start();
     }
 
-    let http = client()?;
+    let http = client(id.insecure)?;
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -743,7 +756,7 @@ async fn report_fatal(id: &Identity, message: &str) -> Result<(), String> {
         }),
         capabilities: vec![velox_opamp::AgentCapabilities::ReportsHealth],
     };
-    client()?
+    client(id.insecure)?
         .post(format!("{}{}", id.mesh, velox_opamp::DEFAULT_PATH))
         .bearer_auth(&id.credential)
         .json(&msg)
@@ -835,6 +848,7 @@ mod tests {
             mesh: "http://mesh:4320".into(),
             instance_uid: "uid-1".into(),
             credential: "s3cr3t".into(),
+            insecure: false,
         };
         id.save(&p).expect("save");
 
@@ -855,6 +869,16 @@ mod tests {
         assert_eq!(back.instance_uid, "uid-1");
         assert_eq!(back.credential, "s3cr3t");
         assert_eq!(back.mesh, "http://mesh:4320");
+        assert!(!back.insecure);
+        // Verifying is the default for every identity written before the
+        // flag existed, and `false` is not written at all.
+        assert!(!std::fs::read_to_string(p.identity())
+            .unwrap()
+            .contains("insecure"));
+        let old: Identity =
+            serde_json::from_str(r#"{"mesh":"https://m","instance_uid":"u","credential":"c"}"#)
+                .unwrap();
+        assert!(!old.insecure);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

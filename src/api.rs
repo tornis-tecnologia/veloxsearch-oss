@@ -2655,23 +2655,30 @@ mod server {
         Json(req): Json<MeshSaveSettingsReq>,
     ) -> Result<StatusCode, ApiError> {
         let dep = scope.require(&req.deployment).await?;
-        crate::mesh::validate_settings(&req.settings).map_err(ApiError::bad_request)?;
-        let current = crate::k8s::mesh_settings(&dep)
-            .await
-            .map_err(ApiError::internal)?;
+        // The screen sends back the derived public-route endpoints with the
+        // rest; they are the core's, not the operator's, so they are dropped
+        // before anything is checked or written (ADR-072 amendment 4) — on
+        // both sides of the comparison, or keeping them would read as a removal.
+        let next = crate::mesh::without_route_endpoints(req.settings);
+        crate::mesh::validate_settings(&next).map_err(ApiError::bad_request)?;
+        let current = crate::mesh::without_route_endpoints(
+            crate::k8s::mesh_settings(&dep)
+                .await
+                .map_err(ApiError::internal)?,
+        );
         // Only when a Mesh holds policies to check against; without one no
         // policy can exist. A configured Mesh that does not answer is an
         // error here — removing an endpoint blind is the thing this guards.
         let rows = crate::mesh::policy_endpoint_rows(&dep)
             .await
             .map_err(mesh_err)?;
-        let in_use = crate::mesh::removed_endpoints_in_use(&current, &req.settings, &rows);
+        let in_use = crate::mesh::removed_endpoints_in_use(&current, &next, &rows);
         if let Some((policy, endpoint)) = in_use.first() {
             return Err(ApiError::bad_request(format!(
                 "endpoint `{endpoint}` is still used by policy {policy}; rebind the policy first"
             )));
         }
-        crate::k8s::set_mesh_settings(&dep, &req.settings)
+        crate::k8s::set_mesh_settings(&dep, &next)
             .await
             .map_err(ApiError::internal)?;
         Ok(StatusCode::OK)

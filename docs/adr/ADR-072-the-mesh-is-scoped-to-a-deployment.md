@@ -231,6 +231,36 @@ sub-tabs redundant. Three decisions:
   fleet that says when a new host reports). An operator does this with a
   terminal open on the host; a dialog is lost on the first mis-click.
 
+## Amendment 4 (2026-11-12): the public route is an endpoint
+
+When the installation reaches deployments by public URL (Settings → Access,
+ingress mode, ADR-027), every deployment already has
+`https://<name>-opensearch.<domain>`; operators then typed the same address
+again as a named endpoint, and had no address at all for the Mesh outside
+the cluster. The rule `<deployment>-<service>.<domain>` now covers both:
+
+- **The core routes the Mesh's agent face per deployment**:
+  `<name>-mesh.<domain>` → the Mesh's in-cluster Service, paths `/v1`
+  (enrol + OpAMP) and `/healthz` only, TLS only (Traefik `websecure`). The
+  Ingress lives in the Mesh's namespace (a backend is a Service of its own
+  namespace), carries the owning deployment in an annotation and is removed
+  with the deployment only when it is that deployment's. Made where the
+  deployment's other routes are made (create, the access save, the startup
+  backfill), and only when `VELOX_MESH_URL` names an in-cluster Service.
+- **The two routes are endpoints the core derives**, id `ingress` (reserved),
+  first in each list, `managed`, never stored: `https://<name>-opensearch.
+  <domain>:443` and `https://<name>-mesh.<domain>:443`. A changed base domain
+  moves them; leaving ingress mode takes them away, and a policy still bound
+  to one is refused at its next compile, by name.
+- **Self-signed is said, not hidden.** On a wildcard-DNS domain (`sslip.io`)
+  with no TLS Secret the ingress answers with its controller's default
+  certificate, which no host can verify. Those endpoints are `insecure`: the
+  compiler writes `tls.verify Off` on the OpenSearch output bound to it, the
+  console writes `--insecure` into the enrol command, and the agent
+  (`velox-agent enroll --insecure`, Fleet's flag) remembers it in its
+  identity. A real domain without a Secret is assumed to sit behind an edge
+  with a public certificate and keeps verifying.
+
 ## Consequences
 
 - One schema migration (`003_deployment_scope.sql`) adds the pair to
