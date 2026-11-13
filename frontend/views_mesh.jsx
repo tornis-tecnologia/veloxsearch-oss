@@ -80,14 +80,50 @@ function yumRepo(flavour, releasever) {
     "repo_gpgcheck=1", "enabled=1", "EOF"].join("\n");
 }
 
-const APT_AGENT = "sudo apt-get install ./velox-agent_0.1.0_amd64.deb";
-const RPM_AGENT = "sudo dnf install ./velox-agent-0.1.0.x86_64.rpm";
+/* The agent release the guide installs (ADR-069 amendment 1): the
+   `velox-agent-v<version>` GitHub release — static musl tarballs, SHA256SUMS,
+   install.sh — and the image built from the same Dockerfile. Bumped with
+   veloxagent/Cargo.toml. */
+const AGENT_VERSION = "0.2.0";
+const AGENT_RELEASE = `https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/velox-agent-v${AGENT_VERSION}`;
+const AGENT_IMAGE = `docker.io/tornistecnologia/velox-agent:${AGENT_VERSION}`;
+
+/* The three ways onto a host. `script` does everything (distribution,
+   Fluent Bit from upstream, the agent, the velox-agent user, the systemd
+   unit, the enrol); `docker` is the image; `manual` is the per-distribution
+   procedure, ending in the same install.sh with the engine already there. */
+function scriptCmd(mesh, tok, insecure) {
+  return [`curl -fsSLO ${AGENT_RELEASE}/install.sh`,
+    `sudo bash install.sh --mesh ${mesh} --token ${tok}${insecure ? " --insecure" : ""}`].join("\n");
+}
+function manualAgentCmd(mesh, tok, insecure) {
+  const tgz = `velox-agent-${AGENT_VERSION}-$(uname -m)-unknown-linux-musl.tar.gz`;
+  return [`curl -fsSLO ${AGENT_RELEASE}/${tgz}`,
+    `curl -fsSLO ${AGENT_RELEASE}/SHA256SUMS`,
+    `curl -fsSLO ${AGENT_RELEASE}/install.sh`,
+    "sha256sum -c --ignore-missing SHA256SUMS",
+    `tar -xzf ${tgz} velox-agent`,
+    `sudo bash install.sh --binary ./velox-agent --skip-fluent-bit --mesh ${mesh} --token ${tok}${insecure ? " --insecure" : ""}`].join("\n");
+}
+function dockerCmd(mesh, tok, insecure) {
+  return ["docker run -d --name velox-agent --restart unless-stopped \\",
+    `  -e VELOX_MESH_URL=${mesh} -e VELOX_ENROLL_TOKEN=${tok} \\`,
+    ...(insecure ? ["  -e VELOX_AGENT_INSECURE=true \\"] : []),
+    '  -e VELOX_AGENT_HOSTNAME="$(hostname)" \\',
+    "  -v velox-agent-state:/opt/velox-agent/state \\",
+    "  -v /var/log:/var/log:ro \\",
+    "  -v /var/lib/docker/containers:/var/lib/docker/containers:ro \\",
+    "  -v /etc/machine-id:/etc/machine-id:ro \\",
+    "  --user 0:0 --cap-drop ALL --cap-add DAC_READ_SEARCH \\",
+    "  --security-opt no-new-privileges:true --read-only --tmpfs /tmp \\",
+    `  ${AGENT_IMAGE}`].join("\n");
+}
 
 const TARGETS = [
   {
     key: "amazon", label: "Amazon Linux",
     docs: `${DOCS}/linux/amazon-linux`,
-    repo: yumRepo("amazonlinux", "2023"), install: "sudo dnf install fluent-bit", agent: RPM_AGENT,
+    repo: yumRepo("amazonlinux", "2023"), install: "sudo dnf install fluent-bit", host: true,
   },
   {
     key: "buildroot", label: "Buildroot", linkOnly: true,
@@ -97,7 +133,7 @@ const TARGETS = [
   {
     key: "debian", label: "Debian",
     docs: `${DOCS}/linux/debian`, note: "mesh_note_no_pkg",
-    repo: aptRepo("debian"), install: "sudo apt-get install fluent-bit", agent: APT_AGENT,
+    repo: aptRepo("debian"), install: "sudo apt-get install fluent-bit", host: true,
   },
   {
     key: "raspbian", label: "Raspbian · Raspberry Pi",
@@ -105,25 +141,24 @@ const TARGETS = [
     repo: ["sudo sh -c 'curl https://packages.fluentbit.io/fluentbit.key | sudo apt-key add - '",
       'echo "deb https://packages.fluentbit.io/raspbian/bookworm bookworm main" | sudo tee /etc/apt/sources.list.d/fluent-bit.list',
       "sudo apt-get update"].join("\n"),
-    install: "sudo apt-get install fluent-bit",
-    agent: "sudo apt-get install ./velox-agent_0.1.0_arm64.deb",
+    install: "sudo apt-get install fluent-bit", host: true,
   },
   {
     key: "redhat", label: "Red Hat · CentOS",
     docs: `${DOCS}/linux/redhat-centos`, note: "mesh_note_rhel9",
     repo: yumRepo("centos", "$releasever"), install: "sudo dnf install fluent-bit",
     alt: { label: "EPEL (RHEL 9)", cmd: "sudo dnf install epel-release\nsudo dnf install fluent-bit" },
-    agent: RPM_AGENT,
+    host: true,
   },
   {
     key: "rocky", label: "Rocky · Alma",
     docs: `${DOCS}/linux/alma-rocky`,
-    repo: yumRepo("almalinux", "$releasever"), install: "sudo dnf install fluent-bit", agent: RPM_AGENT,
+    repo: yumRepo("almalinux", "$releasever"), install: "sudo dnf install fluent-bit", host: true,
   },
   {
     key: "ubuntu", label: "Ubuntu",
     docs: `${DOCS}/linux/ubuntu`, note: "mesh_note_no_pkg",
-    repo: aptRepo("ubuntu"), install: "sudo apt-get install fluent-bit", agent: APT_AGENT,
+    repo: aptRepo("ubuntu"), install: "sudo apt-get install fluent-bit", host: true,
   },
   {
     key: "yocto", label: "Yocto", linkOnly: true,
@@ -746,15 +781,64 @@ function MeshInstallGuide({ lang, onToast }) {
 }
 
 /* ---- the host install guide --------------------------------------------
-   Fluent Bit from the project's repository, then the Velox Agent, then
-   enrol with the policy's Mesh address and token, then `doctor`. Rendered
-   inside the add-agent dialog with the policy already chosen, so the enrol
-   command is complete when a token has been minted and a placeholder
-   otherwise. ---------------------------------------------------------- */
+   Three ways onto a host (ADR-069 amendment 1): the script (recommended),
+   the container image, or the per-distribution procedure. Rendered on the
+   add-agent page with the policy already chosen, so every command that
+   enrols is complete once a token has been minted, and a placeholder before.
+   Exactly one block per panel carries `enroll-cmd`: the one that enrols. -- */
+const METHODS = ["script", "docker", "manual"];
+
 function InstallGuide({ t, target, onTarget, meshUrl, insecure, token, onToast }) {
-  const d = TARGETS.find(x => x.key === target) || TARGETS[0];
+  const [method, setMethod] = useState("script");
   const mesh = meshUrl || "MESH_URL";
   const tok = token || "TOKEN";
+  const placeholders = (!meshUrl || !token) && <p className="hint" style={{ marginTop: 8 }}>{t.mesh_placeholder_note}</p>;
+  const insecureNote = insecure && <p className="hint" style={{ marginTop: 8 }} data-testid="enroll-insecure-note">{t.mesh_enroll_insecure}</p>;
+  return (
+    <>
+      <Tabs items={METHODS.map(k => ({ key: k, label: t[`mesh_method_${k}`] }))}
+        value={method} onChange={setMethod} label={t.mesh_method_label} testidPrefix="install-method" />
+      {method === "script" && (
+        <div className="ag-panel" data-testid="install-panel-script">
+          <p className="hint" style={{ margin: "0 0 14px", maxWidth: "75ch" }}>{t.mesh_script_p}</p>
+          <Step n={1} title={t.mesh_step_script} t={t}>
+            <CmdBlock testid="enroll-cmd" t={t} onToast={onToast} text={scriptCmd(mesh, tok, insecure)} />
+            {placeholders}{insecureNote}
+            <p className="hint" style={{ marginTop: 8 }}>{t.mesh_script_layout}</p>
+            <p className="hint" style={{ marginTop: 4 }}>{t.mesh_script_flags}</p>
+          </Step>
+          <Step n={2} title={t.mesh_step_verify} t={t}>
+            <p className="hint" style={{ margin: "0 0 8px" }}>{t.mesh_step_verify_p}</p>
+            <CmdBlock text={"sudo velox-agent doctor\nsystemctl status velox-agent"} t={t} onToast={onToast} />
+          </Step>
+        </div>
+      )}
+      {method === "docker" && (
+        <div className="ag-panel" data-testid="install-panel-docker">
+          <p className="hint" style={{ margin: "0 0 14px", maxWidth: "75ch" }}>{t.mesh_docker_p}</p>
+          <Step n={1} title={t.mesh_step_docker} t={t}>
+            <CmdBlock testid="enroll-cmd" t={t} onToast={onToast} text={dockerCmd(mesh, tok, insecure)} />
+            {placeholders}{insecureNote}
+            <p className="hint" style={{ marginTop: 8 }}>{t.mesh_docker_compose}</p>
+          </Step>
+          <Step n={2} title={t.mesh_step_verify} t={t}>
+            <CmdBlock text={"docker logs velox-agent\ndocker exec velox-agent /opt/velox-agent/bin/velox-agent doctor"} t={t} onToast={onToast} />
+          </Step>
+        </div>
+      )}
+      {method === "manual" && (
+        <ManualGuide t={t} target={target} onTarget={onTarget} mesh={mesh} tok={tok}
+          insecure={insecure} onToast={onToast} placeholders={placeholders} insecureNote={insecureNote} />
+      )}
+    </>
+  );
+}
+
+/* Fluent Bit from the project's repository, then the agent — on a Linux
+   host that is install.sh with the engine already in place, so the layout,
+   user and unit are the script's either way — then `doctor`. */
+function ManualGuide({ t, target, onTarget, mesh, tok, insecure, onToast, placeholders, insecureNote }) {
+  const d = TARGETS.find(x => x.key === target) || TARGETS[0];
   let n = 0;
   return (
     <>
@@ -806,18 +890,27 @@ function InstallGuide({ t, target, onTarget, meshUrl, insecure, token, onToast }
           </>
         )}
 
-        <Step n={++n} title={t.mesh_step_agent} soon t={t}>
-          <CmdBlock text={d.agent} t={t} onToast={onToast} />
-        </Step>
-        <Step n={++n} title={t.mesh_step_enroll} t={t}>
-          <CmdBlock testid="enroll-cmd" t={t} onToast={onToast}
-            text={(d.enroll || "sudo velox-agent enroll --mesh MESH_URL --token TOKEN").replace("MESH_URL", mesh).replace("TOKEN", tok) + (insecure ? " --insecure" : "")} />
-          {(!meshUrl || !token) && <p className="hint" style={{ marginTop: 8 }}>{t.mesh_placeholder_note}</p>}
-          {insecure && <p className="hint" style={{ marginTop: 8 }} data-testid="enroll-insecure-note">{t.mesh_enroll_insecure}</p>}
-        </Step>
+        {d.host ? (
+          <Step n={++n} title={t.mesh_step_agent} t={t}>
+            <p className="hint" style={{ margin: "0 0 8px" }}>{t.mesh_agent_manual_p}</p>
+            <CmdBlock testid="enroll-cmd" t={t} onToast={onToast} text={manualAgentCmd(mesh, tok, insecure)} />
+            {placeholders}{insecureNote}
+          </Step>
+        ) : (
+          <>
+            <Step n={++n} title={t.mesh_step_agent} soon t={t}>
+              <CmdBlock text={d.agent} t={t} onToast={onToast} />
+            </Step>
+            <Step n={++n} title={t.mesh_step_enroll} t={t}>
+              <CmdBlock testid="enroll-cmd" t={t} onToast={onToast}
+                text={(d.enroll || "sudo velox-agent enroll --mesh MESH_URL --token TOKEN").replace("MESH_URL", mesh).replace("TOKEN", tok) + (insecure ? " --insecure" : "")} />
+              {placeholders}{insecureNote}
+            </Step>
+          </>
+        )}
         <Step n={++n} title={t.mesh_step_verify} t={t}>
           <p className="hint" style={{ margin: "0 0 8px" }}>{t.mesh_step_verify_p}</p>
-          <CmdBlock text={d.verify || "velox-agent doctor"} t={t} onToast={onToast} />
+          <CmdBlock text={d.verify || "sudo velox-agent doctor"} t={t} onToast={onToast} />
         </Step>
 
         <div className="ag-foot">

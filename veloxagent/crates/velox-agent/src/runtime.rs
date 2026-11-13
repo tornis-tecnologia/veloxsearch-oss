@@ -13,13 +13,21 @@
 //!
 //! ## State on the host
 //!
-//! `~/.local/state/velox-agent` or `$VELOX_AGENT_STATE` (`/var/lib/velox-agent`
-//! under a system unit) holds three things: the `instance_uid` that survives
-//! restarts, the credential the Mesh issued at enrollment (mode `0600`), and
-//! the engine's live/previous configuration. Losing the credential means
-//! re-enrolling, which is the right failure: it cannot be recovered from the
-//! Mesh, only reissued.
+//! `/opt/velox-agent/state`, or `$VELOX_AGENT_STATE`, holds three things: the
+//! `instance_uid` that survives restarts, the credential the Mesh issued at
+//! enrollment (mode `0600`), and the engine's live/previous configuration.
+//! Losing the credential means re-enrolling, which is the right failure: it
+//! cannot be recovered from the Mesh, only reissued.
 //!
+//! The default is one fixed directory, not one derived from `$HOME`, because
+//! a home-derived path made the state follow whoever typed the command:
+//! `sudo velox-agent enroll` wrote `/root/.local/state/...`, and a service
+//! running as its own user then found nothing and asked to be enrolled again.
+//! `/opt/velox-agent` is the install root `deploy/install.sh` lays out (the
+//! binary under `bin/`, the environment file under `etc/`, the state here),
+//! owned by the `velox-agent` system user. The old home-derived locations
+//! are only *looked at*, by `doctor`, to say an identity is stranded there.
+
 //! ## Applying is safe or it is nothing
 //!
 //! A configuration is written to staging, validated when the engine can
@@ -52,16 +60,30 @@ pub struct Paths {
     pub dir: PathBuf,
 }
 
+/// The install root `deploy/install.sh` lays out. The state directory sits
+/// under it; so do `bin/` and `etc/`, which the agent itself never reads.
+#[cfg(not(windows))]
+pub const INSTALL_ROOT: &str = "/opt/velox-agent";
+#[cfg(windows)]
+pub const INSTALL_ROOT: &str = r"C:\ProgramData\velox-agent";
+
 impl Paths {
     pub fn from_env() -> Paths {
-        let dir = std::env::var("VELOX_AGENT_STATE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::var("HOME")
-                    .map(|h| PathBuf::from(h).join(".local/state/velox-agent"))
-                    .unwrap_or_else(|_| PathBuf::from("/var/lib/velox-agent"))
-            });
-        Paths { dir }
+        Paths {
+            dir: state_dir(std::env::var("VELOX_AGENT_STATE").ok()),
+        }
+    }
+    /// Where earlier releases kept the state when `$VELOX_AGENT_STATE` was
+    /// unset: under the invoking user's home, else `/var/lib/velox-agent`.
+    /// Read by `doctor` only — an identity left there is reported, never
+    /// moved behind the operator's back (`install.sh` moves it, saying so).
+    pub fn legacy() -> Vec<PathBuf> {
+        let mut v = Vec::new();
+        if let Ok(h) = std::env::var("HOME") {
+            v.push(PathBuf::from(h).join(".local/state/velox-agent"));
+        }
+        v.push(PathBuf::from("/var/lib/velox-agent"));
+        v
     }
     pub fn identity(&self) -> PathBuf {
         self.dir.join("identity.json")
@@ -85,6 +107,14 @@ impl Paths {
     pub fn engine_state(&self) -> PathBuf {
         self.dir.join("fluent-bit").join("state")
     }
+}
+
+/// `$VELOX_AGENT_STATE` when set and non-empty, else `<INSTALL_ROOT>/state`.
+/// Pure, so the rule is testable without touching the environment.
+pub fn state_dir(env: Option<String>) -> PathBuf {
+    env.filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(INSTALL_ROOT).join("state"))
 }
 
 /// What enrollment produced: who we are and how we authenticate. Written once
@@ -125,8 +155,85 @@ impl Identity {
             f.write_all(&serde_json::to_vec_pretty(self)?)?;
             f.sync_all()?;
         }
-        std::fs::rename(tmp, path)
+        std::fs::rename(&tmp, &path)?;
+        hand_to_directory_owner(&p.dir, &path)
     }
+}
+
+/// `sudo velox-agent enroll` runs as root, but the service runs as the
+/// `velox-agent` user that owns the state directory. A `0600` credential left
+/// owned by root is one that service cannot read — it would then report "not
+/// enrolled" on a host that just enrolled. So when root writes into a
+/// directory someone else owns, the file goes to that owner. Root writing
+/// into a root-owned directory (a `--run-as-root` install) changes nothing.
+#[cfg(unix)]
+fn hand_to_directory_owner(dir: &Path, file: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let meta = std::fs::metadata(dir)?;
+    if meta.uid() == 0 {
+        return Ok(());
+    }
+    std::os::unix::fs::chown(file, Some(meta.uid()), Some(meta.gid()))
+}
+
+#[cfg(not(unix))]
+fn hand_to_directory_owner(_dir: &Path, _file: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// What `doctor` says about the state directory: where it is, whether this
+/// host is enrolled, and whether an identity is stranded in a location an
+/// earlier release used. Lines, not a verdict — none of this stops a host
+/// from collecting, it explains why `run` may ask to be enrolled.
+pub fn state_report(p: &Paths) -> Vec<String> {
+    let mut out = vec![format!("state: {}", p.dir.display())];
+    match Identity::load(p) {
+        Some(id) => out.push(format!(
+            "enrolled as {} with {}{}",
+            id.instance_uid,
+            id.mesh,
+            if id.insecure { " (certificate not verified)" } else { "" }
+        )),
+        None if p.identity().exists() => out.push(format!(
+            "{} exists but cannot be read by this user — run doctor as the service user, or check its owner",
+            p.identity().display()
+        )),
+        None => out.push("not enrolled".into()),
+    }
+    for old in Paths::legacy() {
+        if old != p.dir && old.join("identity.json").exists() {
+            out.push(format!(
+                "an identity from an earlier release is in {}: move it to {} (install.sh does this) or set VELOX_AGENT_STATE",
+                old.display(),
+                p.dir.display()
+            ));
+        }
+    }
+    out
+}
+
+/// The container's enrollment: `VELOX_MESH_URL` + `VELOX_ENROLL_TOKEN`
+/// (+ `VELOX_AGENT_INSECURE`). The image has no shell to wrap `enroll` then
+/// `run`, so `run` does it when the host is not enrolled yet. `None` unless
+/// both are set: a half-configured container must fail on "not enrolled",
+/// not enrol against a default.
+pub fn enrolment_from_env(get: impl Fn(&str) -> Option<String>) -> Option<(String, String, bool)> {
+    let nonempty = |k: &str| get(k).filter(|v| !v.trim().is_empty());
+    let mesh = nonempty("VELOX_MESH_URL")?;
+    let token = nonempty("VELOX_ENROLL_TOKEN")?;
+    let insecure = get("VELOX_AGENT_INSECURE")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    Some((mesh, token, insecure))
 }
 
 /// Exchange an enrollment token for an identity. Idempotent only in the sense
@@ -181,12 +288,23 @@ fn client(insecure: bool) -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The name the Mesh shows for this host. `VELOX_AGENT_HOSTNAME` first: in a
+/// container `/etc/hostname` is the container id, and the compose file sets
+/// this to the host's name instead.
 fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
+    pick_hostname(
+        std::env::var("VELOX_AGENT_HOSTNAME").ok(),
+        std::fs::read_to_string("/etc/hostname").ok(),
+        std::env::var("HOSTNAME").ok(),
+    )
+}
+
+fn pick_hostname(over: Option<String>, file: Option<String>, env: Option<String>) -> String {
+    [over, file, env]
+        .into_iter()
+        .flatten()
         .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok())
+        .find(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -492,12 +610,29 @@ fn diagnostics(raw: &str) -> String {
 /// collecting while the controller is being upgraded.
 pub async fn run() -> Result<(), String> {
     let paths = Paths::from_env();
-    let id = Identity::load(&paths).ok_or_else(|| {
-        format!(
-            "not enrolled: run `velox-agent enroll --mesh URL --token TOKEN` first ({} is empty)",
-            paths.dir.display()
-        )
-    })?;
+    let id = match Identity::load(&paths) {
+        Some(id) => id,
+        None => match enrolment_from_env(|k| std::env::var(k).ok()) {
+            Some((mesh, token, insecure)) => {
+                let id = enrol(&mesh, &token, insecure).await?;
+                id.save(&paths).map_err(|e| {
+                    format!("enrolled, but could not write {}: {e}", paths.dir.display())
+                })?;
+                eprintln!(
+                    "velox-agent: enrolled as {} (from the environment)",
+                    id.instance_uid
+                );
+                id
+            }
+            None => {
+                return Err(format!(
+                    "not enrolled: run `velox-agent enroll --mesh URL --token TOKEN` first, \
+                     or set VELOX_MESH_URL and VELOX_ENROLL_TOKEN ({} has no identity)",
+                    paths.dir.display()
+                ))
+            }
+        },
+    };
 
     let verdict = preflight::probe();
     let (bin, dry_run, engine_version) = match (preflight::find_engine().0, &verdict) {
@@ -879,6 +1014,81 @@ mod tests {
             serde_json::from_str(r#"{"mesh":"https://m","instance_uid":"u","credential":"c"}"#)
                 .unwrap();
         assert!(!old.insecure);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One fixed default, whoever runs the command; the variable still wins.
+    #[test]
+    fn the_state_lives_under_the_install_root_unless_overridden() {
+        assert_eq!(state_dir(None), Path::new(INSTALL_ROOT).join("state"));
+        assert_eq!(
+            state_dir(Some("  ".into())),
+            Path::new(INSTALL_ROOT).join("state")
+        );
+        assert_eq!(
+            state_dir(Some("/srv/agent".into())),
+            PathBuf::from("/srv/agent")
+        );
+        #[cfg(unix)]
+        assert_eq!(state_dir(None), PathBuf::from("/opt/velox-agent/state"));
+    }
+
+    /// The container's host name beats the container id in /etc/hostname.
+    #[test]
+    fn the_hostname_override_wins_and_blanks_are_skipped() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(pick_hostname(s("web-1"), s("3f2a9c\n"), s("x")), "web-1");
+        assert_eq!(pick_hostname(s(" "), s("3f2a9c\n"), s("x")), "3f2a9c");
+        assert_eq!(pick_hostname(None, s(""), s("env-host")), "env-host");
+        assert_eq!(pick_hostname(None, None, None), "unknown");
+    }
+
+    /// Both variables or nothing; the insecure switch takes the usual truthy
+    /// spellings and nothing else.
+    #[test]
+    fn enrolment_from_the_environment_needs_both_values() {
+        let from = |pairs: &[(&str, &str)]| {
+            let map: std::collections::HashMap<String, String> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            enrolment_from_env(|k| map.get(k).cloned())
+        };
+        let (m, t) = (("VELOX_MESH_URL", "https://m"), ("VELOX_ENROLL_TOKEN", "t"));
+        assert_eq!(from(&[m]), None);
+        assert_eq!(from(&[m, ("VELOX_ENROLL_TOKEN", "")]), None);
+        assert_eq!(from(&[m, t]), Some(("https://m".into(), "t".into(), false)));
+        for yes in ["1", "true", "YES", "on"] {
+            assert!(
+                from(&[m, t, ("VELOX_AGENT_INSECURE", yes)]).unwrap().2,
+                "{yes}"
+            );
+        }
+        assert!(!from(&[m, t, ("VELOX_AGENT_INSECURE", "maybe")]).unwrap().2);
+    }
+
+    /// doctor names the directory and the enrolment state.
+    #[test]
+    fn the_state_report_says_where_and_whether() {
+        let dir = std::env::temp_dir().join(format!("velox-agent-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = Paths { dir: dir.clone() };
+        let r = state_report(&p);
+        assert!(r[0].contains(&dir.display().to_string()), "{r:?}");
+        assert_eq!(r[1], "not enrolled");
+        Identity {
+            mesh: "https://m".into(),
+            instance_uid: "uid-9".into(),
+            credential: "c".into(),
+            insecure: true,
+        }
+        .save(&p)
+        .unwrap();
+        let r = state_report(&p);
+        assert!(
+            r[1].contains("uid-9") && r[1].contains("not verified"),
+            "{r:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

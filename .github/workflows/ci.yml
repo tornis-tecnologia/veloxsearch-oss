@@ -209,6 +209,12 @@ jobs:
       - name: velox-agent links neither the core nor kube
         working-directory: .
         run: ./.github/scripts/check-agent-boundary.sh
+      # The host installer runs as root on machines we never see: shellcheck
+      # at style level, so a quoting slip fails here and not on a customer's
+      # host (ADR-069 amendment 1).
+      - name: install.sh passes shellcheck
+        working-directory: .
+        run: shellcheck -S style veloxagent/deploy/install.sh
 
   frontend:
     name: Frontend build

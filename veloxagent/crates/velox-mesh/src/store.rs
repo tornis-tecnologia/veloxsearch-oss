@@ -264,6 +264,10 @@ pub struct PolicyRow {
 /// deployment is refused, not moved. Policy ids are global (they are what an
 /// enrollment token points at), so the refusal also closes the door on one
 /// deployment taking over another's policy by reusing its id.
+// Eight arguments, each a column of the revision row. A struct would only
+// rename them at the one call site (main.rs), and splitting the scoping pair
+// (`dep`, `tenant_id`) from the rest is what `check()` is there to forbid.
+#[allow(clippy::too_many_arguments)]
 pub async fn put_policy(
     pg: &Client,
     dep: &DeploymentRef,

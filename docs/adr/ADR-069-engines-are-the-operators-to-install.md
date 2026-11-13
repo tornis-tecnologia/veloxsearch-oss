@@ -116,3 +116,64 @@ second product. The team does not want it.
 - The minimum version appears in three places — this ADR, the agent's
   `MIN_FLUENT_BIT`, and the console's install screen. The ADR is the source;
   the other two cite it.
+
+## Amendment 1 — the host installer, `/opt/velox-agent`, and the container image (2026-11-13)
+
+Decision 1 holds for the host: VeloxSearch builds no Fluent Bit and serves
+none. Two paths now sit on top of it, plus a fixed host layout.
+
+1. **`install.sh` runs the documented procedure for the operator.**
+   `veloxagent/deploy/install.sh`, published with every agent release,
+   reads `/etc/os-release` and adds the same `packages.fluentbit.io`
+   repository (or installs the Fedora/EPEL package) that the console's
+   manual tabs show, then installs `fluent-bit` with the host's package
+   manager. The engine still comes from upstream's signed repository and its
+   updates still come from `apt`/`dnf`; the script only types the commands.
+   Targets it has no procedure for (decision 2's link-only ones, anything
+   without systemd) stop with the docs link and `--skip-fluent-bit`. The
+   package's own `fluent-bit.service` is disabled: the agent runs the engine
+   as its child, and a second instance on the sample config would compete
+   for the same files.
+
+2. **The agent's release is its own.** Tag `velox-agent-v<version>` from the
+   veloxagent workspace version (`.github/workflows/agent-release.yml`,
+   never `v*`, never GitHub's "latest" marker — both are the core's). Assets:
+   static musl tarballs for x86_64 and aarch64, `install.sh`, `SHA256SUMS`,
+   and a keyless cosign bundle per file. The script refuses a checksum
+   mismatch, and verifies the bundle when `cosign` is on the host.
+
+3. **One install root.** `/opt/velox-agent/{bin,etc,state}`. The state
+   directory is the agent's default (`runtime::state_dir`), no longer derived
+   from `$HOME`: `sudo velox-agent enroll` used to write
+   `/root/.local/state/...`, which a service running as anyone else could
+   not see. When root enrols into a state directory another user owns, the
+   identity file is handed to that owner. The installer moves an identity it
+   finds in an old location. It stops a hand-started agent to do so only with
+   `--replace`.
+
+4. **The service user reads logs and writes nothing else.** `velox-agent`
+   is a system user, in `adm`/`systemd-journal` where those groups exist. The
+   unit grants `CAP_DAC_READ_SEARCH` as an ambient capability, inherited by
+   the Fluent Bit child. That is Filebeat-as-root's read reach (RHEL's
+   `0600 /var/log/messages` included) without its write reach:
+   `ProtectSystem=strict` and `ReadWritePaths=/opt/velox-agent/state`.
+   `--run-as-root` is Filebeat's model verbatim for whoever wants it, and
+   `--allow-privileged-ports` adds `CAP_NET_BIND_SERVICE` for a syslog
+   listener on 514.
+
+5. **The container image redistributes upstream's image, unmodified.**
+   `docker.io/tornistecnologia/velox-agent` is built `FROM
+   fluent/fluent-bit:<pinned>` and adds only the agent
+   (`veloxagent/deploy/docker/Dockerfile`). The decision-1 objection was
+   building and patching a C codebase. A copy of upstream's published image,
+   rebuilt on a version bump, is neither. The base is distroless, so `run`
+   enrols itself from `VELOX_MESH_URL` / `VELOX_ENROLL_TOKEN` instead of
+   relying on an entrypoint script. The container runs as root with every
+   capability dropped except `DAC_READ_SEARCH`, on a read-only rootfs. A
+   non-root user would not work: Docker gives capabilities to non-root users
+   only through file capabilities, which a distroless base cannot carry.
+
+Consequences: the image's Fluent Bit is pinned per agent release,
+the one place "pinned per agent version" returns, and only for the
+container. Host engines stay the host's. A CVE in the pinned engine is
+answered by bumping `FLUENT_BIT_VERSION` and releasing the agent.

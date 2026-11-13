@@ -8,11 +8,12 @@
 //! Velox-specific line of code inside either engine — both stay replaceable
 //! upstream binaries (veloxagent/docs/PLAN.md §3, the Fluent Bit critique).
 //!
-//! **The engines are not ours to install** (ADR-069): VeloxSearch ships no
-//! Fluent Bit binary and never downloads one. The operator installs it from
-//! their distribution's or the project's repository — the console carries the
-//! procedure per distribution — and the agent supervises what it finds,
-//! refusing loudly below `preflight::MIN_FLUENT_BIT`.
+//! **The engines are not ours to build** (ADR-069): the agent binary carries
+//! no Fluent Bit and never downloads one. The engine comes from the host's
+//! distribution or the project's repository — the console's manual procedure,
+//! or `deploy/install.sh` typing those same commands (amendment 1) — or, in
+//! the container, from upstream's own image. The agent supervises what it
+//! finds, refusing loudly below `preflight::MIN_FLUENT_BIT`.
 //!
 //! Skeleton: the command surface, the pure plan for applying a Fluent Bit
 //! configuration safely, and the host preflight. No engine is spawned yet.
@@ -68,6 +69,12 @@ async fn main() {
                             "velox-agent: enrolled, but could not write {}: {e}",
                             paths.dir.display()
                         );
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            eprintln!(
+                                "velox-agent: install with deploy/install.sh (it creates {} for the velox-agent user), run this as root, or set VELOX_AGENT_STATE",
+                                paths.dir.display()
+                            );
+                        }
                         std::process::exit(1);
                     }
                     println!("velox-agent: enrolled as {}", id.instance_uid);
@@ -89,6 +96,9 @@ async fn main() {
         // the operator installs the engine, so the agent must be able to say
         // whether this host is ready before anything is enrolled.
         Some("doctor") => {
+            for line in runtime::state_report(&runtime::Paths::from_env()) {
+                println!("{line}");
+            }
             let verdict = preflight::probe();
             println!("{}", verdict.message());
             if !verdict.usable() {

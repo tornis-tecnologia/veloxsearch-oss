@@ -8,6 +8,30 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- **Velox Agent 0.2.0: a host installer, one install root and a container
+  image (ADR-069 amendment 1).**
+  - `veloxagent/deploy/install.sh` detects the distribution and installs
+    Fluent Bit from the upstream repository. It then downloads the agent from
+    its own `velox-agent-v*` GitHub release, checked against SHA256SUMS and,
+    with cosign, the signature.
+  - The agent runs as a `velox-agent` user holding `CAP_DAC_READ_SEARCH`, so
+    it reads logs the way Filebeat does and writes only its state.
+    `--run-as-root` keeps Filebeat's model.
+  - Everything lives in `/opt/velox-agent`.
+  - `docker.io/tornistecnologia/velox-agent` is upstream's Fluent Bit image
+    with the agent added, plus a `docker-compose.yml`.
+  - *Add agent* offers three methods: script (default), Docker, and manual
+    per distribution.
+
+### Changed
+- **The agent's state is `/opt/velox-agent/state` by default**, no longer
+  `~/.local/state/velox-agent`. `sudo velox-agent enroll` therefore lands
+  where the service reads, and root hands the identity to the state
+  directory's owner. Set `VELOX_AGENT_STATE` to keep an old location.
+  `install.sh` moves an existing identity; `velox-agent doctor` names one it
+  finds stranded.
+
 ## [0.15.0] - 2026-11-13
 
 ### Added

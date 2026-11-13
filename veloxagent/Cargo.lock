@@ -1488,7 +1488,7 @@ checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "velox-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "reqwest",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "velox-mesh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "velox-opamp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",

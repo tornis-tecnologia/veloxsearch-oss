@@ -27,6 +27,10 @@ veloxagent/
     velox-opamp/             the OpAMP message subset the agent and the Mesh exchange
     velox-mesh/              the controller binary
     velox-agent/             the host agent binary
+  deploy/
+    install.sh               host installer: Fluent Bit from upstream, the agent from
+                             its release, /opt/velox-agent, systemd (ADR-069 am. 1)
+    docker/                  Dockerfile (FROM fluent/fluent-bit) + docker-compose.yml
   docs/
     ARCHITECTURE.md          what is being built (pt-BR)
     PLAN.md                  survey of Fleet / Alloy / Vector / OpAMP, the Fluent Bit
@@ -47,6 +51,69 @@ cargo build --release            # target/release/velox-mesh, target/release/vel
 VELOX_MESH_ADDR=127.0.0.1:4320 ./target/release/velox-mesh
 ./target/release/velox-agent version
 ```
+
+## Installing the agent on a host
+
+The agent has its own release, `velox-agent-v<version>` (built by
+`.github/workflows/agent-release.yml` when the workspace version changes):
+static musl tarballs for x86_64 and aarch64, `install.sh`, `SHA256SUMS` and
+a cosign bundle per file. The console's *Add agent* page prints the commands
+with the Mesh URL and token filled in.
+
+```bash
+curl -fsSLO https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/velox-agent-v0.2.0/install.sh
+sudo bash install.sh --mesh https://<deployment>-mesh.<domain> --token <token> [--insecure]
+```
+
+What it does, and the result on the host:
+
+- reads `/etc/os-release` and installs Fluent Bit from `packages.fluentbit.io`
+  (Debian, Ubuntu, Raspbian, RHEL/CentOS, Rocky/Alma, Amazon Linux) or the
+  distribution package (Fedora). The package's own `fluent-bit.service` is
+  disabled, because the agent runs the engine;
+- downloads the agent and checks it against `SHA256SUMS`, plus the cosign
+  signature when `cosign` is installed;
+- creates the `velox-agent` system user, in `adm`/`systemd-journal`;
+- lays out `/opt/velox-agent/{bin,etc/agent.env,state}`, with the state
+  `0700` and owned by that user;
+- writes `velox-agent.service`. The unit runs as `velox-agent` with
+  `CAP_DAC_READ_SEARCH`, so it can read any log and write only to `state/`;
+- enrols, starts the service and prints `velox-agent doctor`.
+
+Options:
+
+| Option | What it does |
+| --- | --- |
+| `--run-as-root` | Filebeat's model: the service runs as root |
+| `--allow-privileged-ports` | Syslog on port 514 |
+| `--skip-fluent-bit` | Use an engine that is already installed |
+| `--binary ./velox-agent` | Offline install, or a development build |
+| `--replace` | Takes over an agent started by hand and moves its identity |
+| `--uninstall [--purge]` | Removes the agent. `--purge` also deletes the state and the user |
+
+Re-running the script upgrades in place.
+
+In a container ([deploy/docker/](deploy/docker/)), the image is upstream's
+`fluent/fluent-bit`, unmodified, plus the agent:
+
+```bash
+cd veloxagent/deploy/docker && cp .env.example .env   # Mesh URL, token, host name
+docker compose up -d
+```
+
+`run` enrols itself from `VELOX_MESH_URL` / `VELOX_ENROLL_TOKEN` when the
+state volume has no identity yet. The container reads the host's `/var/log`
+read-only, as root with every capability dropped except `DAC_READ_SEARCH`.
+
+Agent environment:
+
+| Variable | Default / meaning |
+| --- | --- |
+| `VELOX_AGENT_STATE` | `/opt/velox-agent/state` |
+| `VELOX_FLUENT_BIT` | the engine binary (else `$PATH`, `/opt/fluent-bit/bin`) |
+| `VELOX_AGENT_HOSTNAME` | the name the fleet shows (a container's `/etc/hostname` is its id) |
+| `VELOX_MESH_URL`, `VELOX_ENROLL_TOKEN`, `VELOX_AGENT_INSECURE` | enrol on `run` when not enrolled yet |
+| `VELOX_AGENT_POLL` | check-in interval in seconds (tests) |
 
 Phase 0 has no screens (the Mesh console is phase 1). To inspect what it does
 build, compile a policy against real packages and read what an agent would

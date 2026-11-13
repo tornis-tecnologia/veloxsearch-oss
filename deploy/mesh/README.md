@@ -97,9 +97,14 @@ default certificate: both endpoints are marked insecure, the compiler writes
 `tls.verify Off`, and the enrol command carries `--insecure`. Set a TLS Secret
 (a wildcard for the domain) in *Settings → Access* to verify instead.
 
+On the host, the agent's installer enrols as part of the install. It sets up
+Fluent Bit from upstream, `/opt/velox-agent`, the `velox-agent` user and the
+systemd unit (ADR-069 amendment 1; `veloxagent/README.md`):
+
 ```bash
-velox-agent enroll --mesh https://<deployment>-mesh.<ip>.sslip.io:443 --token <token> --insecure
-velox-agent doctor
+curl -fsSLO https://github.com/tornis-tecnologia/veloxsearch-oss/releases/download/velox-agent-v0.2.0/install.sh
+sudo bash install.sh --mesh https://<deployment>-mesh.<ip>.sslip.io --token <token> --insecure
+sudo velox-agent doctor
 ```
 
 ## Rollback

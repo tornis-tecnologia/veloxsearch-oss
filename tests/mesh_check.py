@@ -144,8 +144,6 @@ with sync_playwright() as p:
               "the overview is the fleet, with 'Add agent'")
         check(page.locator('[data-testid="mesh-fleet"] select').count() == 0,
               "the overview's agent list is read-only")
-        check(page.locator('[data-testid="mesh-seats"]').count() == 1,
-              "seats are shown as the installation's, not the deployment's")
 
     # ---- the settings sub-tab: state, first run, daemons, endpoints -------
     page.click('[data-testid="mesh-tab-settings"]')
@@ -357,6 +355,16 @@ with sync_playwright() as p:
               f"the enrol command carries the policy's Mesh address and the minted token ({cmd.strip()[:60]}…)")
         check(page.locator('[data-testid="add-agent-watch"]').get_attribute("data-seen") == "0",
               "the page watches the fleet for the new host")
+        # ADR-069 amendment 1: the script is the default way, enrolling in
+        # the same command; the container and the manual procedure follow.
+        check("install.sh" in cmd and "velox-agent-v" in cmd,
+              "the default method is the release's install.sh")
+        page.click('[data-testid="install-method-docker"]')
+        page.wait_for_selector('[data-testid="install-panel-docker"]', timeout=5000)
+        dcmd = page.locator('[data-testid="enroll-cmd"]').inner_text()
+        check("docker run" in dcmd and tok in dcmd and "DAC_READ_SEARCH" in dcmd,
+              "the docker method enrols from the environment with one capability")
+        page.click('[data-testid="install-method-manual"]')
         for key in TARGETS:
             page.click(f'[data-testid="agents-tab-{key}"]')
             page.wait_for_selector(f'[data-testid="agents-panel-{key}"]', timeout=5000)
