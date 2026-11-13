@@ -228,9 +228,12 @@ pub fn compile(pkg: &Package, act: &Activation, checks: &Checks<'_>) -> Result<B
         if let Some(mut p) = pipe {
             if hooks {
                 if let Some(procs) = p.get_mut("processors").and_then(Value::as_array_mut) {
-                    procs.push(
-                        json!({ "pipeline": { "name": custom, "ignore_missing_pipeline": true } }),
-                    );
+                    // No `ignore_missing_pipeline`: that is Elasticsearch's
+                    // and OpenSearch refuses the whole pipeline over it (400,
+                    // "doesn't support one or more provided configuration
+                    // parameters"). Nor is it needed — `N@custom` is created
+                    // (if absent) before this pipeline, in the same install.
+                    procs.push(json!({ "pipeline": { "name": custom } }));
                 }
             }
             objects.push(Object {
@@ -348,6 +351,20 @@ fn set_path(obj: &mut Value, dotted: &str, value: Value) {
     cur[parts[parts.len() - 1]] = value;
 }
 
+/// A package's lifecycle key as the OpenSearch ISM `rollover` condition it
+/// means. The package speaks Elasticsearch's thresholds ("roll over at most
+/// at this size"), ISM names the same trigger by its lower bound ("once the
+/// index is at least this big"); a mechanical `min_` + key produced
+/// `min_max_size`, which ISM refuses for every policy.
+fn ism_rollover_condition(key: &str) -> Option<&'static str> {
+    match key {
+        "rollover_max_size" => Some("min_size"),
+        "rollover_max_age" => Some("min_index_age"),
+        "rollover_max_docs" => Some("min_doc_count"),
+        _ => None,
+    }
+}
+
 /// The ISM policy for one stream: hot with rollover, then delete.
 fn ism_policy(
     integration: &str,
@@ -359,10 +376,7 @@ fn ism_policy(
     let mut actions = Vec::new();
     let roll: serde_json::Map<String, Value> = life
         .iter()
-        .filter_map(|(k, v)| {
-            k.strip_prefix("rollover_")
-                .map(|r| (format!("min_{r}"), v.clone()))
-        })
+        .filter_map(|(k, v)| ism_rollover_condition(k).map(|c| (c.to_string(), v.clone())))
         .collect();
     if !roll.is_empty() {
         actions.push(json!({ "rollover": roll }));
@@ -387,6 +401,32 @@ fn ism_policy(
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    /// OpenSearch ISM refuses `min_max_size` & co. (400 "Invalid field ... in
+    /// RolloverAction") — measured against OpenSearch 3.3 for every package.
+    /// The package's thresholds map onto ISM's own condition names.
+    #[test]
+    fn ism_rollover_uses_opensearch_condition_names() {
+        let mut life = serde_json::Map::new();
+        life.insert("rollover_max_size".into(), json!("50gb"));
+        life.insert("rollover_max_age".into(), json!("1d"));
+        life.insert("rollover_max_docs".into(), json!(1000));
+        life.insert("delete_after".into(), json!("30d"));
+        let p = ism_policy("system", "syslog", 1, "veloxagent-syslog.system-v1", &life);
+        let roll = &p["policy"]["states"][0]["actions"][0]["rollover"];
+        assert_eq!(roll["min_size"], "50gb");
+        assert_eq!(roll["min_index_age"], "1d");
+        assert_eq!(roll["min_doc_count"], 1000);
+        let text = p.to_string();
+        assert!(
+            !text.contains("min_max_") && !text.contains("min_rollover"),
+            "{text}"
+        );
+        assert_eq!(
+            p["policy"]["states"][0]["transitions"][0]["conditions"]["min_index_age"],
+            "30d"
+        );
+    }
 
     fn registry_root() -> Option<PathBuf> {
         match std::env::var("VELOX_REGISTRY_PATH") {
