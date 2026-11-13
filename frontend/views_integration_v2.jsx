@@ -288,7 +288,7 @@ function pluginFields(plugin) {
 
 /* ---------- the dialog ---------- */
 
-function AddPackageDialog({ open, onClose, lang, d, item, policies, agentsByPolicy, fixedPolicy, fbFloor, onDone, onToast }) {
+function AddPackageDialog({ open, onClose, lang, d, item, policies, agentsByPolicy, fixedPolicy, editing: editingProp, fbFloor, onDone, onToast }) {
   const t = STR[lang] || STR.pt;
   const [pkg, setPkg] = useState(null);
   const [pkgErr, setPkgErr] = useState(null);
@@ -304,7 +304,9 @@ function AddPackageDialog({ open, onClose, lang, d, item, policies, agentsByPoli
   const [saveErr, setSaveErr] = useState(null);
   const [adding, setAdding] = useState({});
 
-  const editing = !!fixedPolicy;
+  // A fixed policy is an edit of its activation — unless the caller says it
+  // is an ADD to that policy (the Policies tab's "add integration").
+  const editing = editingProp ?? !!fixedPolicy;
 
   useEffect(() => {
     if (!open || !item) return undefined;
@@ -435,6 +437,11 @@ function AddPackageDialog({ open, onClose, lang, d, item, policies, agentsByPoli
   return (
     <Dialog open={open} onClose={busy ? undefined : onClose} title={title} width={680} testid="add-package" busy={busy}>
       {pkgErr && <Banner tone="danger" title={t.pkg_load_err}>{pkgErr}</Banner>}
+      {pkgErr && (
+        <div className="dialog-actions">
+          <Btn variant="primary" onClick={onClose} data-testid="add-package-close">{t.close}</Btn>
+        </div>
+      )}
       {!pkg && !pkgErr && <p className="hint">{t.pkg_loading}</p>}
 
       {pkg && step === 1 && (
@@ -598,7 +605,7 @@ function AddPackageDialog({ open, onClose, lang, d, item, policies, agentsByPoli
           {saveErr && <Banner tone="danger" title={t.pkg_err} style={{ marginTop: 10 }}>{saveErr}</Banner>}
           {target !== NEW_POLICY && agentsByPolicy && !(agentsByPolicy[target] > 0) && <p className="hint" style={{ marginTop: 6 }}>{t.pkg_no_agents}</p>}
           <div className="dialog-actions">
-            {!editing && <Btn variant="ghost" onClick={() => setStep(1)} disabled={busy}>{t.pkg_back}</Btn>}
+            {!fixedPolicy && <Btn variant="ghost" onClick={() => setStep(1)} disabled={busy}>{t.pkg_back}</Btn>}
             <Btn variant="ghost" onClick={onClose} disabled={busy}>{t.cancel}</Btn>
             <Btn variant="primary" icon={editing ? "check" : "plus"} disabled={busy} data-testid="add-package-save" onClick={save}>
               {busy ? t.pkg_saving : (editing ? t.pkg_save_edit : t.pkg_save)}

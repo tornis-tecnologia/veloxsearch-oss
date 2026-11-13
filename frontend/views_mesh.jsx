@@ -50,6 +50,7 @@ import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
 import { Banner, Btn, Confirm, Dialog, Field, Icon, Menu, Tabs, copyText, fmtBytes } from "./ui.jsx";
 import { AddIntegrationDialog, locText } from "./views_integration_add.jsx";
+import { AddPackageDialog } from "./views_integration_v2.jsx";
 
 /* ADR-069 decision 3; `velox_agent::preflight::MIN_FLUENT_BIT` is the same
    number on the other side. */
@@ -1394,12 +1395,15 @@ function NewPolicyDialog({ open, onClose, t, d, settings, onDone, onToast }) {
   );
 }
 
-/* Pick a package for a policy; the one onboarding dialog then configures it
-   with the policy fixed. */
+/* Pick a package for a policy — from the registry's Spec 2.0 catalogue
+   (ADR-074), the one the Data tab shows; the package's generated form then
+   configures it with the policy fixed. A version this core cannot run is
+   listed, disabled, with the version it needs. */
 function PickIntegrationDialog({ open, onClose, t, lang, policy, items, catalogErr, catalogLoaded, onPick }) {
   if (!open || !policy) return null;
   const on = policy.integrations || [];
   const candidates = items.filter(it => !on.includes(it.id));
+  const needs = (it) => (((it.versions || [])[0]) || {}).min_mesh_version || "?";
   return (
     <Dialog open={open} onClose={onClose} width={520} testid="policy-add-dialog"
       title={t.mesh_pol_add_integ_dlg.replace("{id}", policy.id)}>
@@ -1410,7 +1414,11 @@ function PickIntegrationDialog({ open, onClose, t, lang, policy, items, catalogE
               <select className="select" aria-label={t.mesh_pol_integ_pick} data-testid={`policy-add-pick-${policy.id}`} defaultValue=""
                 onChange={e => { const it = items.find(x => x.id === e.target.value); if (it) onPick(it); }} style={{ width: "100%" }}>
                 <option value="" disabled>{t.mesh_pol_integ_pick}</option>
-                {candidates.map(it => <option key={it.id} value={it.id}>{locText(it.title, lang, it.id)}</option>)}
+                {candidates.map(it => (
+                  <option key={it.id} value={it.id} disabled={!it.offered}>
+                    {locText(it.title, lang, it.id)}{it.offered ? "" : ` — ${t.pkg_not_offered.replace("{v}", needs(it))}`}
+                  </option>
+                ))}
               </select>
             )}
       <div className="dialog-actions">
@@ -1478,7 +1486,9 @@ function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddA
   const [catalog, setCatalog] = useState(null);
   const [catalogErr, setCatalogErr] = useState(null);
   const [picking, setPicking] = useState(null);      // policy id: the package picker
-  const [dialog, setDialog] = useState(null);        // the one onboarding dialog
+  const [dialog, setDialog] = useState(null);        // the 1.x onboarding dialog (legacy activations)
+  const [pkgDialog, setPkgDialog] = useState(null);  // a Spec 2.0 package's form (ADR-074)
+  const [pkgs, setPkgs] = useState(null);
   const [epDialog, setEpDialog] = useState(null);    // policy id: rebind
   const [settingsOf, setSettingsOf] = useState(null); // policy id: settings
   const [removing, setRemoving] = useState(null);    // policy id: confirm
@@ -1492,29 +1502,51 @@ function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddA
   const meshEps = (settings && settings.mesh_endpoints) || [];
   const haveEps = osEps.length > 0 && meshEps.length > 0;
 
-  // The catalog, so "add integration" can offer what the registry has. The
-  // dialog then reads the chosen package's inputs itself.
+  // The registry's Spec 2.0 catalogue is what "add integration" offers
+  // (ADR-074). The 1.x catalogue is read only to name and edit activations a
+  // policy carried before the switch.
   useEffect(() => {
     let alive = true;
-    API.catalog(d.id)
-      .then(v => { if (alive) { setCatalog(v); setCatalogErr(null); } })
+    API.catalogV2(d.id, false)
+      .then(v => { if (alive) { setPkgs(v); setCatalogErr(null); } })
       .catch(e => { if (alive) setCatalogErr(e.message); });
+    API.catalog(d.id)
+      .then(v => { if (alive) setCatalog(v); })
+      .catch(() => {});
     return () => { alive = false; };
   }, [d.id]);
-  const items = (catalog && catalog.integrations) || [];
-  const itemOf = (id) => items.find(x => x.id === id) || { id, title: null };
+  const packages = (pkgs && pkgs.packages) || [];
+  const legacy = (catalog && catalog.integrations) || [];
+  const itemOf = (id) => packages.find(x => x.id === id) || legacy.find(x => x.id === id) || { id, title: null };
+  const isPackage = (body, id) => (body.packages || []).some(a => a.package_id === id);
 
   const openEdit = async (pid, id) => {
     try {
       const doc = await API.meshPolicy(d.id, pid);
-      const act = ((doc.body || {}).activations || []).find(a => a.package_id === id);
+      const body = doc.body || {};
+      if (isPackage(body, id)) {
+        setPkgDialog({ item: itemOf(id), policy: pid, editing: true });
+        return;
+      }
+      const act = (body.activations || []).find(a => a.package_id === id);
       setDialog({ item: itemOf(id), policy: pid, editing: true, initial: act ? { inputs: act.inputs || {} } : null });
     } catch (e) { if (onToast) onToast(e.message, false); }
   };
   const removeInteg = async (pid, id) => {
     setBusy(b => ({ ...b, [`${pid}/${id}`]: true }));
     try {
-      await API.removeIntegration(d.id, id, pid);
+      const doc = await API.meshPolicy(d.id, pid);
+      const body = doc.body || {};
+      if (isPackage(body, id)) {
+        // A Spec 2.0 activation leaves by saving the policy without it — a
+        // new revision, like every change to what a policy collects.
+        await API.meshSavePolicy({
+          id: pid, name: body.name || pid, deployment: d.id, integrations: [],
+          packages: (body.packages || []).filter(a => a.package_id !== id), secrets: {}, endpoints: body.endpoints || {},
+        });
+      } else {
+        await API.removeIntegration(d.id, id, pid);
+      }
       if (onToast) onToast(t.mesh_pol_integ_removed.replace("{id}", id).replace("{policy}", pid), true);
       if (onReload) onReload();
     } catch (e) { if (onToast) onToast(e.message, false); }
@@ -1548,14 +1580,18 @@ function PoliciesTab({ t, lang, d, overview, settings, onReload, onToast, onAddA
         fixedTarget={dialog && dialog.policy} editing={!!(dialog && dialog.editing)} initial={dialog && dialog.initial}
         agentsByPolicy={agentsByPolicy} onToast={onToast}
         onDone={() => { if (onReload) onReload(); }} />
+      <AddPackageDialog open={!!pkgDialog} onClose={() => setPkgDialog(null)} lang={lang} d={d}
+        item={pkgDialog && pkgDialog.item} policies={policies} agentsByPolicy={agentsByPolicy}
+        fixedPolicy={pkgDialog && pkgDialog.policy} editing={!!(pkgDialog && pkgDialog.editing)}
+        onToast={onToast} onDone={() => { if (onReload) onReload(); }} />
       <PolicyEndpointsDialog open={!!epDialog} onClose={() => setEpDialog(null)} t={t} d={d}
         policy={byId(epDialog)} settings={settings} onDone={onReload} onToast={onToast} />
       <NewPolicyDialog open={newOpen} onClose={() => setNewOpen(false)} t={t} d={d} settings={settings}
         onDone={onReload} onToast={onToast} />
       <PickIntegrationDialog open={!!picking} onClose={() => setPicking(null)} t={t} lang={lang} policy={byId(picking)}
-        items={items} catalogErr={catalogErr} catalogLoaded={!!catalog}
-        onPick={it => { const pid = picking; setPicking(null); setDialog({ item: it, policy: pid, editing: false, initial: null }); }} />
-      <PolicySettingsDialog open={!!settingsOf && !dialog && !epDialog && !picking} onClose={() => setSettingsOf(null)}
+        items={packages} catalogErr={catalogErr} catalogLoaded={!!pkgs}
+        onPick={it => { const pid = picking; setPicking(null); setPkgDialog({ item: it, policy: pid, editing: false }); }} />
+      <PolicySettingsDialog open={!!settingsOf && !dialog && !pkgDialog && !epDialog && !picking} onClose={() => setSettingsOf(null)}
         t={t} lang={lang} policy={byId(settingsOf)} settings={settings}
         rollout={(overview.rollout || {})[settingsOf]} agents={agentsByPolicy[settingsOf] || 0}
         itemOf={itemOf} busy={busy}

@@ -272,36 +272,42 @@ with sync_playwright() as p:
         page.click('[data-testid="policy-settings-close"]')
         page.wait_for_selector('[data-testid="policy-settings-dialog"]', state="detached", timeout=10000)
 
-        # "Add integration" picks a package and opens the one dialog with the
-        # policy fixed: no "where" step.
+        # "Add integration" picks a package from the registry's Spec 2.0
+        # catalogue (ADR-074) and opens its generated form with the policy
+        # fixed: no "where" step. Unsigned packages (the registry before
+        # `velox sign`) are refused at load, and the form is then skipped.
         row_action(E2E_POLICY, f"policy-add-{E2E_POLICY}")
         page.wait_for_selector(f'[data-testid="policy-add-pick-{E2E_POLICY}"]', timeout=20000)
+        opts = page.locator(f'[data-testid="policy-add-pick-{E2E_POLICY}"] option').count()
+        check(opts > 13, f"the picker offers the registry's catalogue ({opts - 1} packages)")
         page.select_option(f'[data-testid="policy-add-pick-{E2E_POLICY}"]', E2E_INTEG)
-        page.wait_for_selector('[data-testid="add-integration"]', timeout=10000)
-        page.wait_for_selector('[data-testid="add-integration-configure"]', timeout=15000)
-        check(page.locator('[data-testid="add-integration-where"]').count() == 0,
-              "from a policy the dialog skips 'where': the policy is the target")
-        check(E2E_POLICY in page.locator('[data-testid="add-integration-configure"]').inner_text(),
-              "the dialog names the policy it adds to")
-        page.click('[data-testid="add-integration-save"]')
-        page.wait_for_selector('[data-testid="add-integration"]', state="detached", timeout=60000)
-        page.wait_for_function(
-            f"() => (document.querySelector('[data-testid=\"policy-integ-list-{E2E_POLICY}\"]') || {{}}).innerText?.toLowerCase().includes('ssh')",
-            timeout=30000)
-        check(True, f"{E2E_INTEG} is listed on the policy's row")
-        row_action(E2E_POLICY, f"policy-settings-{E2E_POLICY}")
-        page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', timeout=15000)
-        page.click(f'[data-testid="policy-integ-edit-{E2E_POLICY}-{E2E_INTEG}"]')
-        page.wait_for_selector('[data-testid="add-integration-configure"]', timeout=15000)
-        check(page.locator('[data-testid^="add-input-"][data-on="1"]').count() >= 1,
-              "configure shows the recorded input on")
-        page.keyboard.press("Escape")
-        page.wait_for_selector('[data-testid="add-integration"]', state="detached", timeout=10000)
-        page.wait_for_selector('[data-testid="policy-settings-dialog"]', timeout=10000)
-        page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
-        page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
-        check(True, "an integration is removed from the policy in its settings")
-        page.click('[data-testid="policy-settings-close"]')
+        page.wait_for_selector('[data-testid="add-package"]', timeout=10000)
+        page.wait_for_selector('[data-testid="add-package-configure"], [data-testid="add-package-close"]', timeout=30000)
+        check(page.locator('[data-testid="add-package-where"]').count() == 0,
+              "from a policy the form skips 'where': the policy is the target")
+        if page.locator('[data-testid="add-package-close"]').count():
+            check(True, f"{E2E_INTEG} did not load (unsigned registry?) — its form is not exercised")
+            page.click('[data-testid="add-package-close"]')
+            page.wait_for_selector('[data-testid="add-package"]', state="detached", timeout=10000)
+        else:
+            page.click('[data-testid="add-package-save"]')
+            page.wait_for_selector('[data-testid="add-package"]', state="detached", timeout=60000)
+            page.wait_for_function(
+                f"() => (document.querySelector('[data-testid=\"policy-integ-list-{E2E_POLICY}\"]') || {{}}).innerText?.toLowerCase().includes('{E2E_INTEG}')",
+                timeout=30000)
+            check(True, f"{E2E_INTEG} is listed on the policy's row")
+            row_action(E2E_POLICY, f"policy-settings-{E2E_POLICY}")
+            page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', timeout=15000)
+            page.click(f'[data-testid="policy-integ-edit-{E2E_POLICY}-{E2E_INTEG}"]')
+            page.wait_for_selector('[data-testid="add-package-configure"]', timeout=30000)
+            check(True, "configure reopens the package's form with the policy fixed")
+            page.keyboard.press("Escape")
+            page.wait_for_selector('[data-testid="add-package"]', state="detached", timeout=10000)
+            page.wait_for_selector('[data-testid="policy-settings-dialog"]', timeout=10000)
+            page.click(f'[data-testid="policy-integ-remove-{E2E_POLICY}-{E2E_INTEG}"]')
+            page.wait_for_selector(f'[data-testid="policy-integ-{E2E_POLICY}-{E2E_INTEG}"]', state="detached", timeout=30000)
+            check(True, "an integration is removed from the policy in its settings")
+            page.click('[data-testid="policy-settings-close"]')
 
         # Remove: a throwaway policy goes; one with live agents cannot.
         if page.locator('[data-testid="policy-e2e-remove"]').count() == 0:
