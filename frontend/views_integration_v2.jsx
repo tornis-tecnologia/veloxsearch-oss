@@ -436,7 +436,12 @@ function AddPackageDialog({ open, onClose, lang, d, item, policies, agentsByPoli
 
   return (
     <Dialog open={open} onClose={busy ? undefined : onClose} title={title} width={680} testid="add-package" busy={busy}>
-      {pkgErr && <Banner tone="danger" title={t.pkg_load_err}>{pkgErr}</Banner>}
+      {pkgErr && (
+        <Banner tone="danger" title={t.pkg_open_err} testid="add-package-error">
+          {/unsigned/i.test(pkgErr) && <p style={{ margin: "0 0 6px" }} data-testid="add-package-unsigned">{t.pkg_unsigned_hint}</p>}
+          <span className="mono" style={{ fontSize: 12 }}>{pkgErr}</span>
+        </Banner>
+      )}
       {pkgErr && (
         <div className="dialog-actions">
           <Btn variant="primary" onClick={onClose} data-testid="add-package-close">{t.close}</Btn>
