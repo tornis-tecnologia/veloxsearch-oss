@@ -247,7 +247,9 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 The `k3s-greenfield` fixture (single node) runs this path: install → R1–R8 ✓ →
 cert-manager + operator auto-installed → Longhorn installed at first create from
 the local-path default. A 3-node k3s cluster that already has a `longhorn`
-StorageClass skips the Longhorn install. What each run last proved is in
+StorageClass skips the Longhorn install. If k3s's addon controller later flips
+`local-path` back to default, the operator re-demotes it in favour of `longhorn`
+(#134). What each run last proved is in
 [`REQUIREMENTS.md`](REQUIREMENTS.md#tested-platforms-the-conformance-fleet-adr-026).
 
 ### 3c. k0s (verified — `k0s-bare`)
