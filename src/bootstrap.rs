@@ -1504,6 +1504,11 @@ async fn bootstrap_complete(client: &Client) -> Result<bool> {
 /// that does not restart the Pod (same image), and a rollout during which the
 /// operator was briefly not Ready.
 ///
+/// The same tick re-asserts the single-default StorageClass invariant (#134):
+/// if the `longhorn` SC exists, any node-local SC that re-acquired the default
+/// annotation — k3s's addon controller re-applies local-storage.yaml and
+/// restores it on `local-path` — is demoted again, best-effort.
+///
 /// Never while an install job runs: the create-flow Longhorn install needs the
 /// binding until it finishes, and the `longhorn` StorageClass appears before it
 /// does (`install_longhorn` still demotes default classes after that).
@@ -1521,6 +1526,14 @@ pub async fn run_revoke_watch() {
         // The operator-upgrade grant (#176) has its own lifetime: deleted after
         // the upgrade, or here once it has sat unused past its TTL.
         crate::operator_upgrade::expire_grant(&client).await;
+        // #134: demote node-local SCs that re-acquired the default annotation
+        // (k3s addon reconciler). Must run before the binding check below —
+        // that `continue`s in the common case (binding already revoked) and
+        // would otherwise starve it. Best-effort: a failure here never gates
+        // the rest of this loop.
+        if let Err(e) = demote_node_local_defaults(&client, true).await {
+            tracing::debug!("revoke watch: default-SC re-assert failed: {e:#}");
+        }
         let api: Api<ClusterRoleBinding> = Api::all(client.clone());
         match api.get_opt(BOOTSTRAP_BINDING).await {
             Ok(Some(b)) if binding_is_ours(&b, ns()) => {}
@@ -1829,31 +1842,58 @@ async fn wait_longhorn_storage_ready(client: &Client, sc: &str, secs: u64) -> Re
     bail!("timed out waiting for StorageClass {sc} to be created (Longhorn never became ready)")
 }
 
+/// Names of the StorageClasses whose default-class annotation must be cleared:
+/// node-local classes still flagged default while the `longhorn` SC exists (it
+/// is meant to be the cluster's sole default — two defaults make PVC binding
+/// ambiguous). Empty when no `longhorn` SC is in the list: the invariant is
+/// only asserted on clusters that actually run Longhorn (#134). Pure over the
+/// SC list so the install-time demote and the periodic re-assert share one
+/// definition of drift.
+fn node_local_defaults_to_demote(
+    scs: &[k8s_openapi::api::storage::v1::StorageClass],
+) -> Vec<String> {
+    let longhorn_installed = scs
+        .iter()
+        .any(|sc| sc.metadata.name.as_deref() == Some(LONGHORN_SC));
+    if !longhorn_installed {
+        return Vec::new();
+    }
+    scs.iter()
+        .filter(|sc| sc.metadata.name.as_deref() != Some(LONGHORN_SC))
+        .filter(|sc| sc_is_default(sc) && provisioner_is_node_local(&sc.provisioner))
+        .filter_map(|sc| sc.metadata.name.clone())
+        .collect()
+}
+
 /// Clear the default-class annotation from any *node-local* StorageClass still
 /// flagged default, so the freshly-installed `longhorn` SC is the cluster's
 /// sole default (two defaults make PVC binding ambiguous). Best-effort.
-async fn demote_node_local_defaults(client: &Client) -> Result<()> {
+/// `reassert` marks the periodic re-assert (#134): the annotation was already
+/// cleared once and came back, so each demote logs at `warn` to make the drift
+/// visible instead of the install path's `info`.
+async fn demote_node_local_defaults(client: &Client, reassert: bool) -> Result<()> {
     use k8s_openapi::api::storage::v1::StorageClass;
     let api: Api<StorageClass> = Api::all(client.clone());
     let list = api
         .list(&ListParams::default())
         .await
         .context("listing storageclasses")?;
-    for sc in &list.items {
-        let name = match sc.metadata.name.as_deref() {
-            Some(n) if n != LONGHORN_SC => n,
-            _ => continue,
-        };
-        if sc_is_default(sc) && provisioner_is_node_local(&sc.provisioner) {
-            let patch = serde_json::json!({
-                "metadata": { "annotations": {
-                    "storageclass.kubernetes.io/is-default-class": "false",
-                    "storageclass.beta.kubernetes.io/is-default-class": "false",
-                }}
-            });
-            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-                .await
-                .with_context(|| format!("demoting default StorageClass {name}"))?;
+    for name in node_local_defaults_to_demote(&list.items) {
+        let patch = serde_json::json!({
+            "metadata": { "annotations": {
+                "storageclass.kubernetes.io/is-default-class": "false",
+                "storageclass.beta.kubernetes.io/is-default-class": "false",
+            }}
+        });
+        api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .with_context(|| format!("demoting default StorageClass {name}"))?;
+        if reassert {
+            tracing::warn!(
+                "StorageClass {name} reacquired the default annotation \
+                 (k3s addon reconciler?); re-demoting in favour of {LONGHORN_SC} (#134)"
+            );
+        } else {
             tracing::info!(
                 "demoted node-local default StorageClass {name} in favour of {LONGHORN_SC} (ADR-031)"
             );
@@ -1882,7 +1922,7 @@ pub async fn install_longhorn(client: &Client) -> Result<()> {
     // than hanging until timeout and leaving PVCs Pending forever. Then make
     // `longhorn` the sole default by demoting any node-local SC still flagged.
     wait_longhorn_storage_ready(client, LONGHORN_SC, 300).await?;
-    demote_node_local_defaults(client).await?;
+    demote_node_local_defaults(client, false).await?;
     // Size replicas to the cluster that just got Longhorn (#26): a sub-3-node
     // cluster cannot place the bundle's default of three copies per volume.
     reconcile_longhorn_sizing(client).await?;
@@ -2841,6 +2881,48 @@ spec: {selector: {}, template: {spec: {containers: [\
         assert!(provisioner_is_node_local("k8s.io/minikube-hostpath")); // any "hostpath"
         assert!(!provisioner_is_node_local("driver.longhorn.io")); // prod's real default
         assert!(!provisioner_is_node_local("ebs.csi.aws.com"));
+    }
+
+    /// #134: the re-assert demotes exactly the node-local SCs flagged default
+    /// while `longhorn` exists — never anything else, and nothing at all
+    /// before Longhorn is installed.
+    #[test]
+    fn node_local_defaults_to_demote_targets_only_longhorn_rivals() {
+        let local = sc("local-path", "rancher.io/local-path", true);
+        let longhorn = sc("longhorn", "driver.longhorn.io", true);
+        // (a) both default → only the node-local one is named.
+        assert_eq!(
+            node_local_defaults_to_demote(&[local.clone(), longhorn.clone()]),
+            vec!["local-path".to_string()]
+        );
+        // (b) no `longhorn` SC → the cluster keeps its own default untouched.
+        assert!(node_local_defaults_to_demote(&[local]).is_empty());
+        // (c) `longhorn` default, local-path already demoted → nothing to do.
+        let demoted = sc("local-path", "rancher.io/local-path", false);
+        assert!(node_local_defaults_to_demote(&[demoted, longhorn.clone()]).is_empty());
+        // A non-node-local default (foreign CSI) next to longhorn stays put.
+        let ebs = sc("gp2", "ebs.csi.aws.com", true);
+        assert!(node_local_defaults_to_demote(&[ebs, longhorn]).is_empty());
+    }
+
+    /// #134: defaultness via the legacy beta annotation only (k3s ≤1.20-era
+    /// manifests) still marks the class for demotion — the k3s addon
+    /// controller restores that form too.
+    #[test]
+    fn node_local_defaults_to_demote_covers_the_beta_annotation() {
+        let mut beta_local = sc("local-path", "rancher.io/local-path", false);
+        beta_local.metadata.annotations = Some(
+            [(
+                "storageclass.beta.kubernetes.io/is-default-class".to_string(),
+                "true".to_string(),
+            )]
+            .into(),
+        );
+        let longhorn = sc("longhorn", "driver.longhorn.io", true);
+        assert_eq!(
+            node_local_defaults_to_demote(&[beta_local, longhorn]),
+            vec!["local-path".to_string()]
+        );
     }
 
     /// Build a StorageClass fixture for the pure classifier.
