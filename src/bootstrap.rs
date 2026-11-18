@@ -2032,7 +2032,7 @@ pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
             .patch(
                 name,
                 &PatchParams::default(),
-                &Patch::Merge(serde_json::json!({ "spec": { "value": value } })),
+                &Patch::Merge(longhorn_setting_patch(&value)),
             )
             .await
             .with_context(|| format!("sizing longhorn setting {name}"))?;
@@ -2041,6 +2041,14 @@ pub(crate) async fn reconcile_longhorn_sizing(client: &Client) -> Result<()> {
     // 3. Volumes already asking for more than the cluster can place.
     heal_overscheduled_volumes(client, replicas).await?;
     Ok(())
+}
+
+/// The merge-patch body for a Longhorn `Setting` (#133): the CRD has no
+/// `spec` — `value` is a TOP-LEVEL field — so a `spec.value` patch is pruned
+/// by the API server to a reported-success no-op. Shaped here in one pure
+/// place so the test below can pin what the API server will actually apply.
+fn longhorn_setting_patch(value: &str) -> serde_json::Value {
+    serde_json::json!({ "value": value })
 }
 
 /// Swap `numberOfReplicas` in the driver-deployer's `storageclass.yaml` blob.
@@ -2200,6 +2208,7 @@ pub async fn apply_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use serde_json::json;
 
     // --- Longhorn replica sizing (#26) ---------------------------------------
@@ -2234,6 +2243,51 @@ parameters:
         // untouched neighbors survive the round-trip
         assert_eq!(v["parameters"]["staleReplicaTimeout"].as_str(), Some("30"));
         assert_eq!(v["metadata"]["name"].as_str(), Some("longhorn"));
+    }
+
+    /// #133: the settings.longhorn.io CRD has no `spec` — `value` is a
+    /// top-level field — so a merge patch nesting it under `spec` is pruned
+    /// to a reported-success no-op by the API server. The patch body must set
+    /// `value` at the top level and carry no `spec` key at all.
+    #[test]
+    fn longhorn_setting_patch_sets_value_at_the_top_level() {
+        let body = longhorn_setting_patch("2");
+        assert_eq!(body["value"].as_str(), Some("2"));
+        assert!(
+            body.get("spec").is_none(),
+            "the Setting CRD has no spec to patch into: {body}"
+        );
+    }
+
+    /// Grounding for the shape above: every served version of the vendored
+    /// settings.longhorn.io CRD really declares a top-level `value` and no
+    /// `spec` — if a Longhorn re-vendor ever moves it under `spec`, this
+    /// fails before the sizing silently stops applying again.
+    #[test]
+    fn vendored_setting_crd_keeps_value_at_the_top_level() {
+        let crd = serde_yaml::Deserializer::from_str(LONGHORN_BUNDLE)
+            .filter_map(|d| serde_yaml::Value::deserialize(d).ok())
+            .find(|v| {
+                v["kind"].as_str() == Some("CustomResourceDefinition")
+                    && v["metadata"]["name"].as_str() == Some("settings.longhorn.io")
+            })
+            .expect("the vendored bundle carries the settings.longhorn.io CRD");
+        let versions = crd["spec"]["versions"]
+            .as_sequence()
+            .expect("the CRD lists its served versions");
+        assert!(!versions.is_empty());
+        for v in versions {
+            let props = &v["schema"]["openAPIV3Schema"]["properties"];
+            let name = v["name"].as_str().unwrap_or("<unnamed version>");
+            assert!(
+                props.get("value").is_some(),
+                "{name} must declare a top-level value"
+            );
+            assert!(
+                props.get("spec").is_none(),
+                "{name} must not declare a spec"
+            );
+        }
     }
 
     // --- R7 operator guard (`#115`) -----------------------------------------
