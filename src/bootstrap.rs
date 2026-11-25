@@ -1505,7 +1505,7 @@ async fn bootstrap_complete(client: &Client) -> Result<bool> {
 /// operator was briefly not Ready.
 ///
 /// The same tick re-asserts the single-default StorageClass invariant (#134):
-/// if the `longhorn` SC exists, any node-local SC that re-acquired the default
+/// while the `longhorn` SC is the default, any node-local SC that re-acquired the default
 /// annotation — k3s's addon controller re-applies local-storage.yaml and
 /// restores it on `local-path` — is demoted again, best-effort.
 ///
@@ -1532,7 +1532,7 @@ pub async fn run_revoke_watch() {
         // would otherwise starve it. Best-effort: a failure here never gates
         // the rest of this loop.
         if let Err(e) = demote_node_local_defaults(&client, true).await {
-            tracing::debug!("revoke watch: default-SC re-assert failed: {e:#}");
+            tracing::warn!("revoke watch: default-SC re-assert failed: {e:#}");
         }
         let api: Api<ClusterRoleBinding> = Api::all(client.clone());
         match api.get_opt(BOOTSTRAP_BINDING).await {
@@ -1843,19 +1843,20 @@ async fn wait_longhorn_storage_ready(client: &Client, sc: &str, secs: u64) -> Re
 }
 
 /// Names of the StorageClasses whose default-class annotation must be cleared:
-/// node-local classes still flagged default while the `longhorn` SC exists (it
-/// is meant to be the cluster's sole default — two defaults make PVC binding
-/// ambiguous). Empty when no `longhorn` SC is in the list: the invariant is
-/// only asserted on clusters that actually run Longhorn (#134). Pure over the
-/// SC list so the install-time demote and the periodic re-assert share one
-/// definition of drift.
+/// node-local classes still flagged default while the `longhorn` SC is itself
+/// the default (it is meant to be the cluster's sole default — two defaults
+/// make PVC binding ambiguous). Empty when `longhorn` is absent or not the
+/// default: the invariant is only asserted on clusters that run Longhorn as
+/// their default, so an admin who deliberately moved the default elsewhere is
+/// left alone (#134). Pure over the SC list so the install-time demote and the
+/// periodic re-assert share one definition of drift.
 fn node_local_defaults_to_demote(
     scs: &[k8s_openapi::api::storage::v1::StorageClass],
 ) -> Vec<String> {
-    let longhorn_installed = scs
+    let longhorn_is_default = scs
         .iter()
-        .any(|sc| sc.metadata.name.as_deref() == Some(LONGHORN_SC));
-    if !longhorn_installed {
+        .any(|sc| sc.metadata.name.as_deref() == Some(LONGHORN_SC) && sc_is_default(sc));
+    if !longhorn_is_default {
         return Vec::new();
     }
     scs.iter()
@@ -2903,6 +2904,16 @@ spec: {selector: {}, template: {spec: {containers: [\
         // A non-node-local default (foreign CSI) next to longhorn stays put.
         let ebs = sc("gp2", "ebs.csi.aws.com", true);
         assert!(node_local_defaults_to_demote(&[ebs, longhorn]).is_empty());
+    }
+
+    /// #134: an admin who un-defaulted `longhorn` and made `local-path` the
+    /// default on purpose keeps that choice — the re-assert must not strip the
+    /// only default and leave the cluster with none.
+    #[test]
+    fn node_local_defaults_to_demote_respects_an_admin_chosen_default() {
+        let local = sc("local-path", "rancher.io/local-path", true);
+        let longhorn = sc("longhorn", "driver.longhorn.io", false);
+        assert!(node_local_defaults_to_demote(&[local, longhorn]).is_empty());
     }
 
     /// #134: defaultness via the legacy beta annotation only (k3s ≤1.20-era
