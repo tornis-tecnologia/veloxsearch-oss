@@ -260,6 +260,11 @@ fetch "$REL/SHA256SUMS" "$TMP/SHA256SUMS" || die "could not download SHA256SUMS 
   || die "install.yaml does not match the release's SHA256SUMS: refusing to apply it"
 kc apply -f "$TMP/install.yaml" >/dev/null
 kc -n "$APP_NS" rollout status deployment/veloxsearch --timeout=600s
+# The bundled Postgres is the first Longhorn volume on this cluster: its
+# rollout is the proof that storage provisions and attaches, not only that
+# the StorageClass exists.
+kc -n "$APP_NS" rollout status statefulset/veloxsearch-postgres --timeout=600s \
+  || die "Postgres did not start — its volume is on Longhorn: kubectl -n longhorn-system get pods; kubectl -n ${APP_NS} describe pvc"
 
 ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
 ip="${ip:-<this-machine-ip>}"
