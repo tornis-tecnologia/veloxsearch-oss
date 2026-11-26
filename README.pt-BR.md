@@ -32,19 +32,27 @@ oferecer a elas o código-fonte dessa versão. [Detalhes abaixo](#licença).
 
 ## Instalação
 
+Dois caminhos — a escolha depende de você já ter Kubernetes ou não.
+
+**Do zero** (uma VM ou servidor Linux sem nada): um script instala k3s, Longhorn
+e VeloxSearch e no fim mostra a URL e o comando para juntar mais máquinas.
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/main/deploy/install-k3s.sh
+sudo bash install-k3s.sh
+```
+
+**Kubernetes existente**: aplique o manifesto da release.
+
 ```bash
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 ```
 
-Depois, `kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80`,
-abra <http://localhost:3000> e crie a conta de admin — o app assume dali. Em um
-cluster com IngressClass padrão (um k3s recém-instalado, por exemplo) ele também
-responde em `http://<ip-do-nó>/`, sem port-forward.
-
-> **Começando do zero, sem um cluster Kubernetes?** Siga o
-> [`docs/INSTALL.md`](docs/INSTALL.md#0-no-kubernetes-cluster-yet) — de uma
-> máquina Linux ou de um notebook até a interface no ar — ou o
-> [guia do usuário no site](https://get.veloxsearch.ai/docs/pt).
+Depois abra `http://<ip-do-nó>:30080` (ou `kubectl -n veloxsearch-system
+port-forward svc/veloxsearch 3000:80` e <http://localhost:3000>) e crie a conta
+de admin — o app assume dali. Os dois caminhos em detalhe:
+[`docs/INSTALL.md`](docs/INSTALL.md), ou o
+[guia do usuário no site](https://get.veloxsearch.ai/docs/pt).
 
 ## Telas
 

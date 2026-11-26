@@ -57,6 +57,22 @@ jobs:
           done
           echo "install.yaml pins veloxsearch-oss:$version"
 
+      # The from-zero installer (#189) installs the release it names and the
+      # Longhorn bundle it pins by digest: both must be this tree's, or the
+      # release it ships in installs something else or refuses its own bundle.
+      # It runs as root on bare machines, so shellcheck it like install.sh.
+      - name: install-k3s.sh pins this version and this Longhorn bundle
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          pinned=$(sed -n 's/^VELOX_VERSION=//p' deploy/install-k3s.sh)
+          [ "$pinned" = "$version" ] || { echo "::error file=deploy/install-k3s.sh::VELOX_VERSION=$pinned != Cargo.toml version $version"; exit 1; }
+          bundle=$(sha256sum deploy/bootstrap/longhorn.yaml | cut -d' ' -f1)
+          pinned=$(sed -n 's/^LONGHORN_SHA256=//p' deploy/install-k3s.sh)
+          [ "$pinned" = "$bundle" ] || { echo "::error file=deploy/install-k3s.sh::LONGHORN_SHA256 != sha256 of deploy/bootstrap/longhorn.yaml ($bundle)"; exit 1; }
+          shellcheck -S style deploy/install-k3s.sh
+          echo "install-k3s.sh installs $version with the vendored Longhorn bundle"
+
       # release.yml derives the upgrade asset with this script (ADR-057); a
       # manifest it cannot split must fail on the PR, not on the release.
       - name: The upgrade manifest drops only the bootstrap binding and the env ConfigMap

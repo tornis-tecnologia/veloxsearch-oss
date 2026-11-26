@@ -1,8 +1,23 @@
 # Installing VeloxSearch — minikube · k0s · k3s · vanilla k8s
 
-This is the **canonical install guide.** On a cluster you already have, installing
-is one command — the image is published to a **public registry**, so the cluster
-pulls it anonymously and there is no client binary to install:
+This is the **canonical install guide.** There are exactly two routes, and the
+only question that picks one is whether you already have Kubernetes:
+
+| You have… | Route | What you run |
+|---|---|---|
+| **A bare Linux VM or server** (no Kubernetes) | **A. From zero** — [§0](#0-no-kubernetes-cluster-yet) | one script: it installs k3s, Longhorn and VeloxSearch |
+| **A Kubernetes cluster** (any of §1) | **B. Existing Kubernetes** — below | one `kubectl apply` of the release manifest |
+
+**A. From zero** — on the machine, as root:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/main/deploy/install-k3s.sh
+sudo bash install-k3s.sh
+# prints the URL (http://<node-ip>:30080) and the command that joins more machines
+```
+
+**B. Existing Kubernetes** — the image is published to a **public registry**, so
+the cluster pulls it anonymously and there is no client binary to install:
 
 ```bash
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
@@ -12,7 +27,10 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # open http://localhost:3000 — first run: create the admin account
 ```
 
-No cluster yet? Start at [§0](#0-no-kubernetes-cluster-yet). Pulling from a
+Either way the first visit opens `/setup`, where you create the admin account —
+there is no generated password to look up.
+
+Pulling from a
 private mirror instead of the public image? That is the one case the `velox` CLI
 exists for — see [§2b](#2b-private-mirror-authenticated-pull--alternative) and
 [`INSTALLER.md`](INSTALLER.md).
@@ -43,23 +61,63 @@ already there.
 
 ## 0. No Kubernetes cluster yet?
 
-VeloxSearch installs *into* a Kubernetes cluster; it does not create one. The
-shortest path from a bare machine:
+Route A. `deploy/install-k3s.sh` takes a bare Linux machine to a running
+VeloxSearch: it is the manifest apply of route B with the cluster built
+underneath it. Run it as root on the first machine:
 
-- **A Linux server or VM** (amd64, ≥ 12 GiB RAM / 4 vCPU recommended — see R4):
-  install single-node k3s with its official one-liner, then follow
-  [§3b](#3b-k3s-verified--k3s-greenfield) for the Longhorn node packages and
-  the kubeconfig:
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/main/deploy/install-k3s.sh
+sudo bash install-k3s.sh                    # or: --version X.Y.Z for another release
+```
 
-  ```bash
-  curl -sfL https://get.k3s.io | sh -    # k3s quick start: https://docs.k3s.io/quick-start
-  ```
+What it does, in order — each step is skipped when already done, so re-running
+it is safe:
 
-- **A laptop** with Docker or a hypervisor: minikube, sized above the R4 floor —
-  [§3a](#3a-minikube) has the exact `minikube start` line.
+1. Installs the Longhorn node packages (`open-iscsi` with `iscsid` running, an
+   NFS client, `dmsetup`) and checks the kernel has the `iscsi_tcp` module.
+2. Installs **k3s** at a pinned version (the line the conformance fleet runs)
+   **without** its node-local `local-path` storage, through k3s's own installer
+   fetched at that tag and checked by sha256.
+3. Installs **Longhorn** from the bundle VeloxSearch itself vendors
+   (`deploy/bootstrap/longhorn.yaml`, checked by sha256), so `longhorn` is the
+   cluster's only default StorageClass — the storage VeloxSearch recommends (R3).
+4. Applies the release's `install.yaml` (checked against the release's
+   `SHA256SUMS`) and waits for the app.
+5. Prints the URL — `http://<node-ip>:30080/`, and `http://<node-ip>/` through
+   k3s's Traefik — and the command that joins another machine, with its token.
 
-Either way, once `kubectl get nodes` shows a `Ready` node, the one-command install
-at the top of this page is all that is left.
+Everything after that is the app's own first run, exactly as on route B:
+cert-manager and the OpenSearch operator are installed from the UI, and the
+Longhorn replica count is sized to the cluster when you create a deployment.
+
+**More machines.** Run on each one, as root, the command the first machine
+printed:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tornis-tecnologia/veloxsearch-oss/main/deploy/install-k3s.sh
+sudo K3S_TOKEN='<token>' bash install-k3s.sh --join <first-machine-ip>
+```
+
+Without `K3S_TOKEN` (or `--token`) the script asks for it. The token is in
+`/var/lib/rancher/k3s/server/node-token` on the first machine. Joined machines
+are k3s agents: they get the Longhorn packages and run workloads and Longhorn
+replicas.
+
+**Remove.** `sudo bash install-k3s.sh --uninstall` on each machine runs k3s's own
+uninstaller — the cluster and everything in it are deleted. Longhorn replica
+data stays in `/var/lib/longhorn` until you delete it.
+
+**Limits.** amd64 only; Debian/Ubuntu (apt) and RHEL-family (dnf) hosts — the
+script was verified on Debian 13 and Ubuntu 24.04. One k3s server: losing the
+first machine loses the control plane (no HA). The machines must reach each
+other on 6443/tcp (k3s), 8472/udp (flannel) and 10250/tcp (kubelet), and reach
+GitHub and docker.io. VeloxSearch needs ≥ 8 GiB schedulable RAM across the
+cluster (R4); a smaller first machine gets a warning — join another before you
+create a deployment.
+
+**A laptop** with Docker or a hypervisor: use minikube instead, sized above the
+R4 floor — [§3a](#3a-minikube) has the exact `minikube start` line — and follow
+route B.
 
 ---
 
