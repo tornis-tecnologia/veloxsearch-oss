@@ -45,6 +45,11 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Path dependencies carry no version: the in-tree crates shared with the core
+# (crates/velox-integrations, crates/velox-policy) and this workspace's own
+# (velox-opamp), ADR-068. Same allowance as the root deny.toml; it exempts only
+# `publish = false` crates, so a registry dependency without a version still fails.
+allow-wildcard-paths = true
 deny = [
     # aws-lc-rs is the one crypto provider across the product (licence
     # verification here, registry signatures and rustls in the core).
