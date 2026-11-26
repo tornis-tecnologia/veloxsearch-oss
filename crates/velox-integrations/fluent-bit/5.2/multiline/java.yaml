@@ -1,0 +1,13 @@
+kind: multiline_parser
+name: java
+title:
+  en: Java
+  es: Java
+  pt: Java
+description:
+  en: Joins Java application log entries that span multiple lines.
+  es: Une entradas de log de aplicaciones Java que abarcan varias lineas.
+  pt: Junta entradas de log de aplicacoes Java que ocupam varias linhas.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/parsers/multiline-parsing
+verified: true
+params: []

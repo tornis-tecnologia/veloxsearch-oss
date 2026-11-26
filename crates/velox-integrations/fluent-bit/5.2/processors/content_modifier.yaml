@@ -1,0 +1,79 @@
+kind: processor
+name: content_modifier
+title:
+  en: Content Modifier
+  es: Content Modifier
+  pt: Content Modifier
+description:
+  en: Inserts, updates, deletes, renames, hashes, extracts or converts log and trace content.
+  es: Inserta, actualiza, elimina, renombra, aplica hash, extrae o convierte el contenido de logs y trazas.
+  pt: Insere, atualiza, remove, renomeia, aplica hash, extrai ou converte o conteudo de logs e traces.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/processors/content-modifier
+event_types:
+- logs
+- traces
+verified: true
+params:
+- key: action
+  type: select
+  description:
+    en: Operation to run on the content.
+    es: Operacion a ejecutar sobre el contenido.
+    pt: Operacao a executar sobre o conteudo.
+  required: true
+  options:
+  - convert
+  - delete
+  - extract
+  - hash
+  - insert
+  - rename
+  - upsert
+- key: context
+  type: select
+  description:
+    en: Where the modification is applied.
+    es: Donde se aplica la modificacion.
+    pt: Onde a modificacao e aplicada.
+  required: true
+  options:
+  - attributes
+  - body
+  - span_name
+  - span_kind
+  - span_status
+  - span_attributes
+  - otel_resource_attributes
+  - otel_scope_name
+  - otel_scope_version
+  - otel_scope_attributes
+  - otel_log_attributes
+- key: key
+  type: string
+  description:
+    en: Name of the key the modification applies to.
+    es: Nombre de la clave a la que se aplica la modificacion.
+    pt: Nome da chave a que a modificacao se aplica.
+- key: value
+  type: string
+  description:
+    en: Value used by the action; its meaning depends on the action.
+    es: Valor usado por la accion; su significado depende de la accion.
+    pt: Valor usado pela acao; seu significado depende da acao.
+- key: pattern
+  type: regex
+  description:
+    en: Regular expression used only by the extract action.
+    es: Expresion regular usada solo por la accion extract.
+    pt: Expressao regular usada apenas pela acao extract.
+- key: converted_type
+  type: select
+  description:
+    en: Target type for the convert action.
+    es: Tipo de destino para la accion convert.
+    pt: Tipo de destino para a acao convert.
+  options:
+  - string
+  - boolean
+  - int
+  - double

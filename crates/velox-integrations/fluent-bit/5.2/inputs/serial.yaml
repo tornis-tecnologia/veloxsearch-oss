@@ -1,0 +1,57 @@
+kind: input
+name: serial
+title:
+  en: Serial interface
+  es: Serial interface
+  pt: Serial interface
+description:
+  en: Reads data from a serial device.
+  es: Lee datos de un dispositivo serie.
+  pt: Lê dados de um dispositivo serial.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/serial
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+verified: true
+params:
+- key: file
+  type: string
+  required: true
+  description:
+    en: Path to the serial device, such as /dev/ttyS0.
+    es: Ruta del dispositivo serie, como /dev/ttyS0.
+    pt: Caminho do dispositivo serial, como /dev/ttyS0.
+- key: bitrate
+  type: integer
+  required: true
+  description:
+    en: Communication speed, such as 9600 or 115200.
+    es: Velocidad de comunicación, como 9600 o 115200.
+    pt: Velocidade de comunicação, como 9600 ou 115200.
+- key: format
+  type: select
+  default: none
+  options:
+  - json
+  - none
+  description:
+    en: Incoming data format; cannot be used together with separator.
+    es: Formato de los datos entrantes; no se puede usar junto con separator.
+    pt: Formato dos dados de entrada; não pode ser usado junto com separator.
+- key: min_bytes
+  type: integer
+  default: 1
+  advanced: true
+  description:
+    en: Bytes that must be available before a message is processed.
+    es: Bytes que deben estar disponibles antes de procesar un mensaje.
+    pt: Bytes que devem estar disponíveis antes de processar uma mensagem.
+- key: separator
+  type: string
+  description:
+    en: String that marks the end of a message.
+    es: Cadena que marca el fin de un mensaje.
+    pt: Texto que marca o fim de uma mensagem.

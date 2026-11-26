@@ -1,0 +1,55 @@
+kind: processor
+name: metrics_selector
+title:
+  en: Metrics Selector
+  es: Metrics Selector
+  pt: Metrics Selector
+description:
+  en: Includes or excludes metrics by name or label value.
+  es: Incluye o excluye metricas por nombre o valor de etiqueta.
+  pt: Inclui ou exclui metricas por nome ou valor de rotulo.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/processors/metrics-selector
+event_types:
+- metrics
+verified: true
+params:
+- key: action
+  type: select
+  description:
+    en: Whether to include or exclude matching metrics.
+    es: Si se incluyen o excluyen las metricas coincidentes.
+    pt: Se as metricas correspondentes sao incluidas ou excluidas.
+  options:
+  - INCLUDE
+  - EXCLUDE
+- key: context
+  type: select
+  description:
+    en: The matching context.
+    es: El contexto de coincidencia.
+    pt: O contexto de correspondencia.
+  default: metric_name
+  options:
+  - metric_name
+  - delete_label_value
+- key: label
+  type: string
+  description:
+    en: A label key and value pair.
+    es: Un par clave y valor de etiqueta.
+    pt: Um par chave e valor de rotulo.
+- key: metric_name
+  type: string
+  description:
+    en: String that determines which metrics are affected, depending on the operation.
+    es: Cadena que determina que metricas se ven afectadas, segun la operacion.
+    pt: String que determina quais metricas sao afetadas, conforme a operacao.
+- key: operation_type
+  type: select
+  description:
+    en: Matching operation applied to metric_name.
+    es: Operacion de coincidencia aplicada a metric_name.
+    pt: Operacao de correspondencia aplicada a metric_name.
+  options:
+  - PREFIX
+  - SUBSTRING

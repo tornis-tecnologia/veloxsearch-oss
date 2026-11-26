@@ -1,0 +1,43 @@
+kind: filter
+name: geoip2
+title:
+  en: GeoIP2
+  es: GeoIP2
+  pt: GeoIP2
+description:
+  en: Adds GeoIP2 geolocation fields to records from an IP address field; can be attached to an input
+    as a processor.
+  es: Agrega campos de geolocalización GeoIP2 a los registros a partir de un campo de dirección IP; puede
+    adjuntarse a un input como processor.
+  pt: Adiciona campos de geolocalização GeoIP2 aos registros a partir de um campo de endereço IP; pode
+    ser anexado a um input como processor.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/geoip2-filter
+verified: true
+event_types:
+- logs
+as_processor: true
+params:
+- key: database
+  type: string
+  description:
+    en: Path to the GeoIP2 database.
+    es: Ruta de la base de datos GeoIP2.
+    pt: Caminho do banco de dados GeoIP2.
+  required: true
+  operator_settable: false
+- key: lookup_key
+  type: string
+  description:
+    en: Field name to process; several entries are supported.
+    es: Nombre del campo a procesar; se admiten varias entradas.
+    pt: Nome do campo a processar; várias entradas são suportadas.
+  required: true
+  multi: repeat
+- key: record
+  type: string
+  description:
+    en: Defines the KEY LOOKUP_KEY VALUE triplet.
+    es: Define la tripleta KEY LOOKUP_KEY VALUE.
+    pt: Define a tripla KEY LOOKUP_KEY VALUE.
+  required: true
+  multi: repeat

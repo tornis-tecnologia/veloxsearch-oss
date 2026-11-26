@@ -81,6 +81,44 @@ impl AccessConfig {
         self.opensearch_host(name).map(|h| format!("https://{h}"))
     }
 
+    /// Public host for the deployment's **Velox Mesh agent face** (ADR-072
+    /// amendment 4): `<name>-mesh.<domain>`, the same `<deployment>-<service>`
+    /// rule as the OpenSearch API route. One Mesh serves every deployment;
+    /// the per-deployment host is what an operator reads in the enrol
+    /// command, and only `/v1` (enrol + OpAMP) is routed behind it.
+    pub fn mesh_host(&self, name: &str) -> Option<String> {
+        self.ingress_enabled()
+            .then(|| format!("{name}-mesh.{}", self.base_domain))
+    }
+
+    /// The deployment's routed addresses in the shape a Mesh endpoint takes,
+    /// with the port spelled out (`:443`) so the address on the settings
+    /// screen is the one Fluent Bit's `Port` and the agent's `--mesh` get.
+    pub fn opensearch_endpoint(&self, name: &str) -> Option<String> {
+        self.opensearch_host(name)
+            .map(|h| format!("https://{h}:443"))
+    }
+
+    pub fn mesh_endpoint(&self, name: &str) -> Option<String> {
+        self.mesh_host(name).map(|h| format!("https://{h}:443"))
+    }
+
+    /// Whether the routes are served under a certificate a host cannot
+    /// verify: no TLS Secret configured (so the ingress controller's own
+    /// default certificate answers — Traefik's is self-signed) **and** a
+    /// wildcard-DNS base domain, which is a lab by construction. A real
+    /// domain without a Secret is assumed to sit behind an edge with a public
+    /// certificate (the reason `tls_secret` may be empty, #54), so its
+    /// endpoints keep verifying; an operator whose edge is not that adds an
+    /// endpoint by hand and says so.
+    pub fn routes_self_signed(&self) -> bool {
+        self.tls_secret.trim().is_empty()
+            && (self.base_domain == FALLBACK_DNS_SUFFIX
+                || self
+                    .base_domain
+                    .ends_with(&format!(".{FALLBACK_DNS_SUFFIX}")))
+    }
+
     /// The copy-paste alternative that works on any cluster. Takes the
     /// deployment's OWN namespace: since ADR-044 that is the tenant's, not the
     /// app's, and a command naming the wrong namespace silently does nothing.
@@ -187,6 +225,9 @@ pub async fn backfill_ingresses(cfg: &AccessConfig, scope: &crate::scope::Scope)
         }
         if let Err(e) = crate::k8s::ensure_dashboards_ingress(&client, cfg, &dep).await {
             tracing::warn!("backfilling dashboards ingress for {dep}: {e:#}");
+        }
+        if let Err(e) = crate::k8s::ensure_mesh_ingress(&client, cfg, &dep).await {
+            tracing::warn!("backfilling the Velox Mesh route for {dep}: {e:#}");
         }
     }
     Ok(())
@@ -308,6 +349,43 @@ mod tests {
             ingress_class: class.into(),
             tls_secret: String::new(),
         }
+    }
+
+    /// ADR-072 amendment 4: the Mesh's agent face follows the same
+    /// `<deployment>-<service>.<domain>` rule as the OpenSearch API, both
+    /// with the port spelled out, and neither exists on port-forward.
+    #[test]
+    fn routed_endpoints_follow_the_deployment_service_rule() {
+        let mut c = ingress("traefik");
+        c.base_domain = "192.168.1.200.sslip.io".into();
+        assert_eq!(
+            c.mesh_endpoint("tornis-096o").as_deref(),
+            Some("https://tornis-096o-mesh.192.168.1.200.sslip.io:443")
+        );
+        assert_eq!(
+            c.opensearch_endpoint("tornis-096o").as_deref(),
+            Some("https://tornis-096o-opensearch.192.168.1.200.sslip.io:443")
+        );
+        let pf = AccessConfig::default();
+        assert_eq!(pf.mesh_endpoint("x"), None);
+        assert_eq!(pf.opensearch_endpoint("x"), None);
+    }
+
+    /// Self-signed only where it is by construction: a wildcard-DNS lab with
+    /// no Secret. A Secret, or a real domain (an edge may hold the public
+    /// certificate), keeps verification on.
+    #[test]
+    fn only_a_wildcard_dns_lab_without_a_secret_is_self_signed() {
+        let mut c = ingress("traefik");
+        c.base_domain = "192.168.1.200.sslip.io".into();
+        assert!(c.routes_self_signed());
+        c.tls_secret = "wildcard-tls".into();
+        assert!(!c.routes_self_signed());
+        c.tls_secret.clear();
+        c.base_domain = "veloxsearch.ai".into();
+        assert!(!c.routes_self_signed());
+        c.base_domain = "notsslip.io".into();
+        assert!(!c.routes_self_signed());
     }
 
     /// #139: the v0.12.0 report — no IngressClass at all, `traefik` saved

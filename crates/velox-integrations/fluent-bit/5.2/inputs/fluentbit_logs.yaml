@@ -1,0 +1,19 @@
+kind: input
+name: fluentbit_logs
+title:
+  en: Fluent Bit logs
+  es: Fluent Bit logs
+  pt: Fluent Bit logs
+description:
+  en: Ingests Fluent Bit's own internal logs as records.
+  es: Ingiere los registros internos de Fluent Bit como registros.
+  pt: Ingere os logs internos do proprio Fluent Bit como registros.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/fluentbit-logs
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+verified: true
+params: []

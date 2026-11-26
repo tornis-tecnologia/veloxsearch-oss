@@ -247,7 +247,9 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 The `k3s-greenfield` fixture (single node) runs this path: install → R1–R8 ✓ →
 cert-manager + operator auto-installed → Longhorn installed at first create from
 the local-path default. A 3-node k3s cluster that already has a `longhorn`
-StorageClass skips the Longhorn install. What each run last proved is in
+StorageClass skips the Longhorn install. If k3s's addon controller later flips
+`local-path` back to default, the operator re-demotes it in favour of `longhorn`
+(#134). What each run last proved is in
 [`REQUIREMENTS.md`](REQUIREMENTS.md#tested-platforms-the-conformance-fleet-adr-026).
 
 ### 3c. k0s (verified — `k0s-bare`)
@@ -401,7 +403,7 @@ Three places serve an install manifest. They are not equivalent:
 | Source | What it is |
 | --- | --- |
 | `releases/latest/download/install.yaml` | **Use this.** A release artifact with the image pinned to a **digest**. Immutable: the same URL applied twice gives the same bytes and the same image |
-| `releases/download/v0.14.0/install.yaml` | The same, pinned to one version instead of following the newest |
+| `releases/download/v0.15.0/install.yaml` | The same, pinned to one version instead of following the newest |
 | `deploy/install.yaml` on `main` | The source the release is built from. The image is a version **tag**, not a digest, and `main` moves. CI keeps the tag equal to `Cargo.toml`'s version, so it never names an older release than the tree (#54) — but it is still right for development, wrong for a cluster you care about |
 | `https://get.veloxsearch.ai/install.yml` | A convenience redirect to `releases/latest/download/install.yaml`. The daily `Mirror watch` workflow fails if it stops redirecting there or its bytes differ from the release asset (#37) |
 

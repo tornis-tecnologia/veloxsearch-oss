@@ -1,0 +1,45 @@
+kind: filter
+name: grep
+title:
+  en: Grep
+  es: Grep
+  pt: Grep
+description:
+  en: Keeps or drops log records by matching a regular expression against a field; can also run as an
+    input processor.
+  es: Conserva o descarta registros de log según una expresión regular aplicada a un campo; también puede
+    ejecutarse como processor de entrada.
+  pt: Mantém ou descarta registros de log conforme uma expressão regular aplicada a um campo; também pode
+    rodar como processor de entrada.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/grep
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: regex
+  type: regex
+  multi: repeat
+  description:
+    en: 'Keeps records whose KEY value matches the regex (format: KEY REGEX).'
+    es: 'Conserva registros cuyo valor de KEY coincide con la regex (formato: KEY REGEX).'
+    pt: 'Mantém registros cujo valor de KEY casa com a regex (formato: KEY REGEX).'
+- key: exclude
+  type: regex
+  multi: repeat
+  description:
+    en: 'Drops records whose KEY value matches the regex (format: KEY REGEX).'
+    es: 'Descarta registros cuyo valor de KEY coincide con la regex (formato: KEY REGEX).'
+    pt: 'Descarta registros cujo valor de KEY casa com a regex (formato: KEY REGEX).'
+- key: logical_op
+  type: select
+  default: legacy
+  options:
+  - AND
+  - OR
+  - legacy
+  since: 2.1.0
+  description:
+    en: 'How multiple rules combine: AND, OR, or legacy (AND when including, OR when excluding).'
+    es: 'Cómo se combinan varias reglas: AND, OR o legacy (AND al incluir, OR al excluir).'
+    pt: 'Como várias regras se combinam: AND, OR ou legacy (AND ao incluir, OR ao excluir).'

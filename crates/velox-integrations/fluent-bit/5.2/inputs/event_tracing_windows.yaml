@@ -1,0 +1,129 @@
+kind: input
+name: event_tracing_windows
+title:
+  en: Event Tracing for Windows
+  es: Event Tracing for Windows
+  pt: Event Tracing for Windows
+description:
+  en: Collects Event Tracing for Windows (ETW) events as log records.
+  es: Recopila eventos de Event Tracing for Windows (ETW) como registros de log.
+  pt: Coleta eventos do Event Tracing for Windows (ETW) como registros de log.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/event-tracing-windows
+verified: true
+os:
+- windows
+event_types:
+- logs
+requires:
+- root
+params:
+- key: provider_guid
+  type: string
+  description:
+    en: ETW provider GUID to enable; required for provider sessions unless provider_name is set.
+    es: GUID del proveedor ETW a habilitar; requerido en sesiones de proveedor salvo que se defina provider_name.
+    pt: GUID do provedor ETW a habilitar; obrigatório em sessões de provedor, exceto se provider_name
+      estiver definido.
+- key: provider_name
+  type: string
+  description:
+    en: ETW provider name to resolve and enable; required for provider sessions unless provider_guid is
+      set.
+    es: Nombre del proveedor ETW a resolver y habilitar; requerido en sesiones de proveedor salvo que
+      se defina provider_guid.
+    pt: Nome do provedor ETW a resolver e habilitar; obrigatório em sessões de provedor, exceto se provider_guid
+      estiver definido.
+- key: session_name
+  type: string
+  description:
+    en: Name of the real-time ETW session.
+    es: Nombre de la sesión ETW en tiempo real.
+    pt: Nome da sessão ETW em tempo real.
+  default: fluent-bit-event-tracing-windows
+- key: session_type
+  type: select
+  description:
+    en: 'Session type: provider consumer or system kernel logger.'
+    es: 'Tipo de sesión: consumidor de proveedor o kernel logger del sistema.'
+    pt: 'Tipo de sessão: consumidor de provedor ou kernel logger do sistema.'
+  default: provider
+  options:
+  - provider
+  - system
+- key: stale_session_action
+  type: select
+  description:
+    en: 'What to do if the session already exists: stop it and retry, or fail.'
+    es: 'Qué hacer si la sesión ya existe: detenerla y reintentar, o fallar.'
+    pt: 'O que fazer se a sessão já existir: pará-la e tentar de novo, ou falhar.'
+  default: stop
+  options:
+  - stop
+  - fail
+- key: level
+  type: integer
+  description:
+    en: Provider level, from 0 to 255.
+    es: Nivel del proveedor, de 0 a 255.
+    pt: Nível do provedor, de 0 a 255.
+  default: 5
+- key: match_any_keyword
+  type: string
+  description:
+    en: MatchAnyKeyword mask, decimal or hex.
+    es: Máscara MatchAnyKeyword, decimal o hex.
+    pt: Máscara MatchAnyKeyword, decimal ou hex.
+  default: '0xffffffffffffffff'
+  advanced: true
+- key: match_all_keyword
+  type: string
+  description:
+    en: MatchAllKeyword mask, decimal or hex.
+    es: Máscara MatchAllKeyword, decimal o hex.
+    pt: Máscara MatchAllKeyword, decimal ou hex.
+  default: '0'
+  advanced: true
+- key: kernel_flags
+  type: string
+  description:
+    en: Kernel event flags for system sessions (process, thread, image_load, cswitch, tcpip, disk_io or
+      a numeric mask).
+    es: Flags de eventos del kernel para sesiones de sistema (process, thread, image_load, cswitch, tcpip,
+      disk_io o máscara numérica).
+    pt: Flags de eventos do kernel para sessões de sistema (process, thread, image_load, cswitch, tcpip,
+      disk_io ou máscara numérica).
+  default: process,thread,image_load
+  multi: join
+  join: ','
+- key: buffer_size
+  type: integer
+  description:
+    en: Session buffer size in KB; zero uses the Windows default.
+    es: Tamaño del buffer de sesión en KB; cero usa el valor por defecto de Windows.
+    pt: Tamanho do buffer da sessão em KB; zero usa o padrão do Windows.
+  default: 64
+  advanced: true
+- key: minimum_buffers
+  type: integer
+  description:
+    en: Minimum number of session buffers; zero uses the Windows default.
+    es: Número mínimo de buffers de sesión; cero usa el valor por defecto de Windows.
+    pt: Número mínimo de buffers da sessão; zero usa o padrão do Windows.
+  default: 4
+  advanced: true
+- key: maximum_buffers
+  type: integer
+  description:
+    en: Maximum number of session buffers; zero uses the Windows default.
+    es: Número máximo de buffers de sesión; cero usa el valor por defecto de Windows.
+    pt: Número máximo de buffers da sessão; zero usa o padrão do Windows.
+  default: 32
+  advanced: true
+- key: flush_timer
+  type: integer
+  description:
+    en: Session flush interval in seconds; zero uses the Windows default.
+    es: Intervalo de vaciado de la sesión en segundos; cero usa el valor por defecto de Windows.
+    pt: Intervalo de flush da sessão em segundos; zero usa o padrão do Windows.
+  default: 1
+  advanced: true

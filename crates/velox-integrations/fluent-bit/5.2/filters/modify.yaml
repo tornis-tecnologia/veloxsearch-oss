@@ -1,0 +1,166 @@
+kind: filter
+name: modify
+title:
+  en: Modify
+  es: Modify
+  pt: Modify
+description:
+  en: Adds, renames, copies, moves or removes record keys, optionally guarded by conditions; rules run
+    in order; not listed as an input processor on the processors page.
+  es: Agrega, renombra, copia, mueve o elimina claves del registro, opcionalmente con condiciones; las
+    reglas se ejecutan en orden; no figura como processor de entrada en la página de processors.
+  pt: Adiciona, renomeia, copia, move ou remove chaves do registro, opcionalmente com condições; as regras
+    rodam em ordem; não consta como processor de entrada na página de processors.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/modify
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: set
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: adds KEY with VALUE, overwriting it if present (format: KEY VALUE).'
+    es: 'Regla: agrega KEY con VALUE, sobrescribiéndola si existe (formato: KEY VALUE).'
+    pt: 'Regra: adiciona KEY com VALUE, sobrescrevendo se existir (formato: KEY VALUE).'
+- key: add
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: adds KEY with VALUE only if KEY does not exist (format: KEY VALUE).'
+    es: 'Regla: agrega KEY con VALUE solo si KEY no existe (formato: KEY VALUE).'
+    pt: 'Regra: adiciona KEY com VALUE somente se KEY não existir (formato: KEY VALUE).'
+- key: remove
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: removes KEY if present.'
+    es: 'Regla: elimina KEY si existe.'
+    pt: 'Regra: remove KEY se existir.'
+- key: remove_wildcard
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: removes every key matching a wildcard.'
+    es: 'Regla: elimina todas las claves que coinciden con un comodín.'
+    pt: 'Regra: remove todas as chaves que casam com um curinga.'
+- key: remove_regex
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: removes every key matching a regular expression.'
+    es: 'Regla: elimina todas las claves que coinciden con una expresión regular.'
+    pt: 'Regra: remove todas as chaves que casam com uma expressão regular.'
+- key: rename
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: renames KEY to NEW_KEY only if NEW_KEY is free (format: KEY NEW_KEY).'
+    es: 'Regla: renombra KEY a NEW_KEY solo si NEW_KEY está libre (formato: KEY NEW_KEY).'
+    pt: 'Regra: renomeia KEY para NEW_KEY somente se NEW_KEY estiver livre (formato: KEY NEW_KEY).'
+- key: hard_rename
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: renames KEY to NEW_KEY, overwriting NEW_KEY if it exists (format: KEY NEW_KEY).'
+    es: 'Regla: renombra KEY a NEW_KEY, sobrescribiendo NEW_KEY si existe (formato: KEY NEW_KEY).'
+    pt: 'Regra: renomeia KEY para NEW_KEY, sobrescrevendo NEW_KEY se existir (formato: KEY NEW_KEY).'
+- key: copy
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: copies KEY to COPY_KEY only if COPY_KEY is free (format: KEY COPY_KEY).'
+    es: 'Regla: copia KEY a COPY_KEY solo si COPY_KEY está libre (formato: KEY COPY_KEY).'
+    pt: 'Regra: copia KEY para COPY_KEY somente se COPY_KEY estiver livre (formato: KEY COPY_KEY).'
+- key: hard_copy
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: copies KEY to COPY_KEY, overwriting COPY_KEY if it exists (format: KEY COPY_KEY).'
+    es: 'Regla: copia KEY a COPY_KEY, sobrescribiendo COPY_KEY si existe (formato: KEY COPY_KEY).'
+    pt: 'Regra: copia KEY para COPY_KEY, sobrescrevendo COPY_KEY se existir (formato: KEY COPY_KEY).'
+- key: move_to_start
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: moves keys matching a wildcard to the start of the record.'
+    es: 'Regla: mueve al inicio del registro las claves que coinciden con un comodín.'
+    pt: 'Regra: move para o início do registro as chaves que casam com um curinga.'
+- key: move_to_end
+  type: string
+  multi: repeat
+  description:
+    en: 'Rule: moves keys matching a wildcard to the end of the record.'
+    es: 'Regla: mueve al final del registro las claves que coinciden con un comodín.'
+    pt: 'Regra: move para o fim do registro as chaves que casam com um curinga.'
+- key: key_exists
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: KEY exists in the record.'
+    es: 'Condición: KEY existe en el registro.'
+    pt: 'Condição: KEY existe no registro.'
+- key: key_does_not_exist
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: KEY does not exist in the record.'
+    es: 'Condición: KEY no existe en el registro.'
+    pt: 'Condição: KEY não existe no registro.'
+- key: a_key_matches
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: at least one key matches the regex.'
+    es: 'Condición: al menos una clave coincide con la regex.'
+    pt: 'Condição: pelo menos uma chave casa com a regex.'
+- key: no_key_matches
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: no key matches the regex.'
+    es: 'Condición: ninguna clave coincide con la regex.'
+    pt: 'Condição: nenhuma chave casa com a regex.'
+- key: key_value_equals
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: KEY equals VALUE (format: KEY VALUE).'
+    es: 'Condición: KEY es igual a VALUE (formato: KEY VALUE).'
+    pt: 'Condição: KEY é igual a VALUE (formato: KEY VALUE).'
+- key: key_value_does_not_equal
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: KEY does not equal VALUE (format: KEY VALUE).'
+    es: 'Condición: KEY no es igual a VALUE (formato: KEY VALUE).'
+    pt: 'Condição: KEY não é igual a VALUE (formato: KEY VALUE).'
+- key: key_value_matches
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: the value of KEY matches the regex (format: KEY REGEX).'
+    es: 'Condición: el valor de KEY coincide con la regex (formato: KEY REGEX).'
+    pt: 'Condição: o valor de KEY casa com a regex (formato: KEY REGEX).'
+- key: key_value_does_not_match
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: the value of KEY does not match the regex (format: KEY REGEX).'
+    es: 'Condición: el valor de KEY no coincide con la regex (formato: KEY REGEX).'
+    pt: 'Condição: o valor de KEY não casa com a regex (formato: KEY REGEX).'
+- key: matching_keys_have_matching_values
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: keys matching KEY_REGEX have values matching VALUE_REGEX.'
+    es: 'Condición: las claves que coinciden con KEY_REGEX tienen valores que coinciden con VALUE_REGEX.'
+    pt: 'Condição: chaves que casam com KEY_REGEX têm valores que casam com VALUE_REGEX.'
+- key: matching_keys_do_not_have_matching_values
+  type: string
+  multi: repeat
+  description:
+    en: 'Condition: keys matching KEY_REGEX do not have values matching VALUE_REGEX.'
+    es: 'Condición: las claves que coinciden con KEY_REGEX no tienen valores que coincidan con VALUE_REGEX.'
+    pt: 'Condição: chaves que casam com KEY_REGEX não têm valores que casam com VALUE_REGEX.'

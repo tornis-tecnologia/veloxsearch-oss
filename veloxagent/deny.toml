@@ -1,0 +1,62 @@
+# cargo-deny for the Velox Mesh / Velox Agent workspace — the `supply-chain` CI
+# job runs it with `--manifest-path veloxagent/Cargo.toml`. Same policy as the
+# root `deny.toml` (one crypto provider, no OpenSSL, permissive licences only,
+# crates.io only), kept as its own file because the two workspaces resolve
+# different graphs and an ignore that is right for one is noise in the other.
+# Run it locally with:
+#
+#   cd veloxagent && cargo deny check
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # unsafe-libyaml (archived upstream, no safe upgrade) comes in through
+    # serde_yaml, the manifest format the registry fixed and the shared
+    # `velox-integrations` crate parses. Same ignore as the root, same reason.
+    { id = "RUSTSEC-2024-0449", reason = "via serde_yaml (velox-integrations manifest parsing); no safe upgrade available" },
+]
+
+[licenses]
+# AGPL-3.0-only may link anything permissive; an allowlist so an unexpected
+# licence stops CI and gets a decision rather than being inferred.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    # This workspace and the shared crate.
+    "AGPL-3.0-only",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies carry no version: the in-tree crates shared with the core
+# (crates/velox-integrations, crates/velox-policy) and this workspace's own
+# (velox-opamp), ADR-068. Same allowance as the root deny.toml; it exempts only
+# `publish = false` crates, so a registry dependency without a version still fails.
+allow-wildcard-paths = true
+deny = [
+    # aws-lc-rs is the one crypto provider across the product (licence
+    # verification here, registry signatures and rustls in the core).
+    { name = "ring", reason = "aws-lc-rs is the process-wide crypto provider; see Cargo.toml" },
+    { name = "openssl-sys", reason = "rustls only; the agent is a static musl binary with no OpenSSL" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,113 @@
+kind: parser_format
+name: logfmt
+title:
+  en: Logfmt
+  es: Logfmt
+  pt: Logfmt
+description:
+  en: Parses logfmt key=value lines.
+  es: Analiza lineas logfmt con formato clave=valor.
+  pt: Faz o parse de linhas logfmt no formato chave=valor.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/parsers/logfmt
+verified: true
+params:
+- key: time_key
+  type: string
+  description:
+    en: Name of the field that holds the timestamp.
+    es: Nombre del campo que contiene la marca de tiempo.
+    pt: Nome do campo que contem o timestamp.
+- key: time_format
+  type: string
+  description:
+    en: Timestamp format, interpreted with strptime(3); %L handles fractional seconds.
+    es: Formato de la marca de tiempo, interpretado con strptime(3); %L maneja fracciones de segundo.
+    pt: Formato do timestamp, interpretado com strptime(3); %L trata fracoes de segundo.
+- key: time_keep
+  type: bool
+  default: false
+  description:
+    en: Keep the original time field after it is parsed.
+    es: Conserva el campo de tiempo original tras analizarlo.
+    pt: Mantem o campo de tempo original apos o parse.
+- key: time_strict
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Require an exact match with the time format; false is more permissive.
+    es: Exige coincidencia exacta con el formato de tiempo; false es mas permisivo.
+    pt: Exige correspondencia exata com o formato de tempo; false e mais permissivo.
+- key: time_offset
+  type: string
+  advanced: true
+  description:
+    en: Fixed UTC offset (such as -0600) applied to local dates.
+    es: Desfase UTC fijo (como -0600) aplicado a fechas locales.
+    pt: Deslocamento UTC fixo (como -0600) aplicado a datas locais.
+- key: time_zone
+  type: string
+  advanced: true
+  description:
+    en: IANA timezone name applied when the timestamp has no zone; overrides time_offset.
+    es: Nombre de zona horaria IANA aplicado cuando la marca no trae zona; reemplaza time_offset.
+    pt: Nome de fuso IANA aplicado quando o timestamp nao tem fuso; sobrepoe time_offset.
+- key: time_system_timezone
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: When the format has no %z, use the system timezone from the TZ environment variable.
+    es: Si el formato no tiene %z, usa la zona horaria del sistema de la variable TZ.
+    pt: Se o formato nao tem %z, usa o fuso do sistema da variavel TZ.
+- key: types
+  type: string
+  multi: join
+  join: ' '
+  description:
+    en: Field types as space-separated name:type pairs (string, integer, bool, float, hex).
+    es: Tipos de campos como pares nombre:tipo separados por espacios (string, integer, bool, float, hex).
+    pt: Tipos de campos como pares nome:tipo separados por espaco (string, integer, bool, float, hex).
+- key: decode_field
+  type: select
+  options:
+  - json
+  - escaped
+  - escaped_utf8
+  - mysql_quoted
+  multi: repeat
+  advanced: true
+  description:
+    en: Decode a field's content with the given decoder and add the resulting keys to the record.
+    es: Decodifica el contenido de un campo con el decodificador indicado y agrega las claves resultantes
+      al registro.
+    pt: Decodifica o conteudo de um campo com o decodificador indicado e adiciona as chaves resultantes
+      ao registro.
+- key: decode_field_as
+  type: select
+  options:
+  - json
+  - escaped
+  - escaped_utf8
+  - mysql_quoted
+  multi: repeat
+  advanced: true
+  description:
+    en: Decode a field's content and replace its value with the result, without adding keys.
+    es: Decodifica el contenido de un campo y reemplaza su valor con el resultado, sin agregar claves.
+    pt: Decodifica o conteudo de um campo e substitui seu valor pelo resultado, sem adicionar chaves.
+- key: skip_empty_values
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Skip empty values instead of adding them to the record.
+    es: Omite los valores vacios en lugar de agregarlos al registro.
+    pt: Ignora valores vazios em vez de adiciona-los ao registro.
+- key: logfmt_no_bare_keys
+  type: bool
+  default: false
+  description:
+    en: Reject entries that contain keys without values.
+    es: Rechaza entradas con claves sin valor.
+    pt: Rejeita entradas com chaves sem valor.

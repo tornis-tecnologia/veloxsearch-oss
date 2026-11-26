@@ -1,0 +1,42 @@
+kind: filter
+name: throttle
+title:
+  en: Throttle
+  es: Throttle
+  pt: Throttle
+description:
+  en: Limits the average rate of messages per interval using a leaky bucket and sliding window.
+  es: Limita la tasa promedio de mensajes por intervalo usando leaky bucket y ventana deslizante.
+  pt: Limita a taxa média de mensagens por intervalo usando leaky bucket e janela deslizante.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/throttle
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: interval
+  type: string
+  description:
+    en: Time interval in sleep format, for example 3s, 1.5m or 0.5h.
+    es: Intervalo de tiempo en formato sleep, por ejemplo 3s, 1.5m o 0.5h.
+    pt: Intervalo de tempo no formato sleep, por exemplo 3s, 1.5m ou 0.5h.
+- key: print_status
+  type: bool
+  advanced: true
+  description:
+    en: Whether to print status messages with the current rate and limits to the information logs.
+    es: Si se imprimen mensajes de estado con la tasa actual y los límites en los logs de información.
+    pt: Se mensagens de status com a taxa atual e os limites são impressas nos logs de informação.
+- key: rate
+  type: integer
+  description:
+    en: Amount of messages allowed per interval.
+    es: Cantidad de mensajes permitidos por intervalo.
+    pt: Quantidade de mensagens permitidas por intervalo.
+- key: window
+  type: integer
+  default: 5
+  description:
+    en: Amount of intervals to calculate the average over.
+    es: Cantidad de intervalos sobre los que se calcula el promedio.
+    pt: Quantidade de intervalos sobre os quais a média é calculada.

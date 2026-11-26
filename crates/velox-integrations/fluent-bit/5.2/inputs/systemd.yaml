@@ -1,0 +1,109 @@
+kind: input
+name: systemd
+title:
+  en: Systemd
+  es: Systemd
+  pt: Systemd
+description:
+  en: Reads log entries from the systemd journal.
+  es: Lee entradas de log del journal de systemd.
+  pt: Lê entradas de log do journal do systemd.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/systemd
+os:
+- linux
+event_types:
+- logs
+requires:
+- systemd
+verified: true
+params:
+- key: path
+  type: string
+  advanced: true
+  description:
+    en: Custom journal directory; cannot be combined with namespace.
+    es: Directorio de journal personalizado; no se puede combinar con namespace.
+    pt: Diretório de journal personalizado; não pode ser combinado com namespace.
+- key: namespace
+  type: string
+  advanced: true
+  description:
+    en: Reads from a named journal namespace; cannot be combined with path.
+    es: Lee de un namespace de journal con nombre; no se puede combinar con path.
+    pt: Lê de um namespace de journal nomeado; não pode ser combinado com path.
+- key: max_fields
+  type: integer
+  default: 8000
+  advanced: true
+  description:
+    en: Maximum number of fields allowed per record.
+    es: Cantidad máxima de campos permitidos por registro.
+    pt: Número máximo de campos permitidos por registro.
+- key: max_entries
+  type: integer
+  default: 5000
+  advanced: true
+  description:
+    en: Maximum log entries processed per round.
+    es: Máximo de entradas de log procesadas por ronda.
+    pt: Máximo de entradas de log processadas por rodada.
+- key: systemd_filter
+  type: string
+  multi: repeat
+  description:
+    en: Filters on journal key=value pairs; can be repeated.
+    es: Filtra por pares clave=valor del journal; se puede repetir.
+    pt: Filtra por pares chave=valor do journal; pode ser repetido.
+- key: systemd_filter_type
+  type: select
+  default: or
+  options:
+  - and
+  - or
+  description:
+    en: How multiple systemd_filter entries are combined.
+    es: Cómo se combinan varias entradas systemd_filter.
+    pt: Como várias entradas systemd_filter são combinadas.
+- key: read_from_tail
+  type: bool
+  default: false
+  description:
+    en: Skips entries already stored and reads only new ones.
+    es: Omite las entradas ya almacenadas y lee solo las nuevas.
+    pt: Ignora as entradas já armazenadas e lê apenas as novas.
+- key: lowercase
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Lowercases journal field names.
+    es: Convierte a minúsculas los nombres de campos del journal.
+    pt: Converte para minúsculas os nomes dos campos do journal.
+- key: strip_underscores
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Removes the leading underscore from field names.
+    es: Quita el guion bajo inicial de los nombres de campos.
+    pt: Remove o sublinhado inicial dos nomes dos campos.
+- key: db
+  type: string
+  operator_settable: false
+  description:
+    en: Database file that tracks the journal cursor.
+    es: Archivo de base de datos que guarda el cursor del journal.
+    pt: Arquivo de banco de dados que guarda o cursor do journal.
+- key: db.sync
+  type: select
+  default: full
+  options:
+  - extra
+  - full
+  - normal
+  - 'off'
+  advanced: true
+  description:
+    en: SQLite disk synchronization mode for the cursor database.
+    es: Modo de sincronización a disco de SQLite para la base del cursor.
+    pt: Modo de sincronização em disco do SQLite para o banco do cursor.

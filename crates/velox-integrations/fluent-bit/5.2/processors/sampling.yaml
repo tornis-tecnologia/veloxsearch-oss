@@ -1,0 +1,51 @@
+# Top-level keys only; nested sampling_settings/conditions keys are described in the yaml param descriptions, not catalogued individually.
+kind: processor
+name: sampling
+title:
+  en: Sampling
+  es: Sampling
+  pt: Sampling
+description:
+  en: Samples traces with head (probabilistic) or tail sampling.
+  es: Muestrea trazas con muestreo de cabecera (probabilistico) o de cola.
+  pt: Amostra traces com amostragem de cabeca (probabilistica) ou de cauda.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/processors/sampling
+event_types:
+- traces
+verified: false
+params:
+- key: type
+  type: select
+  description:
+    en: 'Sampling mode: head (probabilistic) or tail.'
+    es: 'Modo de muestreo: de cabecera (probabilistic) o de cola (tail).'
+    pt: 'Modo de amostragem: de cabeca (probabilistic) ou de cauda (tail).'
+  options:
+  - probabilistic
+  - tail
+- key: sampling_settings
+  type: yaml
+  description:
+    en: Settings object whose keys depend on the type (sampling_percentage, decision_wait, max_traces,
+      legacy_reconcile).
+    es: Objeto de ajustes cuyas claves dependen del tipo (sampling_percentage, decision_wait, max_traces,
+      legacy_reconcile).
+    pt: Objeto de ajustes cujas chaves dependem do tipo (sampling_percentage, decision_wait, max_traces,
+      legacy_reconcile).
+- key: conditions
+  type: yaml
+  description:
+    en: List of tail sampling conditions (latency, span_count, status_code, string_attribute, numeric_attribute,
+      boolean_attribute, trace_state).
+    es: Lista de condiciones de muestreo de cola (latency, span_count, status_code, string_attribute,
+      numeric_attribute, boolean_attribute, trace_state).
+    pt: Lista de condicoes de amostragem de cauda (latency, span_count, status_code, string_attribute,
+      numeric_attribute, boolean_attribute, trace_state).
+- key: debug
+  type: bool
+  description:
+    en: Prints traces and their spans when enabled.
+    es: Imprime las trazas y sus spans cuando esta habilitado.
+    pt: Imprime os traces e seus spans quando habilitado.
+  default: false
+  advanced: true

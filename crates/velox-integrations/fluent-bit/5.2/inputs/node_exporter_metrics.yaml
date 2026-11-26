@@ -1,0 +1,318 @@
+kind: input
+name: node_exporter_metrics
+title:
+  en: Node exporter metrics
+  es: Node exporter metrics
+  pt: Node exporter metrics
+description:
+  en: Collects host metrics in the style of Prometheus Node Exporter.
+  es: Recolecta metricas del host al estilo de Prometheus Node Exporter.
+  pt: Coleta metricas do host no estilo do Prometheus Node Exporter.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/node-exporter-metrics
+os:
+- linux
+- darwin
+event_types:
+- metrics
+verified: true
+params:
+- key: scrape_interval
+  type: integer
+  description:
+    en: Global collection interval in seconds.
+    es: Intervalo global de recoleccion en segundos.
+    pt: Intervalo global de coleta em segundos.
+  default: 5
+- key: metrics
+  type: select
+  description:
+    en: Collectors to enable.
+    es: Colectores a habilitar.
+    pt: Coletores a habilitar.
+  default: cpu,cpufreq,meminfo,diskstats,filesystem,uname,stat,time,timex,loadavg,vmstat,netdev,netstat,sockstat,filefd,systemd,nvme,thermal_zone,hwmon,powersupplyclass
+  multi: join
+  join: ','
+  options:
+  - cpu
+  - cpufreq
+  - diskstats
+  - filefd
+  - filesystem
+  - hwmon
+  - loadavg
+  - meminfo
+  - netdev
+  - netstat
+  - nvme
+  - processes
+  - sockstat
+  - stat
+  - systemd
+  - textfile
+  - thermal_zone
+  - time
+  - timex
+  - uname
+  - vmstat
+  - powersupplyclass
+- key: collector.cpu.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.cpufreq.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.diskstats.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.filefd.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.filesystem.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.hwmon.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.loadavg.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.meminfo.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.netdev.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.netstat.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.nvme.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.processes.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.sockstat.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.stat.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.systemd.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.textfile.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.thermalzone.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.time.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.timex.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.uname.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.vmstat.scrape_interval
+  type: integer
+  description:
+    en: Overrides the global scrape interval for this collector; 0 uses the global one.
+    es: Reemplaza el intervalo global para este colector; 0 usa el global.
+    pt: Substitui o intervalo global para este coletor; 0 usa o global.
+  default: 0
+  advanced: true
+- key: collector.textfile.path
+  type: string
+  description:
+    en: File or directory to read textfile metrics from.
+    es: Archivo o directorio de donde leer metricas textfile.
+    pt: Arquivo ou diretorio de onde ler metricas textfile.
+  operator_settable: false
+- key: diskstats.ignore_device_regex
+  type: regex
+  description:
+    en: Device names ignored by the diskstats collector.
+    es: Nombres de dispositivo ignorados por el colector diskstats.
+    pt: Nomes de dispositivo ignorados pelo coletor diskstats.
+  advanced: true
+- key: filesystem.ignore_filesystem_type_regex
+  type: regex
+  description:
+    en: Filesystem types ignored by the filesystem collector.
+    es: Tipos de sistema de archivos ignorados por el colector filesystem.
+    pt: Tipos de sistema de arquivos ignorados pelo coletor filesystem.
+  advanced: true
+- key: filesystem.ignore_mount_point_regex
+  type: regex
+  description:
+    en: Mount points ignored by the filesystem collector.
+    es: Puntos de montaje ignorados por el colector filesystem.
+    pt: Pontos de montagem ignorados pelo coletor filesystem.
+  advanced: true
+- key: path.procfs
+  type: string
+  description:
+    en: Mount point of procfs.
+    es: Punto de montaje de procfs.
+    pt: Ponto de montagem do procfs.
+  default: /proc
+  advanced: true
+  operator_settable: false
+- key: path.sysfs
+  type: string
+  description:
+    en: Mount point of sysfs.
+    es: Punto de montaje de sysfs.
+    pt: Ponto de montagem do sysfs.
+  default: /sys
+  advanced: true
+  operator_settable: false
+- key: path.rootfs
+  type: string
+  description:
+    en: Mount point of the root filesystem.
+    es: Punto de montaje del sistema de archivos raiz.
+    pt: Ponto de montagem do sistema de arquivos raiz.
+  default: /
+  advanced: true
+  operator_settable: false
+- key: systemd_include_pattern
+  type: regex
+  description:
+    en: Regex of systemd units to include.
+    es: Regex de unidades systemd a incluir.
+    pt: Regex de unidades systemd a incluir.
+  advanced: true
+- key: systemd_exclude_pattern
+  type: regex
+  description:
+    en: Regex of systemd units to exclude.
+    es: Regex de unidades systemd a excluir.
+    pt: Regex de unidades systemd a excluir.
+  advanced: true
+- key: systemd_include_service_task_metrics
+  type: bool
+  description:
+    en: Includes service task metrics.
+    es: Incluye metricas de tareas de servicio.
+    pt: Inclui metricas de tarefas de servico.
+  default: false
+  advanced: true
+- key: systemd_service_restart_metrics
+  type: bool
+  description:
+    en: Includes service restart metrics.
+    es: Incluye metricas de reinicio de servicio.
+    pt: Inclui metricas de reinicio de servico.
+  default: false
+  advanced: true
+- key: systemd_unit_start_time_metrics
+  type: bool
+  description:
+    en: Includes unit start time metrics.
+    es: Incluye metricas de hora de inicio de unidad.
+    pt: Inclui metricas de hora de inicio da unidade.
+  default: false
+  advanced: true

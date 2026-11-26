@@ -1,0 +1,229 @@
+kind: input
+name: prometheus_remote_write
+title:
+  en: Prometheus remote write
+  es: Prometheus remote write
+  pt: Prometheus remote write
+description:
+  en: Receives metrics pushed with the Prometheus remote write protocol.
+  es: Recibe metricas enviadas con el protocolo remote write de Prometheus.
+  pt: Recebe metricas enviadas com o protocolo remote write do Prometheus.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/prometheus-remote-write
+os:
+- linux
+- windows
+- darwin
+event_types:
+- metrics
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  description:
+    en: Address to listen on.
+    es: Direccion de escucha.
+    pt: Endereco de escuta.
+  default: 0.0.0.0
+- key: port
+  type: integer
+  description:
+    en: Port to listen on.
+    es: Puerto de escucha.
+    pt: Porta de escuta.
+  default: 8080
+- key: uri
+  type: string
+  description:
+    en: HTTP path that receives payloads, such as /api/prom/push.
+    es: Ruta HTTP que recibe los payloads, como /api/prom/push.
+    pt: Caminho HTTP que recebe os payloads, como /api/prom/push.
+- key: successful_response_code
+  type: select
+  description:
+    en: HTTP status code returned on success.
+    es: Codigo HTTP devuelto en caso de exito.
+    pt: Codigo HTTP retornado em caso de sucesso.
+  default: 201
+  options:
+  - 200
+  - 201
+  - 204
+  advanced: true
+- key: tag_from_uri
+  type: bool
+  description:
+    en: Builds the tag from the URI, overriding any configured tag.
+    es: Construye el tag desde la URI, reemplazando cualquier tag.
+    pt: Monta a tag a partir da URI, substituindo qualquer tag.
+  default: true
+  advanced: true
+- key: buffer_chunk_size
+  type: size
+  description:
+    en: Chunk size for incoming data.
+    es: Tamano de chunk de los datos entrantes.
+    pt: Tamanho do chunk dos dados recebidos.
+  default: 512K
+  advanced: true
+- key: buffer_max_size
+  type: size
+  description:
+    en: Maximum buffer size for one request.
+    es: Tamano maximo de buffer por peticion.
+    pt: Tamanho maximo do buffer por requisicao.
+  default: 4M
+  advanced: true
+- key: http2
+  type: bool
+  description:
+    en: Enables HTTP/2.
+    es: Habilita HTTP/2.
+    pt: Habilita HTTP/2.
+  default: true
+  advanced: true
+- key: http_server.max_connections
+  type: integer
+  description:
+    en: Maximum concurrent connections; 0 means unlimited.
+    es: Maximo de conexiones concurrentes; 0 es ilimitado.
+    pt: Maximo de conexoes concorrentes; 0 e ilimitado.
+  default: 0
+  advanced: true
+- key: http_server.workers
+  type: integer
+  description:
+    en: Number of listener worker threads.
+    es: Numero de hilos de escucha.
+    pt: Numero de threads de escuta.
+  default: 1
+  advanced: true
+- key: http_server.ingress_queue_event_limit
+  type: integer
+  description:
+    en: Maximum deferred queue entries (used with more than one worker).
+    es: Maximo de entradas en la cola diferida (con mas de un worker).
+    pt: Maximo de entradas na fila diferida (com mais de um worker).
+  default: 8192
+  advanced: true
+- key: http_server.ingress_queue_byte_limit
+  type: size
+  description:
+    en: Maximum deferred queue size (used with more than one worker).
+    es: Tamano maximo de la cola diferida (con mas de un worker).
+    pt: Tamanho maximo da fila diferida (com mais de um worker).
+  default: 256M
+  advanced: true
+- key: http_server.max_decoded_body_size
+  type: size
+  description:
+    en: Maximum request body size after decompression.
+    es: Tamano maximo del cuerpo tras descomprimir.
+    pt: Tamanho maximo do corpo apos descompressao.
+  default: 100M
+  advanced: true
+  since: 5.2.0
+- key: tls
+  type: bool
+  description:
+    en: Enables TLS.
+    es: Habilita TLS.
+    pt: Habilita TLS.
+  default: false
+- key: tls.ca_file
+  type: string
+  description:
+    en: CA certificate file.
+    es: Archivo de certificado CA.
+    pt: Arquivo de certificado CA.
+  advanced: true
+- key: tls.ca_path
+  type: string
+  description:
+    en: Directory with CA certificates.
+    es: Directorio con certificados CA.
+    pt: Diretorio com certificados CA.
+  advanced: true
+- key: tls.crt_file
+  type: string
+  description:
+    en: Certificate file.
+    es: Archivo de certificado.
+    pt: Arquivo de certificado.
+  advanced: true
+- key: tls.key_file
+  type: string
+  description:
+    en: Private key file.
+    es: Archivo de clave privada.
+    pt: Arquivo de chave privada.
+  advanced: true
+- key: tls.key_passwd
+  type: password
+  description:
+    en: Password of the key file.
+    es: Contrasena del archivo de clave.
+    pt: Senha do arquivo de chave.
+  advanced: true
+  secret: true
+- key: tls.crl_file
+  type: string
+  description:
+    en: CRL file used to reject revoked certificates.
+    es: Archivo CRL para rechazar certificados revocados.
+    pt: Arquivo CRL para rejeitar certificados revogados.
+  advanced: true
+  since: 5.1.3
+- key: tls.ciphers
+  type: string
+  description:
+    en: Allowed ciphers (up to TLSv1.2).
+    es: Cifrados permitidos (hasta TLSv1.2).
+    pt: Cifras permitidas (ate TLSv1.2).
+  advanced: true
+- key: tls.min_version
+  type: string
+  description:
+    en: Minimum TLS version.
+    es: Version minima de TLS.
+    pt: Versao minima de TLS.
+  advanced: true
+- key: tls.max_version
+  type: string
+  description:
+    en: Maximum TLS version.
+    es: Version maxima de TLS.
+    pt: Versao maxima de TLS.
+  advanced: true
+- key: tls.verify
+  type: bool
+  description:
+    en: Enables certificate validation.
+    es: Habilita la validacion de certificados.
+    pt: Habilita a validacao de certificados.
+  default: true
+  advanced: true
+- key: tls.verify_hostname
+  type: bool
+  description:
+    en: Enables hostname verification.
+    es: Habilita la verificacion del nombre de host.
+    pt: Habilita a verificacao do nome do host.
+  default: false
+  advanced: true
+- key: tls.vhost
+  type: string
+  description:
+    en: SNI hostname.
+    es: Nombre de host SNI.
+    pt: Nome de host SNI.
+  advanced: true
+- key: tls.debug
+  type: integer
+  description:
+    en: TLS debug level, 0 to 4.
+    es: Nivel de depuracion TLS, 0 a 4.
+    pt: Nivel de depuracao TLS, 0 a 4.
+  default: 1
+  advanced: true

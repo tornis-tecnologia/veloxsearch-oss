@@ -15,7 +15,8 @@
 import { useState, useEffect, useRef } from "react";
 import { API } from "./api.jsx";
 import { STR } from "./i18n.jsx";
-import { Icon, Btn, Banner } from "./ui.jsx";
+import { Icon, Btn } from "./ui.jsx";
+import { Popup } from "./alerts.jsx";
 
 function reqGlyph(s) { return s === "pass" ? "✓" : s === "warn" ? "⚠" : "✗"; }
 function reqColor(s) { return s === "pass" ? "var(--accent)" : s === "warn" ? "var(--warn)" : "var(--danger)"; }
@@ -28,26 +29,29 @@ function reqWord(s, t) { return s === "pass" ? t.boot_req_pass : s === "warn" ? 
 // fields (ADR-019 — the backend's R9 detail is only the English fallback), and
 // exported so the main shell can show it too: a conformant cluster never sees
 // this screen, and drift is exactly what an upgraded, conformant cluster has.
-function OperatorDriftNotice({ status, t, style }) {
+// A Popup: in the shell it lands in the alert tray and can be muted (per
+// running image — a different drift alerts again); here, with no tray, it
+// renders in place.
+function OperatorDriftNotice({ status, t }) {
   if (!status || !status.operator_drift) return null;
   return (
-    <Banner tone="warn" title={t.boot_drift_title} testid="operator-drift" style={style}>
+    <Popup id={`operator-drift:${status.operator_image_running || "?"}`} tone="warn" title={t.boot_drift_title} testid="operator-drift" t={t}>
       {t.boot_drift
         .replace("{0}", status.operator_image_running || "?")
         .replace("{1}", status.operator_image_vendored || "?")}
-    </Banner>
+    </Popup>
   );
 }
 
 // #122: tenants whose signup could not provision their isolation. The backend
 // retries them; this makes sure the admin knows until it succeeds.
-function TenantIsolationNotice({ status, t, style }) {
+function TenantIsolationNotice({ status, t }) {
   const slugs = status?.unisolated_tenants || [];
   if (slugs.length === 0) return null;
   return (
-    <Banner tone="warn" title={t.boot_isolation_title} testid="tenant-isolation" style={style}>
+    <Popup id={`tenant-isolation:${[...slugs].sort().join(",")}`} tone="warn" title={t.boot_isolation_title} testid="tenant-isolation" t={t}>
       {t.boot_isolation.replace("{0}", slugs.join(", "))}
-    </Banner>
+    </Popup>
   );
 }
 

@@ -1,0 +1,56 @@
+kind: processor
+name: tda
+title:
+  en: Topological Data Analysis
+  es: Topological Data Analysis
+  pt: Topological Data Analysis
+description:
+  en: Computes topological (Betti) metrics over a sliding window of metric samples.
+  es: Calcula metricas topologicas (Betti) sobre una ventana deslizante de muestras de metricas.
+  pt: Calcula metricas topologicas (Betti) sobre uma janela deslizante de amostras de metricas.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/processors/tda
+event_types:
+- metrics
+verified: true
+params:
+- key: embed_delay
+  type: integer
+  description:
+    en: Lag, in samples, between successive values in delay embedding.
+    es: Desfase, en muestras, entre valores sucesivos en la incrustacion por retardo.
+    pt: Defasagem, em amostras, entre valores sucessivos na incorporacao por atraso.
+  default: 1
+  advanced: true
+- key: embed_dim
+  type: integer
+  description:
+    en: Embedding dimension; 1 disables embedding.
+    es: Dimension de incrustacion; 1 la desactiva.
+    pt: Dimensao de incorporacao; 1 a desativa.
+  default: 3
+  advanced: true
+- key: min_points
+  type: integer
+  description:
+    en: Samples required before TDA runs; no Betti metrics are emitted until then.
+    es: Muestras requeridas antes de ejecutar TDA; no se emiten metricas Betti hasta entonces.
+    pt: Amostras necessarias antes de executar TDA; nenhuma metrica Betti e emitida ate la.
+  default: 10
+- key: threshold
+  type: number
+  description:
+    en: 0 enables an automatic multi-quantile scan; a value between 0 and 1 sets a single quantile for
+      the Rips radius.
+    es: 0 activa un barrido automatico multicuantil; un valor entre 0 y 1 fija un unico cuantil para el
+      radio de Rips.
+    pt: 0 ativa uma varredura automatica multiquantil; um valor entre 0 e 1 define um unico quantil para
+      o raio de Rips.
+  default: 0
+  advanced: true
+- key: window_size
+  type: integer
+  description:
+    en: Number of samples kept in the sliding window.
+    es: Numero de muestras en la ventana deslizante.
+    pt: Numero de amostras mantidas na janela deslizante.
+  default: 60

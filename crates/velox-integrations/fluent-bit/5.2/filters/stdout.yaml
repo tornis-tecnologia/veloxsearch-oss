@@ -1,0 +1,16 @@
+kind: filter
+name: stdout
+title:
+  en: Standard output
+  es: Salida estándar
+  pt: Saída padrão
+description:
+  en: Prints the records flowing through the filter to stdout, for debugging.
+  es: Imprime en stdout los registros que pasan por el filtro, para depuración.
+  pt: Imprime no stdout os registros que passam pelo filtro, para depuração.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/standard-output
+event_types:
+- logs
+as_processor: true
+verified: true
+params: []

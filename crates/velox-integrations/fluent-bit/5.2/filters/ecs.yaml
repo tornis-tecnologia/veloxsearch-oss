@@ -1,0 +1,74 @@
+kind: filter
+name: ecs
+title:
+  en: ECS Metadata
+  es: ECS Metadata
+  pt: ECS Metadata
+description:
+  en: Enriches records with AWS ECS container and task metadata; can be attached to an input as a processor.
+  es: Enriquece los registros con metadatos de contenedores y tareas de AWS ECS; puede adjuntarse a un
+    input como processor.
+  pt: Enriquece registros com metadados de contêineres e tarefas do AWS ECS; pode ser anexado a um input
+    como processor.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/ecs-metadata
+verified: true
+event_types:
+- logs
+as_processor: true
+params:
+- key: add
+  type: string
+  description:
+    en: Adds a key with a value template built from ECS metadata variables; can be repeated.
+    es: Agrega una clave con una plantilla de valor construida con variables de metadatos ECS; se puede
+      repetir.
+    pt: Adiciona uma chave com um template de valor construído com variáveis de metadados ECS; pode ser
+      repetido.
+  multi: repeat
+- key: agent_endpoint_retries
+  type: integer
+  description:
+    en: Retries for failed requests to the ECS Agent introspection endpoint.
+    es: Reintentos para solicitudes fallidas al endpoint de introspección del agente ECS.
+    pt: Tentativas para requisições falhas ao endpoint de introspecção do agente ECS.
+  default: 2
+  advanced: true
+- key: cluster_metadata_only
+  type: bool
+  description:
+    en: Attach only cluster metadata, for logs from processes outside containers or tasks.
+    es: Adjuntar solo metadatos del clúster, para logs de procesos fuera de contenedores o tareas.
+    pt: Anexar apenas metadados do cluster, para logs de processos fora de contêineres ou tarefas.
+  default: false
+- key: ecs_meta_cache_ttl
+  type: duration
+  description:
+    en: Maximum time metadata stays cached per container short ID.
+    es: Tiempo máximo que los metadatos permanecen en caché por ID corto de contenedor.
+    pt: Tempo máximo que os metadados ficam em cache por ID curto de contêiner.
+  default: 1h
+  advanced: true
+- key: ecs_meta_host
+  type: string
+  description:
+    en: Host where the ECS Agent introspection endpoint is reachable.
+    es: Host donde es accesible el endpoint de introspección del agente ECS.
+    pt: Host onde o endpoint de introspecção do agente ECS é acessível.
+  default: 127.0.0.1
+  advanced: true
+- key: ecs_meta_port
+  type: integer
+  description:
+    en: Port where the ECS Agent introspection endpoint is reachable.
+    es: Puerto donde es accesible el endpoint de introspección del agente ECS.
+    pt: Porta onde o endpoint de introspecção do agente ECS é acessível.
+  default: 51678
+  advanced: true
+- key: ecs_tag_prefix
+  type: string
+  description:
+    en: Prefix that precedes the 12-character container short ID in log tags.
+    es: Prefijo que precede al ID corto de 12 caracteres del contenedor en los tags.
+    pt: Prefixo que precede o ID curto de 12 caracteres do contêiner nas tags.
+  default: ''
+  advanced: true

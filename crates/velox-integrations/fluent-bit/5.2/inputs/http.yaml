@@ -1,0 +1,206 @@
+kind: input
+name: http
+title:
+  en: HTTP
+  es: HTTP
+  pt: HTTP
+description:
+  en: Receives JSON events over an HTTP endpoint.
+  es: Recibe eventos JSON mediante un endpoint HTTP.
+  pt: Recebe eventos JSON por um endpoint HTTP.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/http
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  default: 0.0.0.0
+  description:
+    en: Address to bind to.
+    es: Dirección en la que escuchar.
+    pt: Endereço no qual escutar.
+- key: port
+  type: integer
+  default: 9880
+  description:
+    en: Port Fluent Bit listens on.
+    es: Puerto en el que escucha Fluent Bit.
+    pt: Porta na qual o Fluent Bit escuta.
+- key: tag_key
+  type: string
+  description:
+    en: Record field whose value replaces the tag.
+    es: Campo del registro cuyo valor reemplaza la etiqueta.
+    pt: Campo do registro cujo valor substitui a tag.
+- key: add_remote_addr
+  type: bool
+  default: false
+  description:
+    en: Adds a client address field taken from X-Forwarded-For.
+    es: Agrega un campo con la dirección del cliente tomada de X-Forwarded-For.
+    pt: Adiciona um campo com o endereço do cliente obtido de X-Forwarded-For.
+- key: remote_addr_key
+  type: string
+  default: REMOTE_ADDR
+  advanced: true
+  description:
+    en: Name of the client address field.
+    es: Nombre del campo de dirección del cliente.
+    pt: Nome do campo de endereço do cliente.
+- key: success_header
+  type: string
+  multi: repeat
+  advanced: true
+  description:
+    en: Extra header sent on successful responses.
+    es: Encabezado adicional enviado en respuestas exitosas.
+    pt: Cabeçalho extra enviado nas respostas de sucesso.
+- key: successful_response_code
+  type: select
+  default: 201
+  options:
+  - 200
+  - 201
+  - 204
+  advanced: true
+  description:
+    en: HTTP status code returned on success.
+    es: Código de estado HTTP devuelto en caso de éxito.
+    pt: Código de status HTTP retornado em caso de sucesso.
+- key: buffer_chunk_size
+  type: size
+  default: 512K
+  advanced: true
+  description:
+    en: Chunk size for incoming JSON; alias of http_server.buffer_chunk_size.
+    es: Tamaño de fragmento para el JSON entrante; alias de http_server.buffer_chunk_size.
+    pt: Tamanho do chunk para o JSON recebido; alias de http_server.buffer_chunk_size.
+- key: buffer_max_size
+  type: size
+  default: 4M
+  advanced: true
+  description:
+    en: Maximum size of one incoming JSON message; alias of http_server.buffer_max_size.
+    es: Tamaño máximo de un mensaje JSON entrante; alias de http_server.buffer_max_size.
+    pt: Tamanho máximo de uma mensagem JSON recebida; alias de http_server.buffer_max_size.
+- key: http2
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Enables HTTP/2; alias of http_server.http2.
+    es: Habilita HTTP/2; alias de http_server.http2.
+    pt: Habilita HTTP/2; alias de http_server.http2.
+- key: enable_health_endpoint
+  type: bool
+  default: false
+  description:
+    en: Enables a GET /health endpoint.
+    es: Habilita un endpoint GET /health.
+    pt: Habilita um endpoint GET /health.
+- key: http_server.max_connections
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Concurrent connection cap; 0 means unlimited.
+    es: Límite de conexiones concurrentes; 0 es ilimitado.
+    pt: Limite de conexões simultâneas; 0 significa ilimitado.
+- key: http_server.workers
+  type: integer
+  default: 1
+  advanced: true
+  description:
+    en: Number of listener worker threads.
+    es: Número de hilos worker de escucha.
+    pt: Número de threads worker de escuta.
+- key: http_server.ingress_queue_event_limit
+  type: integer
+  default: 8192
+  advanced: true
+  description:
+    en: Deferred queue entry cap; applies only when workers is greater than 1.
+    es: Límite de entradas de la cola diferida; solo si workers es mayor que 1.
+    pt: Limite de entradas da fila diferida; só se aplica quando workers é maior que 1.
+- key: http_server.ingress_queue_byte_limit
+  type: size
+  default: 256M
+  advanced: true
+  description:
+    en: Deferred queue size cap; applies only when workers is greater than 1.
+    es: Límite de tamaño de la cola diferida; solo si workers es mayor que 1.
+    pt: Limite de tamanho da fila diferida; só se aplica quando workers é maior que 1.
+- key: http_server.max_decoded_body_size
+  type: size
+  default: 100M
+  since: 5.2.0
+  advanced: true
+  description:
+    en: Size cap for a request body after decompression.
+    es: Límite de tamaño del cuerpo de una solicitud tras descomprimir.
+    pt: Limite de tamanho do corpo da requisição após descompressão.
+- key: oauth2.validate
+  type: bool
+  default: false
+  description:
+    en: Enables OAuth 2.0 JWT validation.
+    es: Habilita la validación de JWT OAuth 2.0.
+    pt: Habilita a validação de JWT OAuth 2.0.
+- key: oauth2.issuer
+  type: string
+  description:
+    en: Expected iss claim; required when validating.
+    es: Claim iss esperado; obligatorio al validar.
+    pt: Claim iss esperado; obrigatório ao validar.
+- key: oauth2.jwks_url
+  type: string
+  description:
+    en: JWKS endpoint for public keys; required when validating.
+    es: Endpoint JWKS de claves públicas; obligatorio al validar.
+    pt: Endpoint JWKS de chaves públicas; obrigatório ao validar.
+- key: oauth2.allowed_audience
+  type: string
+  description:
+    en: Audience claim to enforce.
+    es: Claim de audiencia a exigir.
+    pt: Claim de audiência a exigir.
+- key: oauth2.allowed_clients
+  type: string
+  multi: repeat
+  description:
+    en: Permitted client_id or azp values.
+    es: Valores client_id o azp permitidos.
+    pt: Valores client_id ou azp permitidos.
+- key: oauth2.jwks_refresh_interval
+  type: integer
+  default: 300
+  advanced: true
+  description:
+    en: Seconds before keys are refetched on demand.
+    es: Segundos antes de volver a obtener las claves bajo demanda.
+    pt: Segundos antes de buscar as chaves novamente sob demanda.
+- key: oauth2.jwks_buffer_max_size
+  type: size
+  default: 1M
+  since: 5.2.0
+  advanced: true
+  description:
+    en: Maximum JWKS response size, from 4096 bytes to 16M.
+    es: Tamaño máximo de la respuesta JWKS, de 4096 bytes a 16M.
+    pt: Tamanho máximo da resposta JWKS, de 4096 bytes a 16M.
+- key: oauth2.jwks_response_timeout
+  type: duration
+  default: 30s
+  since: 5.2.0
+  advanced: true
+  description:
+    en: Time limit for the JWKS response, from 1s to 300s.
+    es: Tiempo límite de la respuesta JWKS, de 1s a 300s.
+    pt: Tempo limite da resposta JWKS, de 1s a 300s.

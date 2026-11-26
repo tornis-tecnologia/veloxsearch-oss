@@ -1,0 +1,46 @@
+kind: input
+name: ebpf
+title:
+  en: eBPF
+  es: eBPF
+  pt: eBPF
+description:
+  en: Experimental input that collects kernel events through eBPF traces.
+  es: Entrada experimental que recolecta eventos del kernel mediante trazas eBPF.
+  pt: Entrada experimental que coleta eventos do kernel por meio de traces eBPF.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/ebpf
+os:
+- linux
+event_types:
+- logs
+requires:
+- ebpf
+- root
+verified: true
+params:
+- key: trace
+  type: string
+  description:
+    en: eBPF trace to enable (bind, dns, exec, malloc, openssl, sched, signal, tcp, vfs); repeat for several.
+    es: Traza eBPF a habilitar (bind, dns, exec, malloc, openssl, sched, signal, tcp, vfs); repetir para
+      varias.
+    pt: Trace eBPF a habilitar (bind, dns, exec, malloc, openssl, sched, signal, tcp, vfs); repita para
+      varias.
+  required: true
+  multi: repeat
+- key: poll_ms
+  type: integer
+  description:
+    en: Milliseconds between reads of the ring buffer.
+    es: Milisegundos entre lecturas del ring buffer.
+    pt: Milissegundos entre leituras do ring buffer.
+  default: 1000
+  advanced: true
+- key: ringbuf_map_name
+  type: string
+  description:
+    en: Name of the eBPF ring buffer map to read events from.
+    es: Nombre del mapa de ring buffer eBPF del que leer eventos.
+    pt: Nome do mapa de ring buffer eBPF de onde ler eventos.
+  default: events
+  advanced: true

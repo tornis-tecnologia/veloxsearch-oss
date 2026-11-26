@@ -1,0 +1,182 @@
+kind: input
+name: kubernetes_events
+title:
+  en: Kubernetes Events
+  es: Kubernetes Events
+  pt: Kubernetes Events
+description:
+  en: Collects events from the Kubernetes API server.
+  es: Recopila eventos del servidor de API de Kubernetes.
+  pt: Coleta eventos do servidor de API do Kubernetes.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/kubernetes-events
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- kube_api
+verified: true
+params:
+- key: kube_url
+  type: string
+  default: https://kubernetes.default.svc
+  description:
+    en: Kubernetes API server endpoint.
+    es: Endpoint del servidor de API de Kubernetes.
+    pt: Endpoint do servidor de API do Kubernetes.
+- key: kube_namespace
+  type: string
+  description:
+    en: Namespace to read events from; all namespaces if unset.
+    es: Namespace del que leer eventos; todos si no se define.
+    pt: Namespace do qual ler eventos; todos se não definido.
+- key: kube_ca_file
+  type: string
+  default: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  advanced: true
+  description:
+    en: Path to the Kubernetes TLS CA certificate.
+    es: Ruta del certificado CA TLS de Kubernetes.
+    pt: Caminho do certificado CA TLS do Kubernetes.
+- key: kube_ca_path
+  type: string
+  advanced: true
+  description:
+    en: Path to a directory of Kubernetes TLS CA certificates.
+    es: Ruta a un directorio de certificados CA TLS de Kubernetes.
+    pt: Caminho de um diretório de certificados CA TLS do Kubernetes.
+- key: kube_token_file
+  type: string
+  default: /var/run/secrets/kubernetes.io/serviceaccount/token
+  advanced: true
+  description:
+    en: Path to the authorization token file.
+    es: Ruta del archivo del token de autorización.
+    pt: Caminho do arquivo do token de autorização.
+- key: kube_token_ttl
+  type: duration
+  default: 10m
+  advanced: true
+  description:
+    en: How long the token is cached before being re-read from file.
+    es: Tiempo que el token se guarda en caché antes de releerlo del archivo.
+    pt: Tempo que o token fica em cache antes de ser relido do arquivo.
+- key: kube_request_limit
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Limit on events per query; 0 means no limit.
+    es: Límite de eventos por consulta; 0 es sin límite.
+    pt: Limite de eventos por consulta; 0 significa sem limite.
+- key: kube_retention_time
+  type: duration
+  default: 1h
+  advanced: true
+  description:
+    en: How long Kubernetes retains events.
+    es: Tiempo que Kubernetes retiene los eventos.
+    pt: Tempo que o Kubernetes retém os eventos.
+- key: kube_watch_timeout
+  type: duration
+  default: 10m
+  since: 5.1.0
+  advanced: true
+  description:
+    en: Maximum watch request lifetime and idle read timeout; 0 disables both.
+    es: Vida máxima de la solicitud watch y timeout de lectura inactiva; 0 desactiva ambos.
+    pt: Vida máxima da requisição watch e timeout de leitura ociosa; 0 desativa ambos.
+- key: interval_sec
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Reconnect interval in seconds.
+    es: Intervalo de reconexión en segundos.
+    pt: Intervalo de reconexão em segundos.
+- key: interval_nsec
+  type: integer
+  default: 500000000
+  advanced: true
+  description:
+    en: Reconnect interval, sub-second part in nanoseconds.
+    es: Intervalo de reconexión, parte de subsegundo en nanosegundos.
+    pt: Intervalo de reconexão, parte de subsegundo em nanossegundos.
+- key: db
+  type: string
+  operator_settable: false
+  description:
+    en: File that tracks which Kubernetes events were already recorded.
+    es: Archivo que registra qué eventos de Kubernetes ya se procesaron.
+    pt: Arquivo que registra quais eventos do Kubernetes já foram processados.
+- key: db.sync
+  type: select
+  default: normal
+  options:
+  - extra
+  - full
+  - normal
+  - 'off'
+  advanced: true
+  operator_settable: false
+  description:
+    en: Database sync method.
+    es: Método de sincronización de la base de datos.
+    pt: Método de sincronização do banco de dados.
+- key: db.locking
+  type: bool
+  default: false
+  advanced: true
+  operator_settable: false
+  description:
+    en: Restricts database access to Fluent Bit for performance, at the cost of external queries.
+    es: Restringe el acceso a la base a Fluent Bit para mayor rendimiento, sin consultas externas.
+    pt: Restringe o acesso ao banco ao Fluent Bit para melhor desempenho, sem consultas externas.
+- key: db.journal_mode
+  type: select
+  default: WAL
+  options:
+  - DELETE
+  - TRUNCATE
+  - PERSIST
+  - MEMORY
+  - WAL
+  - 'OFF'
+  advanced: true
+  operator_settable: false
+  description:
+    en: Journal mode of the database file.
+    es: Modo de journal del archivo de base de datos.
+    pt: Modo de journal do arquivo de banco de dados.
+- key: tls.debug
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: TLS debug level, from 0 (off) to 4 (verbose).
+    es: Nivel de depuración TLS, de 0 (apagado) a 4 (detallado).
+    pt: Nível de debug TLS, de 0 (desligado) a 4 (detalhado).
+- key: tls.verify
+  type: bool
+  default: true
+  description:
+    en: Verifies the peer TLS certificate.
+    es: Verifica el certificado TLS del par.
+    pt: Verifica o certificado TLS do par.
+- key: tls.verify_hostname
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Verifies the API server hostname; requires tls.verify.
+    es: Verifica el nombre de host del servidor de API; requiere tls.verify.
+    pt: Verifica o hostname do servidor de API; requer tls.verify.
+- key: tls.vhost
+  type: string
+  advanced: true
+  description:
+    en: Optional TLS virtual host.
+    es: Host virtual TLS opcional.
+    pt: Host virtual TLS opcional.

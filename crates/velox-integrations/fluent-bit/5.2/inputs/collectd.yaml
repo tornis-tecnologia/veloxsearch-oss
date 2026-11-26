@@ -1,0 +1,44 @@
+kind: input
+name: collectd
+title:
+  en: Collectd
+  es: Collectd
+  pt: Collectd
+description:
+  en: Receives collectd network packets over UDP and converts them to records.
+  es: Recibe paquetes de red de collectd por UDP y los convierte en registros.
+  pt: Recebe pacotes de rede do collectd via UDP e os converte em registros.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/collectd
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  description:
+    en: Address to listen on.
+    es: Direccion en la que escuchar.
+    pt: Endereco em que escutar.
+  default: 0.0.0.0
+- key: port
+  type: integer
+  description:
+    en: UDP port to listen on.
+    es: Puerto UDP en el que escuchar.
+    pt: Porta UDP em que escutar.
+  default: 25826
+- key: typesdb
+  type: string
+  description:
+    en: Comma-separated collectd types.db files; later files override earlier definitions.
+    es: Archivos types.db de collectd separados por comas; los posteriores reemplazan a los anteriores.
+    pt: Arquivos types.db do collectd separados por virgula; os posteriores substituem os anteriores.
+  default: /usr/share/collectd/types.db
+  multi: join
+  join: ','

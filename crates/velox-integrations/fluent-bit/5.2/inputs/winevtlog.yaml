@@ -1,0 +1,198 @@
+kind: input
+name: winevtlog
+title:
+  en: Windows Event Log (winevtlog)
+  es: Windows Event Log (winevtlog)
+  pt: Windows Event Log (winevtlog)
+description:
+  en: Reads Windows Event Log channels using the winevt.h API.
+  es: Lee canales del Registro de eventos de Windows mediante la API winevt.h.
+  pt: Lê canais do Windows Event Log usando a API winevt.h.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/windows-event-log-winevtlog
+verified: true
+os:
+- windows
+event_types:
+- logs
+requires:
+- root
+params:
+- key: channels
+  type: string
+  description:
+    en: Comma-separated list of channels to read from.
+    es: Lista de canales a leer, separados por comas.
+    pt: Lista de canais a ler, separados por vírgula.
+  required: true
+  multi: join
+  join: ','
+- key: db
+  type: string
+  description:
+    en: File path where read offsets are saved.
+    es: Ruta del archivo donde se guardan los offsets de lectura.
+    pt: Caminho do arquivo onde os offsets de leitura são salvos.
+  operator_settable: false
+- key: event_data_as_map
+  type: bool
+  description:
+    en: Emit EventData as a named map using provider metadata.
+    es: Emitir EventData como un mapa con nombres usando los metadatos del proveedor.
+    pt: Emitir EventData como um mapa nomeado usando os metadados do provedor.
+  default: false
+- key: event_query
+  type: string
+  description:
+    en: XML query used to filter events.
+    es: Consulta XML usada para filtrar eventos.
+    pt: Consulta XML usada para filtrar eventos.
+  default: '*'
+- key: event_template_cache_size
+  type: integer
+  description:
+    en: Maximum provider templates cached when event_data_as_map is enabled.
+    es: Máximo de plantillas de proveedor en caché cuando event_data_as_map está activo.
+    pt: Máximo de templates de provedor em cache quando event_data_as_map está ativo.
+  default: 256
+  advanced: true
+- key: ignore_missing_channels
+  type: bool
+  description:
+    en: Skip absent channels and keep running with the rest.
+    es: Omitir canales ausentes y seguir con el resto.
+    pt: Ignorar canais ausentes e continuar com os demais.
+  default: false
+- key: interval_sec
+  type: integer
+  description:
+    en: Polling interval in seconds.
+    es: Intervalo de sondeo en segundos.
+    pt: Intervalo de polling em segundos.
+  default: 1
+- key: interval_nsec
+  type: integer
+  description:
+    en: Additional polling interval in nanoseconds.
+    es: Intervalo de sondeo adicional en nanosegundos.
+    pt: Intervalo de polling adicional em nanossegundos.
+  default: 0
+- key: read_existing_events
+  type: bool
+  description:
+    en: Read existing events from the start instead of tailing from the end.
+    es: Leer eventos existentes desde el inicio en lugar de seguir desde el final.
+    pt: Ler eventos existentes desde o início em vez de acompanhar a partir do fim.
+  default: false
+- key: read_limit_per_cycle
+  type: size
+  description:
+    en: Read limit per polling cycle.
+    es: Límite de lectura por ciclo de sondeo.
+    pt: Limite de leitura por ciclo de polling.
+  default: 512KiB
+  advanced: true
+- key: remote.domain
+  type: string
+  description:
+    en: Domain for remote Event Log access.
+    es: Dominio para el acceso remoto al Registro de eventos.
+    pt: Domínio para acesso remoto ao Event Log.
+  advanced: true
+- key: remote.password
+  type: password
+  description:
+    en: Password for remote Event Log access.
+    es: Contraseña para el acceso remoto al Registro de eventos.
+    pt: Senha para acesso remoto ao Event Log.
+  secret: true
+  advanced: true
+- key: remote.server
+  type: string
+  description:
+    en: Server name for remote Event Log access.
+    es: Nombre del servidor para el acceso remoto al Registro de eventos.
+    pt: Nome do servidor para acesso remoto ao Event Log.
+  advanced: true
+- key: remote.username
+  type: string
+  description:
+    en: Username for remote Event Log access.
+    es: Usuario para el acceso remoto al Registro de eventos.
+    pt: Usuário para acesso remoto ao Event Log.
+  advanced: true
+- key: reconnect.base_ms
+  type: integer
+  description:
+    en: Base reconnect delay in milliseconds after a subscription failure.
+    es: Retardo base de reconexión en milisegundos tras un fallo de suscripción.
+    pt: Atraso base de reconexão em milissegundos após falha de assinatura.
+  default: 500
+  advanced: true
+- key: reconnect.max_ms
+  type: integer
+  description:
+    en: Maximum reconnect delay in milliseconds.
+    es: Retardo máximo de reconexión en milisegundos.
+    pt: Atraso máximo de reconexão em milissegundos.
+  default: 30000
+  advanced: true
+- key: reconnect.multiplier
+  type: number
+  description:
+    en: Backoff multiplier between reconnect attempts.
+    es: Multiplicador de backoff entre intentos de reconexión.
+    pt: Multiplicador de backoff entre tentativas de reconexão.
+  default: 2.0
+  advanced: true
+- key: reconnect.jitter_pct
+  type: integer
+  description:
+    en: Jitter percentage applied to the reconnect delay.
+    es: Porcentaje de jitter aplicado al retardo de reconexión.
+    pt: Percentual de jitter aplicado ao atraso de reconexão.
+  default: 20
+  advanced: true
+- key: reconnect.max_retries
+  type: integer
+  description:
+    en: Reconnect attempts before giving up.
+    es: Intentos de reconexión antes de rendirse.
+    pt: Tentativas de reconexão antes de desistir.
+  default: 8
+  advanced: true
+- key: render_event_as_text
+  type: bool
+  description:
+    en: Render events as key=value text (exclusive with XML).
+    es: Renderizar eventos como texto clave=valor (excluyente con XML).
+    pt: Renderizar eventos como texto chave=valor (exclusivo com XML).
+  default: false
+- key: render_event_as_xml
+  type: bool
+  description:
+    en: Render events as XML (exclusive with text).
+    es: Renderizar eventos como XML (excluyente con texto).
+    pt: Renderizar eventos como XML (exclusivo com texto).
+  default: false
+- key: render_event_text_key
+  type: string
+  description:
+    en: Record key that holds the rendered text.
+    es: Clave del registro que contiene el texto renderizado.
+    pt: Chave do registro que contém o texto renderizado.
+  default: log
+- key: string_inserts
+  type: bool
+  description:
+    en: Include string inserts in output records.
+    es: Incluir los string inserts en los registros de salida.
+    pt: Incluir os string inserts nos registros de saída.
+  default: true
+- key: use_ansi
+  type: bool
+  description:
+    en: Use ANSI encoding for messages.
+    es: Usar codificación ANSI en los mensajes.
+    pt: Usar codificação ANSI nas mensagens.
+  default: false
+  advanced: true

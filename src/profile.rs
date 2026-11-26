@@ -1279,7 +1279,11 @@ pub fn index_class(name: &str) -> &'static str {
         return "system";
     }
     let family = index_family(name);
+    // `veloxagent-` is every index either collection path writes (ADR-071);
+    // the package-declared names are still listed so the indices a deployment
+    // collected into before the rename keep reading as ours, not the user's.
     let managed = name.starts_with("velox-metrics-")
+        || name.starts_with(&format!("{}-", velox_integrations::AGENT_ARTIFACT_PREFIX))
         || crate::recipes::RECIPES
             .iter()
             .any(|r| family == crate::recipes::recipe_index(r))

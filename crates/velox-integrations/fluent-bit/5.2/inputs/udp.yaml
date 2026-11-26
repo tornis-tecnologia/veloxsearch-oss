@@ -1,0 +1,91 @@
+kind: input
+name: udp
+title:
+  en: UDP
+  es: UDP
+  pt: UDP
+description:
+  en: Receives JSON or delimited records over UDP.
+  es: Recibe registros JSON o delimitados por UDP.
+  pt: Recebe registros JSON ou delimitados via UDP.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/udp
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  default: 0.0.0.0
+  description:
+    en: Network interface to listen on.
+    es: Interfaz de red en la que escuchar.
+    pt: Interface de rede em que escutar.
+- key: port
+  type: integer
+  default: 5170
+  description:
+    en: UDP port to listen on.
+    es: Puerto UDP en el que escuchar.
+    pt: Porta UDP em que escutar.
+- key: format
+  type: select
+  default: json
+  options:
+  - json
+  - none
+  description:
+    en: 'Payload type: json expects JSON maps, none splits data by separator.'
+    es: 'Tipo de carga: json espera mapas JSON, none divide los datos por separator.'
+    pt: 'Tipo de carga: json espera mapas JSON, none divide os dados por separator.'
+- key: separator
+  type: string
+  default: '
+
+    '
+  advanced: true
+  description:
+    en: String that splits records when format is none (line feed).
+    es: Cadena que separa registros cuando format es none (salto de línea).
+    pt: Texto que separa registros quando format é none (quebra de linha).
+- key: parser
+  type: string
+  description:
+    en: Optional parser for line-delimited records; requires format none.
+    es: Parser opcional para registros delimitados por línea; requiere format none.
+    pt: Parser opcional para registros delimitados por linha; exige format none.
+- key: chunk_size
+  type: integer
+  default: 32
+  advanced: true
+  description:
+    en: Initial buffer size in KB, allocated as needed.
+    es: Tamaño inicial del búfer en KB, asignado según se necesite.
+    pt: Tamanho inicial do buffer em KB, alocado conforme necessário.
+- key: buffer_size
+  type: integer
+  advanced: true
+  description:
+    en: Maximum buffer size in KB for one JSON message; defaults to chunk_size.
+    es: Tamaño máximo del búfer en KB para un mensaje JSON; por defecto chunk_size.
+    pt: Tamanho máximo do buffer em KB para uma mensagem JSON; padrão chunk_size.
+- key: source_address_key
+  type: string
+  advanced: true
+  description:
+    en: Key where the sender address is added to each record.
+    es: Clave donde se agrega la dirección del remitente a cada registro.
+    pt: Chave onde o endereço do remetente é adicionado a cada registro.
+- key: workers
+  type: integer
+  default: 1
+  advanced: true
+  description:
+    en: Number of listener workers handling connections.
+    es: Cantidad de workers de escucha que atienden conexiones.
+    pt: Número de workers de escuta que atendem conexões.
