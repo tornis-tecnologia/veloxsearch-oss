@@ -8,31 +8,7 @@ are called out explicitly.
 
 ## [Unreleased]
 
-### Added
-- **Velox Agent 0.2.0: a host installer, one install root and a container
-  image (ADR-069 amendment 1).**
-  - `veloxagent/deploy/install.sh` detects the distribution and installs
-    Fluent Bit from the upstream repository. It then downloads the agent from
-    its own `velox-agent-v*` GitHub release, checked against SHA256SUMS and,
-    with cosign, the signature.
-  - The agent runs as a `velox-agent` user holding `CAP_DAC_READ_SEARCH`, so
-    it reads logs the way Filebeat does and writes only its state.
-    `--run-as-root` keeps Filebeat's model.
-  - Everything lives in `/opt/velox-agent`.
-  - `docker.io/tornistecnologia/velox-agent` is upstream's Fluent Bit image
-    with the agent added, plus a `docker-compose.yml`.
-  - *Add agent* offers three methods: script (default), Docker, and manual
-    per distribution.
-
-### Changed
-- **The agent's state is `/opt/velox-agent/state` by default**, no longer
-  `~/.local/state/velox-agent`. `sudo velox-agent enroll` therefore lands
-  where the service reads, and root hands the identity to the state
-  directory's owner. Set `VELOX_AGENT_STATE` to keep an old location.
-  `install.sh` moves an existing identity; `velox-agent doctor` names one it
-  finds stranded.
-
-## [0.15.0] - 2026-11-13
+## [0.15.0] - 2026-11-26
 
 ### Added
 - **Velox Mesh and Velox Agent: collection from hosts outside the cluster
@@ -70,12 +46,43 @@ are called out explicitly.
   limited to `veloxagent-*`, replaces the admin credentials on every
   collector, in-cluster and on hosts.
 - Standing alerts are popups in a top-right tray, each one mutable.
+- **Velox Agent 0.2.0: a host installer, one install root and a container
+  image (ADR-069 amendment 1).**
+  - `veloxagent/deploy/install.sh` detects the distribution and installs
+    Fluent Bit from the upstream repository. It then downloads the agent from
+    its own `velox-agent-v*` GitHub release, checked against SHA256SUMS and,
+    with cosign, the signature.
+  - The agent runs as a `velox-agent` user holding `CAP_DAC_READ_SEARCH`, so
+    it reads logs the way Filebeat does and writes only its state.
+    `--run-as-root` keeps Filebeat's model.
+  - Everything lives in `/opt/velox-agent`.
+  - `docker.io/tornistecnologia/velox-agent` is upstream's Fluent Bit image
+    with the agent added, plus a `docker-compose.yml`.
+  - *Add agent* offers three methods: script (default), Docker, and manual
+    per distribution.
 
 ### Changed
 - **The cluster's 1.x catalogue is no longer offered.** What it installed
   stays listed on the Data tab, to configure or remove; new integrations come
   from the registry's Spec 2.0 catalogue.
 - Packages under Spec 2.0 require this release (`min_mesh_version 0.15.0`).
+- **The agent's state is `/opt/velox-agent/state` by default**, no longer
+  `~/.local/state/velox-agent`. `sudo velox-agent enroll` therefore lands
+  where the service reads, and root hands the identity to the state
+  directory's owner. Set `VELOX_AGENT_STATE` to keep an old location.
+  `install.sh` moves an existing identity; `velox-agent doctor` names one it
+  finds stranded.
+
+### Fixed
+- **Single-node Longhorn sizing is applied (#133, #185).** The bootstrap
+  patches the Longhorn `Setting` value at the top level, where Longhorn reads
+  it, instead of under `spec`.
+- **One default StorageClass on k3s (#134, #186).** k3s re-marks `local-path`
+  as default on restart; the bootstrap re-asserts a single default on an
+  interval, and only demotes `local-path` while Longhorn is the default.
+- Supply-chain gate: cargo-deny advisories cleared (#187); the `veloxagent/`
+  workspace's deny pass allows path dependencies and takes `url` 2.5.9
+  (RUSTSEC-2026-0592) (#190).
 
 ## [0.14.0] - 2026-11-08
 
