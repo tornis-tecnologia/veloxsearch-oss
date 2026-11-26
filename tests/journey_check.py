@@ -7,7 +7,7 @@ deployment panel:
   login -> Create (4-step wizard: name+purpose / size / data / review)
         -> DOUBLE-click create -> exactly one deployment appears (#56)
         -> open detail
-        -> Overview / Data / Backup / Access / Configuration / Activity tabs
+        -> Overview / Data / Backup / Access / Configuration / Activity / Velox Mesh tabs
         -> Configuration shows the automatic JVM heap + no purpose cards
         -> Access shows the password reset (generated, never typed)
         -> clean up (delete via the confirm modal)
@@ -25,8 +25,12 @@ base, user, pw = sys.argv[1], sys.argv[2], sys.argv[3]
 errors, console = [], []
 
 
+# frontend/router.jsx TABS — the deployment's tabs, in order.
+TAB_KEYS = ("overview", "data", "backup", "access", "config", "activity", "mesh")
+
+
 def detail_tab(key):
-    """A deployment tab by its stable key: overview | data | backup | access | config | activity."""
+    """A deployment tab by its stable key: one of TAB_KEYS."""
     return page.locator(f'[data-testid="dep-tab-{key}"]')
 
 
@@ -119,13 +123,17 @@ with sync_playwright() as p:
     page.wait_for_selector('[data-testid="reset-pass"]:not([disabled])', timeout=1800000)
     print(f"  {dep_name} settled (edits unlocked)")
 
-    # 4. detail tabs: six, grouped by task (overview / data / backup / access /
-    #    config / activity), each with its own URL.
+    # 4. detail tabs: seven, grouped by task (overview / data / backup / access /
+    #    config / activity, and the deployment's Velox Mesh since ADR-072),
+    #    each with its own URL. Checked by key, so a missing or extra tab names itself.
     page.wait_for_selector('[role="tablist"]', timeout=20000)
     page.wait_for_timeout(1000)
     n_tabs = page.locator('[role="tab"]').count()
-    if n_tabs != 6:
-        fail(f"expected 6 deployment tabs, got {n_tabs}")
+    if n_tabs != len(TAB_KEYS):
+        fail(f"expected {len(TAB_KEYS)} deployment tabs, got {n_tabs}")
+    for key in TAB_KEYS:
+        if detail_tab(key).count() == 0:
+            fail(f"deployment tab {key!r} missing (dep-tab-{key})")
     if not page.url.endswith(f"/deployments/{dep_name}/access"):
         fail(f"the access tab has no URL of its own: {page.url}")
 
@@ -184,5 +192,5 @@ if hyd or errors:
     for x in hyd + errors:
         print(" ", x)
     sys.exit(1)
-print("PASS — create→manage→delete journey OK; six task tabs present, each with a URL")
+print("PASS — create→manage→delete journey OK; seven task tabs present, each with a URL")
 print(f"  ({len(console)} console msgs, 0 page errors)")
