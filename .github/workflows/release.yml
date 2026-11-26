@@ -194,7 +194,12 @@ jobs:
           set -euo pipefail
           cargo build --release --bin velox
           cp target/release/velox velox-linux-amd64
-          sha256sum install.yaml upgrade.yaml velox-linux-amd64 > SHA256SUMS
+          # The full installer (ADR-075) and the Longhorn bundle it applies
+          # before VeloxSearch: the same file the app vendors, so the app
+          # finds its own Longhorn and reports no drift.
+          cp deploy/install-veloxsearch-full.sh deploy/bootstrap/longhorn.yaml .
+          sha256sum install.yaml upgrade.yaml velox-linux-amd64 \
+            install-veloxsearch-full.sh longhorn.yaml > SHA256SUMS
 
       - name: Extract the changelog section
         id: notes
@@ -268,4 +273,6 @@ jobs:
             install.yaml
             upgrade.yaml
             velox-linux-amd64
+            install-veloxsearch-full.sh
+            longhorn.yaml
             SHA256SUMS

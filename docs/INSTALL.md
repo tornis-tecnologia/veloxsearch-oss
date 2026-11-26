@@ -43,10 +43,13 @@ already there.
 
 ## 0. No Kubernetes cluster yet?
 
-VeloxSearch installs *into* a Kubernetes cluster; it does not create one. The
-shortest path from a bare machine:
+VeloxSearch installs *into* a Kubernetes cluster. On bare servers, the full
+installer builds that cluster for you (ADR-075).
 
-- **A Linux server or VM** (amd64, ≥ 12 GiB RAM / 4 vCPU recommended — see R4):
+- **Three Linux servers (production, redundant):** use
+  `install-veloxsearch-full.sh`, described in [§0a](#0a-three-servers-the-full-installer).
+  It installs a k3s HA cluster, Longhorn and VeloxSearch.
+- **One Linux server or VM** (amd64, ≥ 12 GiB RAM / 4 vCPU recommended — see R4):
   install single-node k3s with its official one-liner, then follow
   [§3b](#3b-k3s-verified--k3s-greenfield) for the Longhorn node packages and
   the kubeconfig:
@@ -60,6 +63,75 @@ shortest path from a bare machine:
 
 Either way, once `kubectl get nodes` shows a `Ready` node, the one-command install
 at the top of this page is all that is left.
+
+### 0a. Three servers: the full installer
+
+`install-veloxsearch-full.sh` turns three bare Linux servers into a redundant
+VeloxSearch. It needs amd64, systemd, and Debian/Ubuntu, RHEL/Rocky/Alma, Amazon
+Linux or SUSE. Each node needs at least 4 GiB RAM (8 GiB or more recommended), 2 vCPU,
+and 30 GiB free on `/var/lib` (100 GiB or more recommended). Every node also needs a
+unique hostname and outbound access to get.k3s.io, github.com and Docker Hub.
+
+The script does the following:
+
+1. **Preflight** on every node before anything changes. The run stops if a
+   node fails it.
+2. **Node preparation:** open-iscsi, NFS client and cryptsetup for Longhorn;
+   the kernel modules; `vm.max_map_count=262144` for OpenSearch; swap off;
+   multipathd kept off Longhorn devices; and the k3s ports opened in
+   firewalld/ufw.
+3. **k3s HA:** three servers on embedded etcd. The cluster keeps running if
+   any one node fails. The script also turns on secrets encryption and etcd
+   snapshots every 6 h, and disables `local-path`, so storage is always
+   replicated.
+4. **Longhorn** from the bundle that release vendors. It becomes the only
+   default StorageClass, with 3 replicas, so the control-plane Postgres is
+   replicated too.
+5. **VeloxSearch:** the release's `install.yaml`, checked against
+   `SHA256SUMS`. With `cosign` installed, the image signature is checked too.
+   The script ends by printing each node's URL.
+
+**From node 1, reaching the others over SSH.** This needs key-based SSH and
+either passwordless sudo or root:
+
+```bash
+base=https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download
+curl -fsSLO "$base/install-veloxsearch-full.sh" && curl -fsSLO "$base/SHA256SUMS"
+sha256sum --ignore-missing -c SHA256SUMS
+sudo bash install-veloxsearch-full.sh install --peers 10.0.0.12,10.0.0.13 --ssh-user ubuntu
+```
+
+**Node by node, with no SSH between them:**
+
+```bash
+# node 1
+sudo bash install-veloxsearch-full.sh init
+sudo cat /var/lib/rancher/k3s/server/token > token     # a secret: copy it to nodes 2 and 3
+# nodes 2 and 3
+sudo bash install-veloxsearch-full.sh join --server https://10.0.0.11:6443 --token-file token
+# node 1, once all three are Ready
+sudo bash install-veloxsearch-full.sh platform
+```
+
+Then open `http://<any-node>/` (or `http://velox.<node-ip>.sslip.io/`) and
+create the admin at `/setup`. The script never sees that password.
+
+Other useful options:
+
+- `--tls-san <VIP or DNS>`: adds the name in front of the nodes to the API
+  certificate.
+- `--version X.Y.Z`: pins the VeloxSearch release.
+- `--k3s-version`: pins the k3s version.
+- `--skip-firewall`: leaves the firewall to you.
+
+Two other commands:
+
+- `preflight` checks a node without changing anything.
+- `status` shows nodes, storage and pods.
+
+`uninstall` removes k3s from one node. It asks for the hostname first, and
+`--purge-data` also deletes `/var/lib/longhorn`. Run `--help` for the full
+list.
 
 ---
 
