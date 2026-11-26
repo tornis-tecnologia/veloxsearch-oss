@@ -8,6 +8,20 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- **A full installer for three bare servers (ADR-075).** The script is
+  `install-veloxsearch-full.sh`, a release asset covered by `SHA256SUMS`.
+  - Preflight runs on every node, then node preparation: open-iscsi, NFS,
+    cryptsetup, the kernel modules, `vm.max_map_count`, swap off, the
+    multipathd blacklist and the firewall.
+  - It then builds a k3s HA cluster on embedded etcd, with `local-path`
+    disabled, secrets encryption and etcd snapshots.
+  - Longhorn is installed from the release's vendored bundle as the only
+    default StorageClass, then the checksummed `install.yaml`.
+  - It runs from node 1 over SSH (`install --peers`) or node by node
+    (`init`/`join`/`platform`).
+  - The release now also publishes `longhorn.yaml`.
+
 ## [0.15.0] - 2026-11-26
 
 ### Added
