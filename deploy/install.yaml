@@ -111,9 +111,11 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list"]
+  # `patch` on storageclasses: the revoke watch re-demotes node-local SCs that
+  # re-acquired the default annotation behind our back (k3s addon reconciler, #134).
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]
-    verbs: ["get", "list", "delete"]
+    verbs: ["get", "list", "delete", "patch"]
   # Storage-sizing reconcile (#26): a sub-3-node cluster gets Longhorn's
   # replica defaults lowered to what it can schedule — the
   # longhorn-storageclass ConfigMap (the driver-deployer rebuilds the SC from
