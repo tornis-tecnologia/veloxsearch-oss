@@ -28,6 +28,7 @@ import { Logo, Icon, Toast, ErrorBoundary, Menu } from "./ui.jsx";
 import { useRouter, nextAfterLogin } from "./router.jsx";
 import { AuthView } from "./views_auth.jsx";
 import { BootstrapView, OperatorDriftNotice, TenantIsolationNotice } from "./views_bootstrap.jsx";
+import { AlertTray } from "./alerts.jsx";
 import { StatusView } from "./views_status.jsx";
 import { CreateView } from "./views_create.jsx";
 import { CapacityView } from "./views_capacity.jsx";
@@ -125,7 +126,9 @@ function App() {
   useEffect(() => {
     if (boot !== "ready") return;
     if (route.name === "auth") go(nextAfterLogin(), { replace: true });
-  }, [boot, route.name, go]);
+    // A path the router only knows how to redirect (the pre-ADR-072 /mesh).
+    if (route.redirect) go(route.redirect, { replace: true });
+  }, [boot, route.name, route.redirect, go]);
 
   // ── the tab title follows the screen ───────────────────────────
   useEffect(() => {
@@ -382,8 +385,9 @@ function App() {
         </header>
 
         <main className="page">
-          <OperatorDriftNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
-          <TenantIsolationNotice status={bootStatus} t={tr} style={{ marginBottom: 16 }} />
+          {/* Installation-wide alerts: popups in the tray, mutable. */}
+          <OperatorDriftNotice status={bootStatus} t={tr} />
+          <TenantIsolationNotice status={bootStatus} t={tr} />
 
           {/* A view that throws while rendering takes only itself down (#141):
               the shell stays, and navigating away resets it. */}
@@ -406,8 +410,11 @@ function App() {
             )}
             {route.name === "deployment" && (current
               ? <DeploymentView d={current} lang={lang} hostNodes={hostNodes} tab={route.tab || "overview"}
+                  sub={route.sub} integration={route.integration} policy={route.policy}
                   openUpgrade={!!route.upgrade}
-                  onTab={tab => go({ name: "deployment", id: route.id, tab }, { keepScroll: true })}
+                  // `sub` is the Mesh tab's sub-screen; `extra` carries the
+                  // one-shot `?integration=` intent from the Data tab.
+                  onTab={(tab, sub, extra) => go({ name: "deployment", id: route.id, tab, sub, ...(extra || {}) }, { keepScroll: true })}
                   onToggleStack={toggleOtelStack}
                   onSaveEdit={saveEdit}
                   onResetPass={resetPass}
@@ -418,7 +425,10 @@ function App() {
         </main>
       </div>
 
-      <Toast msg={toast.msg} show={toast.show} kind={toast.kind} onClose={closeToast} t={tr} />
+      {/* The corner: persistent alerts (popups, mutable), then the toast. */}
+      <AlertTray t={tr}>
+        <Toast msg={toast.msg} show={toast.show} kind={toast.kind} onClose={closeToast} t={tr} />
+      </AlertTray>
 
       {DevTweaks && <Suspense fallback={null}><DevTweaks lang={lang} /></Suspense>}
     </div>

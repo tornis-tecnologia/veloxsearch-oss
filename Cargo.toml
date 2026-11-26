@@ -1,6 +1,6 @@
 [package]
 name = "veloxsearch"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Wizard-style admin interface that automates OpenSearch observability setup on Kubernetes"
@@ -29,10 +29,32 @@ publish = false
 doc_overindented_list_items = "allow"
 doc_lazy_continuation = "allow"
 
+# The root crate plus the crates it shares with `veloxagent/` (ADR-068). An
+# explicit workspace so `cargo test` / `fmt` / `clippy` at the root cover
+# `crates/*`; without it a path dependency is built but never tested. The
+# agent tree is its own workspace (separate binaries, no `kube`), hence
+# excluded rather than listed.
+[workspace]
+members = ["crates/*"]
+# A root package is the only default member unless told otherwise; the shared
+# crates must be in every plain `cargo test` / `clippy` run, not opt-in.
+default-members = [".", "crates/*"]
+exclude = ["veloxagent"]
+
 [lib]
 crate-type = ["rlib"]
 
 [dependencies]
+# The integration-package contract (manifest, closed token set, renderer),
+# shared with Velox Mesh in `veloxagent/` so both paths render a package
+# identically (ADR-068). A path crate, not a module: the agent workspace must
+# depend on it without pulling in this crate's Kubernetes stack.
+velox-integrations = { path = "crates/velox-integrations", optional = true }
+# Compiling a policy into collector configuration. The core is where this
+# happens because it is the only side that holds VERIFIED packages (the
+# registry client and the signing keyring live here, ADR-039); Velox Mesh
+# stores and serves what the core compiled, and never needs the registry.
+velox-policy = { path = "crates/velox-policy", optional = true }
 axum = "0.8.0"
 # SPA static-file serving (ServeDir + index.html fallback) for the React build.
 tower-http = { version = "0.7", features = ["fs"], optional = true }
@@ -121,6 +143,8 @@ default = ["ssr"]
 # The server feature: gates the Kubernetes/OpenSearch layer + HTTP handlers.
 # (Kept as a feature so the bare DTOs in `api` can still be compiled alone.)
 ssr = [
+    "dep:velox-integrations",
+    "dep:velox-policy",
     "dep:tower-http",
     "dep:serde_yaml",
     "dep:kube",

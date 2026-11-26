@@ -67,7 +67,12 @@ async fn main() {
     // Reconcile deployment routes with the stored access config once per start,
     // so an access ConfigMap restored or applied outside Settings takes effect
     // without a manual Save. Best-effort; never blocks serving.
-    tokio::spawn(veloxsearch::access::backfill_on_startup());
+    // Find an installed Velox Mesh first (ADR-072 amendment 5), so the route
+    // backfill that follows can give each deployment its Mesh route too.
+    tokio::spawn(async {
+        veloxsearch::mesh::discover().await;
+        veloxsearch::access::backfill_on_startup().await;
+    });
 
     // Re-provision tenants whose isolation is missing (#122): at startup, then
     // on a slowing schedule. Inert unless multi-tenancy is on; never blocks.

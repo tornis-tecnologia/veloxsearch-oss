@@ -1,0 +1,36 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# The integration-package contract, shared by the core (`src/integrations.rs`,
+# the DaemonSet path) and by Velox Mesh (`veloxagent/crates/velox-policy`, the
+# policy path). One renderer, one closed token set, one manifest parser, so
+# "what an integration does on the DaemonSet" and "under the Mesh" cannot
+# diverge (ADR-068, veloxagent/docs/ARCHITECTURE.md §3). Pure: no Kubernetes,
+# no HTTP, no crypto — signature verification stays in `catalog.rs`, in front
+# of this crate, and is the entire security boundary (ADR-039).
+#
+# Not a workspace of its own: the root crate pulls it in as a path dependency
+# (and so builds it as an implicit member), `veloxagent/` as `../crates/...`.
+[package]
+name = "velox-integrations"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+description = "Integration-package contract: manifest, closed interpolation set, renderer, resource accounting"
+authors = ["Tornis Desenvolvimento <tornis@tornis.com.br>"]
+repository = "https://github.com/tornis-tecnologia/veloxsearch-oss"
+publish = false
+
+[lints.clippy]
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# `saved-objects.ndjson` is one JSON object per line; `_bulk_create` wants an array.
+serde_json = "1"
+# `manifest.yaml`. Same crate and major as the core's optional use, so the two
+# trees agree on how a manifest parses.
+serde_yaml = "0.9"
+thiserror = "2"

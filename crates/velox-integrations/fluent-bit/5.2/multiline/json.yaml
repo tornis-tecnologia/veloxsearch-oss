@@ -1,0 +1,13 @@
+kind: multiline_parser
+name: json
+title:
+  en: JSON
+  es: JSON
+  pt: JSON
+description:
+  en: Groups pretty-printed JSON objects that span multiple lines.
+  es: Agrupa objetos JSON con formato legible que abarcan varias lineas.
+  pt: Agrupa objetos JSON formatados que ocupam varias linhas.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/parsers/multiline-parsing
+verified: true
+params: []

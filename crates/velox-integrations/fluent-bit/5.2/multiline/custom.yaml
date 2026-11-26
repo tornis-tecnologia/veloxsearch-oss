@@ -1,0 +1,81 @@
+kind: multiline_parser
+name: custom
+title:
+  en: Custom multiline parser
+  es: Parser multilinea personalizado
+  pt: Parser multilinha personalizado
+description:
+  en: Defines a custom multiline parser that joins several lines into one record.
+  es: Define un parser multilinea personalizado que une varias lineas en un registro.
+  pt: Define um parser multilinha personalizado que junta varias linhas em um registro.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/parsers/multiline-parsing
+verified: true
+params:
+- key: type
+  type: select
+  required: true
+  options:
+  - regex
+  - endswith
+  - equal
+  - eq
+  description:
+    en: 'Multiline mode: regex rules, line ends with a string, or line equals a string.'
+    es: 'Modo multilinea: reglas regex, linea que termina con una cadena o igual a una cadena.'
+    pt: 'Modo multilinha: regras regex, linha terminando com uma string ou igual a uma string.'
+- key: flush_timeout
+  type: duration
+  default: 4s
+  description:
+    en: Time before a non-terminated multiline buffer is flushed (milliseconds).
+    es: Tiempo antes de vaciar un buffer multilinea sin terminar (milisegundos).
+    pt: Tempo antes de descarregar um buffer multilinha nao terminado (milissegundos).
+- key: rule
+  type: string
+  multi: repeat
+  description:
+    en: Rule as state, regex and next state; the first must be start_state. Only for type regex.
+    es: Regla como estado, regex y siguiente estado; la primera debe ser start_state. Solo para type regex.
+    pt: Regra como estado, regex e proximo estado; a primeira deve ser start_state. Somente para type
+      regex.
+- key: key_content
+  type: string
+  description:
+    en: For structured input, the key whose content is matched and concatenated.
+    es: En entrada estructurada, la clave cuyo contenido se evalua y concatena.
+    pt: Em entrada estruturada, a chave cujo conteudo e avaliado e concatenado.
+- key: key_group
+  type: string
+  advanced: true
+  description:
+    en: For structured input, the key used to group lines into separate streams.
+    es: En entrada estructurada, la clave usada para agrupar lineas en flujos separados.
+    pt: Em entrada estruturada, a chave usada para agrupar linhas em fluxos separados.
+- key: key_pattern
+  type: string
+  advanced: true
+  description:
+    en: For structured input, an alternative key against which rules are matched.
+    es: En entrada estructurada, una clave alternativa contra la que se evaluan las reglas.
+    pt: Em entrada estruturada, uma chave alternativa contra a qual as regras sao avaliadas.
+- key: match_string
+  type: string
+  description:
+    en: String matched by the endswith and equal types; not used with regex.
+    es: Cadena evaluada por los tipos endswith y equal; no se usa con regex.
+    pt: String avaliada pelos tipos endswith e equal; nao usada com regex.
+- key: negate
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Treat a non-matching line as matching.
+    es: Trata una linea sin coincidencia como coincidente.
+    pt: Trata uma linha sem correspondencia como correspondente.
+- key: parser
+  type: string
+  advanced: true
+  description:
+    en: Predefined parser applied to incoming content before the rules; otherwise raw text.
+    es: Parser predefinido aplicado al contenido entrante antes de las reglas; si no, texto crudo.
+    pt: Parser predefinido aplicado ao conteudo de entrada antes das regras; caso contrario, texto bruto.

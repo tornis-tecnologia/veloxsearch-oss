@@ -1,0 +1,66 @@
+kind: input
+name: docker
+title:
+  en: Docker metrics
+  es: Docker metrics
+  pt: Docker metrics
+description:
+  en: Collects per-container CPU and memory usage of Docker containers as log records.
+  es: Recolecta el uso de CPU y memoria por contenedor de Docker como registros de log.
+  pt: Coleta o uso de CPU e memoria por container Docker como registros de log.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/docker-metrics
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+verified: true
+params:
+- key: interval_sec
+  type: integer
+  description:
+    en: Polling interval in seconds.
+    es: Intervalo de sondeo en segundos.
+    pt: Intervalo de coleta em segundos.
+  default: 1
+- key: interval_nsec
+  type: integer
+  description:
+    en: Polling interval in nanoseconds, added to interval_sec.
+    es: Intervalo de sondeo en nanosegundos, sumado a interval_sec.
+    pt: Intervalo de coleta em nanossegundos, somado a interval_sec.
+  default: 0
+  advanced: true
+- key: include
+  type: string
+  description:
+    en: Space-separated list of containers to collect; unset collects all running containers.
+    es: Lista de contenedores a recolectar separada por espacios; sin valor recolecta todos los activos.
+    pt: Lista de containers a coletar separada por espacos; sem valor coleta todos os ativos.
+  multi: join
+  join: ' '
+- key: exclude
+  type: string
+  description:
+    en: Space-separated list of containers to skip.
+    es: Lista de contenedores a omitir separada por espacios.
+    pt: Lista de containers a ignorar separada por espacos.
+  multi: join
+  join: ' '
+- key: path.containers
+  type: string
+  description:
+    en: Container directory, for custom Docker data-root setups.
+    es: Directorio de contenedores, para configuraciones de data-root personalizadas de Docker.
+    pt: Diretorio de containers, para configuracoes de data-root personalizadas do Docker.
+  default: /var/lib/docker/containers
+  advanced: true
+- key: path.sysfs
+  type: string
+  description:
+    en: Sysfs cgroup mount point.
+    es: Punto de montaje de cgroup en sysfs.
+    pt: Ponto de montagem do cgroup no sysfs.
+  default: /sys/fs/cgroup
+  advanced: true

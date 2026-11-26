@@ -1,0 +1,391 @@
+kind: input
+name: tail
+title:
+  en: Tail
+  es: Tail
+  pt: Tail
+description:
+  en: Follows text files, like `tail -f`, tracking offsets across restarts.
+  es: Sigue archivos de texto, como `tail -f`, recordando los offsets entre reinicios.
+  pt: Acompanha arquivos de texto, como `tail -f`, guardando os offsets entre reinícios.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/tail
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+verified: true
+params:
+- key: path
+  type: string
+  required: true
+  multi: join
+  join: ','
+  description:
+    en: Files to read; wildcards and comma-separated patterns allowed.
+    es: Archivos a leer; se permiten comodines y patrones separados por comas.
+    pt: Arquivos a ler; são permitidos curingas e padrões separados por vírgula.
+- key: exclude_path
+  type: string
+  multi: join
+  join: ','
+  description:
+    en: Comma-separated shell patterns of files to ignore, such as *.gz,*.zip.
+    es: Patrones shell separados por comas de archivos a ignorar, como *.gz,*.zip.
+    pt: Padrões shell separados por vírgula de arquivos a ignorar, como *.gz,*.zip.
+- key: db
+  type: string
+  operator_settable: false
+  description:
+    en: SQLite database file tracking monitored files and offsets; keep it unique per plugin.
+    es: Archivo SQLite que registra archivos y offsets; debe ser único por plugin.
+    pt: Arquivo SQLite que registra arquivos e offsets; deve ser único por plugin.
+- key: db.compare_filename
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Check both inode and filename, not only inode, when reading stored file state.
+    es: Verifica inode y nombre de archivo, no solo inode, al leer el estado guardado.
+    pt: Verifica inode e nome do arquivo, não só inode, ao ler o estado guardado.
+- key: db.journal_mode
+  type: select
+  default: wal
+  options:
+  - wal
+  advanced: true
+  description:
+    en: SQLite journal mode; wal is faster but incompatible with network file systems.
+    es: Modo de journal de SQLite; wal es más rápido pero incompatible con sistemas de archivos de red.
+    pt: Modo de journal do SQLite; wal é mais rápido mas incompatível com sistemas de arquivos de rede.
+- key: db.locking
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Restrict database access to Fluent Bit for better performance.
+    es: Restringe el acceso a la base solo a Fluent Bit para mejor rendimiento.
+    pt: Restringe o acesso ao banco apenas ao Fluent Bit para melhor desempenho.
+- key: db.sync
+  type: select
+  default: normal
+  options:
+  - extra
+  - full
+  - normal
+  - 'off'
+  advanced: true
+  description:
+    en: SQLite disk synchronization mode; full is safest but costly.
+    es: Modo de sincronización a disco de SQLite; full es el más seguro pero costoso.
+    pt: Modo de sincronização em disco do SQLite; full é o mais seguro porém custoso.
+- key: read_from_head
+  type: bool
+  default: false
+  description:
+    en: Read files discovered at startup without a stored offset from the beginning.
+    es: Lee desde el inicio los archivos descubiertos al arrancar sin offset guardado.
+    pt: Lê desde o início os arquivos descobertos na partida sem offset guardado.
+- key: read_newly_discovered_files_from_head
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Read files discovered after startup without a stored offset from the beginning.
+    es: Lee desde el inicio los archivos descubiertos después del arranque sin offset guardado.
+    pt: Lê desde o início os arquivos descobertos após a partida sem offset guardado.
+- key: ignore_older
+  type: duration
+  description:
+    en: Ignores files older than this age, using m, h or d suffixes; default reads all.
+    es: Ignora archivos más antiguos que esta edad, con sufijos m, h o d; por defecto lee todos.
+    pt: Ignora arquivos mais antigos que esta idade, com sufixos m, h ou d; por padrão lê todos.
+- key: ignore_active_older_files
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Also ignore files older than ignore_older while they are being ingested.
+    es: Ignora también los archivos más antiguos que ignore_older aunque se estén ingiriendo.
+    pt: Ignora também arquivos mais antigos que ignore_older mesmo durante a ingestão.
+- key: refresh_interval
+  type: integer
+  default: 60
+  advanced: true
+  description:
+    en: Seconds between refreshes of the watched file list.
+    es: Segundos entre actualizaciones de la lista de archivos vigilados.
+    pt: Segundos entre atualizações da lista de arquivos observados.
+- key: rotate_wait
+  type: integer
+  default: 5
+  advanced: true
+  description:
+    en: Extra seconds to keep monitoring a rotated file for pending data.
+    es: Segundos extra para seguir vigilando un archivo rotado por datos pendientes.
+    pt: Segundos extras para continuar observando um arquivo rotacionado por dados pendentes.
+- key: buffer_chunk_size
+  type: size
+  default: 32k
+  advanced: true
+  description:
+    en: Initial per-file read buffer size.
+    es: Tamaño inicial del búfer de lectura por archivo.
+    pt: Tamanho inicial do buffer de leitura por arquivo.
+- key: buffer_max_size
+  type: size
+  default: 32k
+  advanced: true
+  description:
+    en: Per-file buffer limit; a file exceeding it is removed from monitoring.
+    es: Límite del búfer por archivo; un archivo que lo supera deja de vigilarse.
+    pt: Limite do buffer por arquivo; um arquivo que o excede deixa de ser monitorado.
+- key: skip_long_lines
+  type: bool
+  default: false
+  description:
+    en: Skip lines longer than buffer_max_size instead of abandoning the file.
+    es: Omite líneas más largas que buffer_max_size en vez de abandonar el archivo.
+    pt: Ignora linhas maiores que buffer_max_size em vez de abandonar o arquivo.
+- key: truncate_long_lines
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Truncate lines that exceed the buffer after conversion to UTF-8.
+    es: Trunca líneas que exceden el búfer tras convertir a UTF-8.
+    pt: Trunca linhas que excedem o buffer após a conversão para UTF-8.
+- key: skip_empty_lines
+  type: bool
+  default: false
+  description:
+    en: Skip empty lines from further processing.
+    es: Omite las líneas vacías del procesamiento posterior.
+    pt: Ignora linhas vazias no processamento posterior.
+- key: parser
+  type: string
+  description:
+    en: Parser that interprets each entry as a structured message.
+    es: Parser que interpreta cada entrada como mensaje estructurado.
+    pt: Parser que interpreta cada entrada como mensagem estruturada.
+- key: key
+  type: string
+  default: log
+  description:
+    en: Key name for unstructured lines when no parser is applied.
+    es: Nombre de la clave para líneas sin estructura cuando no hay parser.
+    pt: Nome da chave para linhas não estruturadas quando não há parser.
+- key: path_key
+  type: string
+  description:
+    en: If set, adds the monitored file name to each record under this key.
+    es: Si se define, agrega el nombre del archivo a cada registro bajo esta clave.
+    pt: Se definido, adiciona o nome do arquivo a cada registro sob esta chave.
+- key: offset_key
+  type: string
+  description:
+    en: If set, adds the file offset to each record under this key.
+    es: Si se define, agrega el offset del archivo a cada registro bajo esta clave.
+    pt: Se definido, adiciona o offset do arquivo a cada registro sob esta chave.
+- key: tag_regex
+  type: regex
+  advanced: true
+  description:
+    en: Regular expression extracting named fields from the file name for use in the tag.
+    es: Expresión regular que extrae campos con nombre del nombre de archivo para la etiqueta.
+    pt: Expressão regular que extrai campos nomeados do nome do arquivo para a tag.
+- key: docker_mode
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Recombine split Docker log lines before parsing; cannot be used with multiline.
+    es: Recombina líneas de log Docker divididas antes de parsear; no se puede usar con multiline.
+    pt: Recombina linhas de log Docker divididas antes do parse; não pode ser usado com multiline.
+- key: docker_mode_flush
+  type: integer
+  default: 4
+  advanced: true
+  description:
+    en: Seconds to wait before flushing queued unfinished Docker split lines.
+    es: Segundos de espera antes de vaciar líneas Docker divididas sin terminar.
+    pt: Segundos de espera antes de descarregar linhas Docker divididas inacabadas.
+- key: docker_mode_parser
+  type: string
+  advanced: true
+  description:
+    en: Optional parser for the first line of Docker multiline mode.
+    es: Parser opcional para la primera línea del modo multilínea de Docker.
+    pt: Parser opcional para a primeira linha do modo multilinha do Docker.
+- key: multiline.parser
+  type: string
+  multi: join
+  join: ','
+  description:
+    en: 'Multiline parsers applied to the content, comma-separated; Built-in multiline parsers: docker,
+      cri, go, java, python, ruby, json.'
+    es: 'Parsers multilínea aplicados al contenido, separados por comas; embebidos: docker, cri, go, java,
+      python, ruby, json.'
+    pt: 'Parsers multilinha aplicados ao conteúdo, separados por vírgula; embutidos: docker, cri, go,
+      java, python, ruby, json.'
+- key: multiline
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: 'Old multiline mechanism: discover multiline messages; the parser option is then unused.'
+    es: 'Mecanismo multilínea antiguo: descubre mensajes multilínea; la opción parser deja de usarse.'
+    pt: 'Mecanismo multilinha antigo: descobre mensagens multilinha; a opção parser deixa de ser usada.'
+- key: multiline_flush
+  type: integer
+  default: 4
+  advanced: true
+  description:
+    en: 'Old multiline mechanism: seconds to wait before processing queued multiline messages.'
+    es: 'Mecanismo multilínea antiguo: segundos de espera antes de procesar mensajes en cola.'
+    pt: 'Mecanismo multilinha antigo: segundos de espera antes de processar mensagens na fila.'
+- key: parser_firstline
+  type: string
+  advanced: true
+  description:
+    en: 'Old multiline mechanism: parser matching the start of a multiline message.'
+    es: 'Mecanismo multilínea antiguo: parser que reconoce el inicio de un mensaje multilínea.'
+    pt: 'Mecanismo multilinha antigo: parser que reconhece o início de uma mensagem multilinha.'
+- key: parser_N
+  type: string
+  advanced: true
+  description:
+    en: 'Old multiline mechanism: extra parsers (parser_1, parser_2, ...) for multiline entries.'
+    es: 'Mecanismo multilínea antiguo: parsers extra (parser_1, parser_2, ...) para entradas multilínea.'
+    pt: 'Mecanismo multilinha antigo: parsers extras (parser_1, parser_2, ...) para entradas multilinha.'
+- key: mem_buf_limit
+  type: size
+  description:
+    en: Memory limit for the input; it pauses when reached and resumes after flush.
+    es: Límite de memoria del input; se pausa al alcanzarlo y reanuda tras el flush.
+    pt: Limite de memória do input; pausa ao atingi-lo e retoma após o flush.
+- key: static_batch_size
+  type: size
+  default: 50M
+  advanced: true
+  description:
+    en: Maximum bytes processed per iteration for static files existing at startup.
+    es: Máximo de bytes procesados por iteración para archivos estáticos existentes al arrancar.
+    pt: Máximo de bytes processados por iteração para arquivos estáticos existentes na partida.
+- key: event_batch_size
+  type: size
+  default: 50M
+  advanced: true
+  description:
+    en: Maximum bytes processed per iteration for files monitored in event mode.
+    es: Máximo de bytes procesados por iteración para archivos vigilados en modo evento.
+    pt: Máximo de bytes processados por iteração para arquivos monitorados em modo evento.
+- key: inotify_watcher
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Set to false to use the file stat watcher instead of inotify.
+    es: Pon false para usar el watcher por stat en lugar de inotify.
+    pt: Defina false para usar o watcher por stat em vez de inotify.
+- key: file_cache_advise
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Use posix_fadvise DONTNEED to reduce kernel file cache usage; Linux only.
+    es: Usa posix_fadvise DONTNEED para reducir el caché de archivos del kernel; solo Linux.
+    pt: Usa posix_fadvise DONTNEED para reduzir o cache de arquivos do kernel; somente Linux.
+- key: exit_on_eof
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Exit as soon as a file reaches its end; for bulk loads and tests.
+    es: Sale en cuanto un archivo llega a su final; para cargas masivas y pruebas.
+    pt: Sai assim que um arquivo chega ao fim; para cargas em lote e testes.
+- key: progress_check_interval
+  type: duration
+  default: 2s
+  advanced: true
+  description:
+    en: Interval for checking file progress.
+    es: Intervalo para comprobar el progreso de los archivos.
+    pt: Intervalo para verificar o progresso dos arquivos.
+- key: progress_check_interval_nsec
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Nanosecond component of the progress check interval.
+    es: Componente en nanosegundos del intervalo de comprobación de progreso.
+    pt: Componente em nanossegundos do intervalo de verificação de progresso.
+- key: watcher_interval
+  type: duration
+  default: 2s
+  advanced: true
+  description:
+    en: Interval of the watcher that detects symbolic link rotation.
+    es: Intervalo del watcher que detecta la rotación de enlaces simbólicos.
+    pt: Intervalo do watcher que detecta a rotação de links simbólicos.
+- key: generic.encoding
+  type: select
+  options:
+  - ShiftJIS
+  - UHC
+  - GBK
+  - GB18030
+  - Big5
+  - Win866
+  - Win874
+  - Win1250
+  - Win1251
+  - Win1252
+  - Win1253
+  - Win1254
+  - Win1255
+  - Win1256
+  advanced: true
+  description:
+    en: Non-Unicode encoding of the file data.
+    es: Codificación no Unicode de los datos del archivo.
+    pt: Codificação não Unicode dos dados do arquivo.
+- key: unicode.encoding
+  type: select
+  options:
+  - UTF-16LE
+  - UTF-16BE
+  - auto
+  advanced: true
+  description:
+    en: Unicode encoding of the file data.
+    es: Codificación Unicode de los datos del archivo.
+    pt: Codificação Unicode dos dados do arquivo.
+- key: windows.path_encoding
+  type: select
+  default: ansi
+  options:
+  - ansi
+  - utf8
+  advanced: true
+  description:
+    en: 'Windows only: encoding used to interpret the configured path.'
+    es: 'Solo Windows: codificación usada para interpretar la ruta configurada.'
+    pt: 'Somente Windows: codificação usada para interpretar o caminho configurado.'
+- key: thread.ring_buffer.capacity
+  type: integer
+  default: 1024
+  advanced: true
+  description:
+    en: Ring buffer slots for data entries in threaded mode.
+    es: Ranuras del búfer circular para entradas de datos en modo threaded.
+    pt: Slots do buffer circular para entradas de dados no modo threaded.
+- key: thread.ring_buffer.window
+  type: integer
+  default: 5
+  advanced: true
+  description:
+    en: Ring buffer fill percentage (1-100) that triggers a flush in threaded mode.
+    es: Porcentaje de llenado (1-100) del búfer circular que dispara un flush en modo threaded.
+    pt: Percentual de preenchimento (1-100) do buffer circular que dispara um flush no modo threaded.

@@ -1,0 +1,50 @@
+kind: processor
+name: labels
+title:
+  en: Labels
+  es: Labels
+  pt: Labels
+description:
+  en: Adds, updates, upserts, deletes or hashes metric labels.
+  es: Agrega, actualiza, inserta o actualiza, elimina o aplica hash a etiquetas de metricas.
+  pt: Adiciona, atualiza, insere ou atualiza, remove ou aplica hash em rotulos de metricas.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/processors/labels
+event_types:
+- metrics
+verified: true
+params:
+- key: delete
+  type: string
+  description:
+    en: Removes a label key; does nothing if the key is missing.
+    es: Elimina una clave de etiqueta; no hace nada si no existe.
+    pt: Remove uma chave de rotulo; nao faz nada se ela nao existir.
+  multi: repeat
+- key: hash
+  type: string
+  description:
+    en: Replaces a label value with its SHA-256 hash as a hex string.
+    es: Reemplaza el valor de una etiqueta por su hash SHA-256 en hexadecimal.
+    pt: Substitui o valor de um rotulo pelo seu hash SHA-256 em hexadecimal.
+  multi: repeat
+- key: insert
+  type: string
+  description:
+    en: Adds a new label key/value pair.
+    es: Agrega un nuevo par clave/valor de etiqueta.
+    pt: Adiciona um novo par chave/valor de rotulo.
+  multi: repeat
+- key: update
+  type: string
+  description:
+    en: Changes the value of an existing label; does nothing if the key is missing.
+    es: Cambia el valor de una etiqueta existente; no hace nada si no existe.
+    pt: Altera o valor de um rotulo existente; nao faz nada se ele nao existir.
+  multi: repeat
+- key: upsert
+  type: string
+  description:
+    en: Updates a label value, or creates the label if it does not exist.
+    es: Actualiza el valor de una etiqueta o la crea si no existe.
+    pt: Atualiza o valor de um rotulo ou o cria se nao existir.
+  multi: repeat

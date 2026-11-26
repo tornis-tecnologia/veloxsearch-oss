@@ -1,0 +1,44 @@
+kind: input
+name: thermal
+title:
+  en: Thermal
+  es: Thermal
+  pt: Thermal
+description:
+  en: Reports system temperatures from Linux thermal zones.
+  es: Reporta temperaturas del sistema desde las zonas térmicas de Linux.
+  pt: Reporta temperaturas do sistema a partir das zonas térmicas do Linux.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/thermal
+os:
+- linux
+event_types:
+- logs
+verified: true
+params:
+- key: interval_sec
+  type: integer
+  default: 1
+  description:
+    en: Polling interval in seconds.
+    es: Intervalo de sondeo en segundos.
+    pt: Intervalo de coleta em segundos.
+- key: interval_nsec
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Polling interval nanoseconds component.
+    es: Componente en nanosegundos del intervalo de sondeo.
+    pt: Componente em nanossegundos do intervalo de coleta.
+- key: name_regex
+  type: regex
+  description:
+    en: Optional regular expression filtering thermal zones by name.
+    es: Expresión regular opcional para filtrar zonas térmicas por nombre.
+    pt: Expressão regular opcional para filtrar zonas térmicas por nome.
+- key: type_regex
+  type: regex
+  description:
+    en: Optional regular expression filtering thermal zones by type.
+    es: Expresión regular opcional para filtrar zonas térmicas por tipo.
+    pt: Expressão regular opcional para filtrar zonas térmicas por tipo.

@@ -1,0 +1,80 @@
+kind: filter
+name: nightfall
+title:
+  en: Nightfall
+  es: Nightfall
+  pt: Nightfall
+description:
+  en: Scans logs for sensitive data with the Nightfall API using a policy; sends records to an external
+    service and is not listed as an input processor on the processors page.
+  es: Analiza logs en busca de datos sensibles con la API de Nightfall usando una política; envía registros
+    a un servicio externo y no figura como processor de entrada en la página de processors.
+  pt: Varre logs em busca de dados sensíveis com a API da Nightfall usando uma política; envia registros
+    a um serviço externo e não consta como processor de entrada na página de processors.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/nightfall
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: nightfall_api_key
+  type: password
+  required: true
+  secret: true
+  description:
+    en: Nightfall API key from the Nightfall Dashboard.
+    es: Clave de API de Nightfall obtenida en el Dashboard de Nightfall.
+    pt: Chave de API da Nightfall obtida no Dashboard da Nightfall.
+- key: policy_id
+  type: string
+  required: true
+  description:
+    en: Nightfall developer platform policy used to scan logs.
+    es: Política de la plataforma de desarrolladores de Nightfall usada para analizar los logs.
+    pt: Política da plataforma de desenvolvedores da Nightfall usada para varrer os logs.
+- key: sampling_rate
+  type: number
+  default: 1
+  description:
+    en: Fraction of logs to scan, a float in (0,1]; 1 scans all.
+    es: Fracción de logs a analizar, un decimal en (0,1]; 1 analiza todos.
+    pt: Fração de logs a varrer, um decimal em (0,1]; 1 varre todos.
+- key: tls.ca_path
+  type: string
+  advanced: true
+  description:
+    en: Absolute path to root certificates; required when tls.verify is enabled.
+    es: Ruta absoluta a los certificados raíz; obligatoria si tls.verify está activo.
+    pt: Caminho absoluto para os certificados raiz; obrigatório quando tls.verify está ativo.
+- key: tls.verify
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Enables certificate validation when connecting to the Nightfall API.
+    es: Activa la validación de certificados al conectar con la API de Nightfall.
+    pt: Ativa a validação de certificados ao conectar com a API da Nightfall.
+- key: tls.verify_hostname
+  type: bool
+  default: false
+  since: 5.2.0
+  advanced: true
+  description:
+    en: Enables hostname verification of the Nightfall API certificate; requires tls.verify.
+    es: Activa la verificación del nombre de host del certificado de la API de Nightfall; requiere tls.verify.
+    pt: Ativa a verificação do nome do host do certificado da API da Nightfall; requer tls.verify.
+- key: tls.debug
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: TLS debug level from 0 (none) to 4 (most detailed).
+    es: Nivel de depuración TLS de 0 (ninguno) a 4 (máximo detalle).
+    pt: Nível de depuração TLS de 0 (nenhum) a 4 (mais detalhado).
+- key: tls.vhost
+  type: string
+  advanced: true
+  description:
+    en: Optional TLS virtual host for the Nightfall API connection.
+    es: Host virtual TLS opcional para la conexión con la API de Nightfall.
+    pt: Host virtual TLS opcional para a conexão com a API da Nightfall.

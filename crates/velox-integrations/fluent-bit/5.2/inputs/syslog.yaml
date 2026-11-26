@@ -1,0 +1,117 @@
+kind: input
+name: syslog
+title:
+  en: Syslog
+  es: Syslog
+  pt: Syslog
+description:
+  en: Receives syslog messages over Unix or network sockets.
+  es: Recibe mensajes syslog por sockets Unix o de red.
+  pt: Recebe mensagens syslog por sockets Unix ou de rede.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/syslog
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- network_listen
+verified: true
+params:
+- key: mode
+  type: select
+  default: unix_udp
+  options:
+  - unix_udp
+  - unix_tcp
+  - tcp
+  - udp
+  description:
+    en: Transport mode used to receive messages.
+    es: Modo de transporte usado para recibir mensajes.
+    pt: Modo de transporte usado para receber mensagens.
+- key: path
+  type: string
+  operator_settable: false
+  description:
+    en: Socket file path for the Unix modes.
+    es: Ruta del archivo de socket para los modos Unix.
+    pt: Caminho do arquivo de socket para os modos Unix.
+- key: unix_perm
+  type: string
+  default: '0644'
+  advanced: true
+  description:
+    en: Octal permissions of the Unix socket file.
+    es: Permisos octales del archivo de socket Unix.
+    pt: Permissões octais do arquivo de socket Unix.
+- key: listen
+  type: string
+  default: 0.0.0.0
+  description:
+    en: Network interface to bind in tcp or udp mode.
+    es: Interfaz de red a escuchar en modo tcp o udp.
+    pt: Interface de rede em que escutar nos modos tcp ou udp.
+- key: port
+  type: integer
+  default: 5140
+  description:
+    en: Listening port in tcp or udp mode.
+    es: Puerto de escucha en modo tcp o udp.
+    pt: Porta de escuta nos modos tcp ou udp.
+- key: format
+  type: select
+  default: newline
+  options:
+  - octet_counting
+  - newline
+  advanced: true
+  description:
+    en: TCP framing; applies to TCP modes only.
+    es: Delimitación de TCP; solo para modos TCP.
+    pt: Delimitação do TCP; apenas para modos TCP.
+- key: parser
+  type: string
+  description:
+    en: Parser applied to messages; the default depends on the mode.
+    es: Parser aplicado a los mensajes; el valor por defecto depende del modo.
+    pt: Parser aplicado às mensagens; o padrão depende do modo.
+- key: buffer_chunk_size
+  type: size
+  default: 32768
+  advanced: true
+  description:
+    en: Memory chunk size for incoming messages; in UDP modes it also caps message size.
+    es: Tamaño de chunk en memoria para mensajes entrantes; en modos UDP también limita el tamaño del
+      mensaje.
+    pt: Tamanho do chunk em memória das mensagens recebidas; nos modos UDP também limita o tamanho da
+      mensagem.
+- key: buffer_max_size
+  type: size
+  advanced: true
+  description:
+    en: Maximum size for receiving one message; 0 or unset uses buffer_chunk_size.
+    es: Tamaño máximo para recibir un mensaje; 0 o sin definir usa buffer_chunk_size.
+    pt: Tamanho máximo para receber uma mensagem; 0 ou vazio usa buffer_chunk_size.
+- key: raw_message_key
+  type: string
+  advanced: true
+  description:
+    en: Key where the original raw message is stored.
+    es: Clave donde se guarda el mensaje original sin procesar.
+    pt: Chave onde a mensagem original bruta é guardada.
+- key: receive_buffer_size
+  type: size
+  advanced: true
+  description:
+    en: Socket receive buffer size; the OS default is often too low for high rates.
+    es: Tamaño del búfer de recepción del socket; el valor del SO suele ser bajo para tasas altas.
+    pt: Tamanho do buffer de recepção do socket; o padrão do SO costuma ser baixo para taxas altas.
+- key: source_address_key
+  type: string
+  advanced: true
+  description:
+    en: Key where the sender address is added to each record.
+    es: Clave donde se agrega la dirección del remitente a cada registro.
+    pt: Chave onde o endereço do remetente é adicionado a cada registro.

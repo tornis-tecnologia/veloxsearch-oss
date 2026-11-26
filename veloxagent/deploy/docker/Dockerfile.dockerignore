@@ -1,0 +1,11 @@
+# Allowlist for veloxagent/deploy/docker/Dockerfile (BuildKit reads
+# <Dockerfile>.dockerignore): the context is the repository root, and only
+# what the agent compiles from — plus the licence it ships — is sent.
+*
+!LICENSE
+!crates/velox-integrations
+!crates/velox-policy
+!veloxagent/Cargo.toml
+!veloxagent/Cargo.lock
+!veloxagent/crates
+**/target

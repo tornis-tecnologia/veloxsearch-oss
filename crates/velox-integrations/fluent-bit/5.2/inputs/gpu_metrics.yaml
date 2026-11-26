@@ -1,0 +1,68 @@
+kind: input
+name: gpu_metrics
+title:
+  en: GPU Metrics
+  es: GPU Metrics
+  pt: GPU Metrics
+description:
+  en: Collects AMD and NVIDIA GPU metrics such as power and temperature.
+  es: Recopila métricas de GPU AMD y NVIDIA, como consumo y temperatura.
+  pt: Coleta métricas de GPU AMD e NVIDIA, como consumo de energia e temperatura.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/gpu-metrics
+os:
+- linux
+event_types:
+- metrics
+requires:
+- gpu
+verified: true
+params:
+- key: cards_include
+  type: string
+  default: '*'
+  description:
+    en: GPU cards to monitor; accepts wildcards, ranges and comma-separated lists.
+    es: Tarjetas GPU a monitorear; admite comodines, rangos y listas separadas por comas.
+    pt: Placas GPU a monitorar; aceita curingas, intervalos e listas separadas por vírgula.
+- key: cards_exclude
+  type: string
+  description:
+    en: GPU cards to leave out, using the same syntax as cards_include.
+    es: Tarjetas GPU a excluir, con la misma sintaxis que cards_include.
+    pt: Placas GPU a excluir, com a mesma sintaxe de cards_include.
+- key: enable_nvml
+  type: bool
+  default: true
+  description:
+    en: Turns NVIDIA collection through NVML on or off.
+    es: Activa o desactiva la recolección NVIDIA mediante NVML.
+    pt: Liga ou desliga a coleta NVIDIA via NVML.
+- key: enable_power
+  type: bool
+  default: true
+  description:
+    en: Turns power consumption metrics on or off.
+    es: Activa o desactiva las métricas de consumo de energía.
+    pt: Liga ou desliga as métricas de consumo de energia.
+- key: enable_temperature
+  type: bool
+  default: true
+  description:
+    en: Turns temperature metrics on or off.
+    es: Activa o desactiva las métricas de temperatura.
+    pt: Liga ou desliga as métricas de temperatura.
+- key: path_sysfs
+  type: string
+  default: /sys
+  advanced: true
+  description:
+    en: Sysfs root directory, mainly for testing or unusual systems.
+    es: Directorio raíz de sysfs, sobre todo para pruebas o sistemas inusuales.
+    pt: Diretório raiz do sysfs, principalmente para testes ou sistemas incomuns.
+- key: scrape_interval
+  type: integer
+  default: 5
+  description:
+    en: Seconds between collection cycles.
+    es: Segundos entre ciclos de recolección.
+    pt: Segundos entre ciclos de coleta.

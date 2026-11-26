@@ -22,7 +22,7 @@
 //! created and auto-attaches to them. For pre-existing indices (purpose
 //! changed on a live deployment) we additionally best-effort attach/detach.
 
-use crate::recipes::{http, os_base, recipe_index, K8S_INDEX, NGINX_INDEX, RECIPES, SSH_INDEX};
+use crate::recipes::{http, os_base, recipe_pattern, RECIPES};
 use crate::scope::Deployment;
 use anyhow::{bail, Context, Result};
 
@@ -43,15 +43,14 @@ const SEARCH_PATTERN: &str = "app-*";
 
 /// Retention covers every index the recipe catalog can write — derived, so a
 /// new recipe can't silently escape the purpose profile's retention window.
+/// Version-agnostic (`veloxagent-<recipe>-<signal>-v*`, ADR-071), so a `-v1`
+/// index keeps ageing out after `-v2` ships.
 ///
 /// `pub(crate)` so `otel_stack` can assert its own patterns are disjoint from
 /// these: the two collection modes coexist only because they never write the
 /// same indices (ADR-053 decision 5), and that is proven, not assumed.
 pub(crate) fn log_patterns() -> Vec<String> {
-    RECIPES
-        .iter()
-        .map(|r| format!("{}*", recipe_index(r)))
-        .collect()
+    RECIPES.iter().map(|r| recipe_pattern(r)).collect()
 }
 
 /// Apply the purpose profile to a green deployment. Idempotent.
@@ -310,7 +309,7 @@ async fn ensure_detectors(deployment: &Deployment) -> Result<()> {
         deployment,
         "velox-nginx-threats",
         "others_web",
-        &format!("{NGINX_INDEX}*"),
+        &recipe_pattern("nginx"),
         NGINX_ALIASES,
     )
     .await?;
@@ -321,7 +320,7 @@ async fn ensure_detectors(deployment: &Deployment) -> Result<()> {
         deployment,
         "velox-ssh-threats",
         "linux",
-        &format!("{SSH_INDEX}*"),
+        &recipe_pattern("ssh"),
         SSH_ALIASES,
     )
     .await?;
@@ -332,7 +331,7 @@ async fn ensure_detectors(deployment: &Deployment) -> Result<()> {
         deployment,
         "velox-k8s-threats",
         "linux",
-        &format!("{K8S_INDEX}*"),
+        &recipe_pattern("kubernetes"),
         &[],
     )
     .await

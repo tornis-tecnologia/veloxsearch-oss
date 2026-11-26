@@ -1,0 +1,49 @@
+kind: input
+name: mqtt
+title:
+  en: MQTT
+  es: MQTT
+  pt: MQTT
+description:
+  en: Receives MQTT messages as a broker-like listener.
+  es: Recibe mensajes MQTT como un listener tipo broker.
+  pt: Recebe mensagens MQTT como um listener do tipo broker.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/mqtt
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  default: 0.0.0.0
+  description:
+    en: Network interface the listener binds to.
+    es: Interfaz de red a la que se enlaza el listener.
+    pt: Interface de rede à qual o listener se vincula.
+- key: port
+  type: integer
+  default: 1883
+  description:
+    en: TCP port the listener accepts connections on.
+    es: Puerto TCP en el que el listener acepta conexiones.
+    pt: Porta TCP na qual o listener aceita conexões.
+- key: payload_key
+  type: string
+  description:
+    en: Output record field that stores the message payload.
+    es: Campo del registro de salida que guarda la carga del mensaje.
+    pt: Campo do registro de saída que guarda a carga da mensagem.
+- key: buffer_size
+  type: size
+  default: '2048'
+  advanced: true
+  description:
+    en: Maximum size of one MQTT message payload; larger messages are dropped.
+    es: Tamaño máximo de la carga de un mensaje MQTT; los mayores se descartan.
+    pt: Tamanho máximo da carga de uma mensagem MQTT; as maiores são descartadas.

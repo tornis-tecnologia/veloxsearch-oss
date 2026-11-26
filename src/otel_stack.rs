@@ -1185,6 +1185,8 @@ pub fn os_teardown(deployment: &str) -> crate::integrations::Teardown {
         // none, so there is none to remove.
         ingest_pipeline: None,
         index_template: None,
+        ingest_pipelines: Vec::new(),
+        index_templates: Vec::new(),
         index_pattern: pats[0].id.to_string(),
         index_patterns: pats[1..].iter().map(|p| p.id.to_string()).collect(),
         // Boards, their explore panels and both correlations. `correlation_objects`

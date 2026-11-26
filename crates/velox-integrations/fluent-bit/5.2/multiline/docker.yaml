@@ -1,0 +1,13 @@
+kind: multiline_parser
+name: docker
+title:
+  en: Docker
+  es: Docker
+  pt: Docker
+description:
+  en: Handles Docker JSON logs and reassembles large entries split by Docker.
+  es: Procesa logs JSON de Docker y reensambla entradas grandes divididas por Docker.
+  pt: Processa logs JSON do Docker e remonta entradas grandes divididas pelo Docker.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/parsers/multiline-parsing
+verified: true
+params: []

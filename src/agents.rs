@@ -12,7 +12,7 @@
 // produce byte-identical objects under the same field manager.
 use crate::k8s::{admin_creds, apply_dynamic as apply, client, delete_dynamic, get_dynamic};
 use crate::scope::Deployment;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use kube::Client;
 use std::borrow::Cow;
 
@@ -353,19 +353,19 @@ pub(crate) fn fluent_bit_conf_template(recipe: &str) -> String {
     )
 }
 
-/// Build the fluent-bit.conf for a recipe targeting `deployment`'s OpenSearch.
-/// `user`/`password` are the deployment's admin credentials (resolved from its
-/// Secret via `admin_creds`) — never a hardcoded default. Renders the recipe's
-/// template through the engine's closed-set interpolation
-/// (`integrations::render`), so the built-in path and the package path
-/// (`agent.conf.tmpl`) produce byte-identical configs by construction.
+/// The recipe template rendered with the package-declared index — the
+/// rendering the `registry_golden` gates compare a registry package against,
+/// and nothing else. Test-only: installs go through
+/// `integrations::collector_config`, which renders the same template with the
+/// `veloxagent-` index and `veloxagent-user` (ADR-070, ADR-071).
+#[cfg(test)]
 pub(crate) fn fluent_bit_conf(
     deployment: &Deployment,
     recipe: &str,
     user: &str,
     password: &str,
 ) -> String {
-    let vars = crate::integrations::Vars::new(
+    let vars = crate::integrations::vars(
         deployment,
         crate::recipes::recipe_index(recipe),
         recipe,
@@ -381,19 +381,6 @@ pub(crate) fn fluent_bit_conf(
 /// repoints (steals) deployment A's agent — they collect independently.
 fn agent_name(deployment: &Deployment, recipe: &str) -> String {
     format!("velox-agent-{deployment}-{recipe}")
-}
-
-/// Deploy (or update) the Fluent Bit agent for a built-in recipe. Renders the
-/// recipe's config from `fluent_bit_conf` and applies the workload. k8s-events
-/// is the sole non-tailer (API-server watcher → Deployment, not DaemonSet).
-pub async fn deploy_agent(deployment: &Deployment, recipe: &str) -> Result<()> {
-    // The collector authenticates with the deployment's per-cluster admin
-    // creds (via admin_creds) — never a hardcoded default. The password itself
-    // reaches the pod through the agent credentials Secret, so the config only
-    // names the variable.
-    let (user, _) = admin_creds(deployment).await;
-    let conf = fluent_bit_conf(deployment, recipe, &user, PASSWORD_REF);
-    apply_agent_workload(deployment, recipe, &conf, recipe != "k8s-events").await
 }
 
 /// Deploy (or update) an agent from a **pre-rendered** Fluent Bit config — the
@@ -425,11 +412,11 @@ async fn apply_agent_workload(
     let client = client().await?;
     ensure_rbac(&client).await?;
 
-    // The login first: the workload's pods read it at start.
-    let (user, password) = admin_creds(deployment).await;
-    if password.is_empty() {
-        bail!("no admin credentials for {deployment}; cannot configure its collector");
-    }
+    // The login first: the workload's pods read it at start. It is the
+    // collector account, never the admin (ADR-070): this Secret is mounted
+    // into pods on every node the DaemonSet reaches, and what it holds is as
+    // exposed as the least-trusted of them.
+    let (user, password) = crate::os_agent_user::credential(deployment).await?;
     apply(
         &client,
         "",
@@ -764,21 +751,25 @@ async fn own_agents(client: &Client, dep: &Deployment) -> Result<Vec<OwnAgent>> 
     Ok(out)
 }
 
-/// Keep every collector of `dep` — Fluent Bit agents and the OTel stack —
-/// authenticating with the deployment's CURRENT admin password. Run by the
-/// sampler on every tick; costs two lists and a Secret read when nothing
+/// Keep every collector of `dep` authenticating with the right login. Run by
+/// the sampler on every tick; costs two lists and a Secret read when nothing
 /// changed.
 ///
-/// Two things it fixes, both silent 401s on `/_bulk` before it existed:
-/// - **a reset password** (`reset_admin_password`): the admin Secret changes,
-///   the collectors still hold the old one. It waits until OpenSearch actually
-///   accepts the new password (the operator's securityconfig Job has run) —
-///   switching earlier would only move the 401s to the other side of the Job.
-///   A reset the backstop rolls back never gets here: the probe keeps failing
-///   and the Secret goes back to what the collectors already have.
-/// - **a collector shipped with the password in its ConfigMap** (before this
-///   fix): re-applied through the normal builder, which moves the password to
-///   the Secret.
+/// Three things it fixes, each a silent 401 (or worse) before it existed:
+/// - **a Fluent Bit collector still on the admin login** — anything installed
+///   before ADR-070/071. Its ConfigMap says `HTTP_User admin` and its index is
+///   the package's own name (`nginx-logs`). It is reinstalled through the
+///   catalog at the version this deployment recorded, which moves it to
+///   `veloxagent-user` and to the `veloxagent-` names in one step. Its old
+///   indices stay as they are — they are data, and retention owns them.
+/// - **a rotated collector password** (the `veloxagent-user` Secret deleted
+///   and re-minted): the collectors still hold the old one, so the Secret
+///   they read is rewritten and their pods rolled.
+/// - **the OTel stack after an admin-password reset**: it still logs in as
+///   admin (it is not a Fluent Bit collector and owns indices outside
+///   `veloxagent-*`), so it keeps following the admin Secret. It waits until
+///   OpenSearch actually accepts the new password — switching earlier would
+///   only move the 401s to the other side of the securityconfig Job.
 pub async fn reconcile_creds(dep: &Deployment) {
     match reconcile_creds_inner(dep).await {
         Ok(0) => {}
@@ -787,74 +778,118 @@ pub async fn reconcile_creds(dep: &Deployment) {
     }
 }
 
-async fn reconcile_creds_inner(dep: &Deployment) -> Result<usize> {
-    let (user, password) = admin_creds(dep).await;
-    if password.is_empty() {
-        return Ok(0);
-    }
-    let client = client().await?;
-    let want = creds_hash(&user, &password);
-
-    let agents = own_agents(&client, dep).await?;
-    let mut plaintext = Vec::new();
-    let mut stale = Vec::new();
-    for a in agents {
-        let conf = crate::k8s::get_dynamic(&client, "", "v1", "ConfigMap", Some(AGENT_NS), &a.name)
-            .await?
-            .and_then(|cm| {
-                cm.pointer("/data/fluent-bit.conf")?
-                    .as_str()
-                    .map(str::to_string)
-            });
-        match conf {
-            Some(c) if matches!(externalize_password(&c), Cow::Owned(_)) => plaintext.push((a, c)),
-            _ if a.creds_hash.as_deref() != Some(want.as_str()) => stale.push(a),
-            _ => {}
+/// The `HTTP_User` a Fluent Bit config logs in as, if it names one.
+fn config_user(conf: &str) -> Option<&str> {
+    conf.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        match (it.next(), it.next()) {
+            (Some(k), Some(v)) if k.eq_ignore_ascii_case("HTTP_User") => Some(v),
+            _ => None,
         }
-    }
-    let otel_stale = crate::otel_stack::creds_stale(&client, dep, &password).await?;
-    if plaintext.is_empty() && stale.is_empty() && !otel_stale {
-        return Ok(0);
-    }
-    if !opensearch_accepts(dep, &user, &password).await {
-        return Ok(0);
-    }
+    })
+}
 
+async fn reconcile_creds_inner(dep: &Deployment) -> Result<usize> {
+    let client = client().await?;
+    let agents = own_agents(&client, dep).await?;
     let mut n = 0;
-    // The migration path goes through the builder, which also writes the
-    // Secret; the stale path patches only what changed.
-    for (a, conf) in &plaintext {
-        apply_agent_workload(dep, &a.id, conf, a.kind == "DaemonSet").await?;
-        n += 1;
-    }
-    if !stale.is_empty() {
-        apply(
-            &client,
-            "",
-            "v1",
-            "Secret",
-            Some(AGENT_NS),
-            &creds_secret_name(dep),
-            &creds_secret(dep, &user, &password),
-        )
-        .await?;
-        for a in &stale {
-            crate::k8s::merge_patch_dynamic(
+
+    // Fluent Bit collectors: the collector account. Nothing to do on a
+    // deployment with no collectors, and no account is minted for one.
+    if !agents.is_empty() {
+        let (user, password) = crate::os_agent_user::credential(dep).await?;
+        let want = creds_hash(&user, &password);
+        let mut migrate = Vec::new();
+        let mut stale = Vec::new();
+        for a in agents {
+            let conf =
+                crate::k8s::get_dynamic(&client, "", "v1", "ConfigMap", Some(AGENT_NS), &a.name)
+                    .await?
+                    .and_then(|cm| {
+                        cm.pointer("/data/fluent-bit.conf")?
+                            .as_str()
+                            .map(str::to_string)
+                    });
+            match conf {
+                Some(c) if config_user(&c) != Some(user.as_str()) => migrate.push(a),
+                _ if a.creds_hash.as_deref() != Some(want.as_str()) => stale.push(a),
+                _ => {}
+            }
+        }
+        if (!migrate.is_empty() || !stale.is_empty())
+            && !opensearch_accepts(dep, &user, &password).await
+        {
+            // The stored password and the account in OpenSearch disagree: the
+            // account was deleted, the security index restored from a backup,
+            // or the password changed by hand. Moving collectors onto a login
+            // OpenSearch refuses would only move the 401s, so the account is
+            // re-written from the stored password first — and if that fails,
+            // say so: a reconcile that quietly does nothing is how a migration
+            // stays undone for weeks.
+            tracing::warn!(
+                "{dep}: OpenSearch refuses the stored collector login; re-writing the account"
+            );
+            crate::os_agent_user::ensure(dep).await?;
+            if !opensearch_accepts(dep, &user, &password).await {
+                anyhow::bail!(
+                    "OpenSearch still refuses {user} after re-writing the account;                      {} collector(s) left on their current login",
+                    migrate.len() + stale.len()
+                );
+            }
+        }
+        // Reinstalling goes through the catalog, so a collector is moved by the
+        // same code that would install it today — not by a patch that knows
+        // how yesterday's ConfigMap was laid out.
+        let recorded = crate::k8s::integration_versions(dep)
+            .await
+            .unwrap_or_default();
+        for a in &migrate {
+            let version = recorded.get(&a.id).map(String::as_str);
+            // `None` keeps the inputs the operator recorded: a migration moves
+            // the login and the names, never the choices.
+            match crate::catalog::install(dep, &a.id, version, None).await {
+                Ok(()) => {
+                    tracing::info!("collector {} of {dep} moved to {user}", a.id);
+                    n += 1;
+                }
+                Err(e) => tracing::warn!("could not move collector {} of {dep}: {e:#}", a.id),
+            }
+        }
+        if !stale.is_empty() {
+            apply(
                 &client,
-                "apps",
+                "",
                 "v1",
-                a.kind,
-                AGENT_NS,
-                &a.name,
-                &serde_json::json!({"spec":{"template":{"metadata":{"annotations":{
-                    CREDS_HASH_ANNOTATION: want }}}}}),
+                "Secret",
+                Some(AGENT_NS),
+                &creds_secret_name(dep),
+                &creds_secret(dep, &user, &password),
             )
             .await?;
-            n += 1;
+            for a in &stale {
+                crate::k8s::merge_patch_dynamic(
+                    &client,
+                    "apps",
+                    "v1",
+                    a.kind,
+                    AGENT_NS,
+                    &a.name,
+                    &serde_json::json!({"spec":{"template":{"metadata":{"annotations":{
+                        CREDS_HASH_ANNOTATION: want }}}}}),
+                )
+                .await?;
+                n += 1;
+            }
         }
     }
-    if otel_stale {
-        n += crate::otel_stack::sync_creds(&client, dep, &user, &password).await?;
+
+    // The OTel stack keeps the admin login (see above).
+    let (admin_user, admin_password) = admin_creds(dep).await;
+    if !admin_password.is_empty()
+        && crate::otel_stack::creds_stale(&client, dep, &admin_password).await?
+        && opensearch_accepts(dep, &admin_user, &admin_password).await
+    {
+        n += crate::otel_stack::sync_creds(&client, dep, &admin_user, &admin_password).await?;
     }
     Ok(n)
 }
@@ -877,6 +912,19 @@ async fn opensearch_accepts(dep: &Deployment, user: &str, password: &str) -> boo
 
 #[cfg(test)]
 mod tests {
+
+    /// The migration decision reads the login a ConfigMap carries. A
+    /// collector shipped before ADR-070 says `admin` and is moved; one on the
+    /// collector account is left alone.
+    #[test]
+    fn a_collector_on_the_admin_login_is_recognised() {
+        let old = "[OUTPUT]\n    Name opensearch\n    HTTP_User admin\n    HTTP_Passwd ${VELOX_OS_PASSWORD}\n";
+        let new = "[OUTPUT]\n    Name opensearch\n    http_user veloxagent-user\n";
+        assert_eq!(config_user(old), Some("admin"));
+        // Keys are case-insensitive in Fluent Bit, so the reader is too.
+        assert_eq!(config_user(new), Some(crate::os_agent_user::AGENT_USER));
+        assert_eq!(config_user("[INPUT]\n    Name tail\n"), None);
+    }
     use super::*;
 
     fn dep() -> Deployment {
@@ -961,7 +1009,7 @@ mod tests {
     fn a_registry_package_config_gets_the_same_filter() {
         // The package path hands the builder the package template rendered by
         // the engine; the stanza is added there too, byte for byte.
-        let vars = crate::integrations::Vars::new(
+        let vars = crate::integrations::vars(
             &dep(),
             crate::recipes::recipe_index("k8s-events"),
             "k8s-events",

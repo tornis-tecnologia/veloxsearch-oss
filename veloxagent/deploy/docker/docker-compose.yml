@@ -1,0 +1,55 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Velox Agent on a Docker host: collects the HOST's logs (and its containers')
+# under a Velox Mesh policy.
+#
+#   cp .env.example .env     # set VELOX_MESH_URL, VELOX_ENROLL_TOKEN, VELOX_AGENT_HOSTNAME
+#   docker compose up -d
+#   docker compose exec velox-agent /opt/velox-agent/bin/velox-agent doctor
+#
+# The first start enrols (the token is used once; the identity lands in the
+# `state` volume) and every later start reuses that identity. Removing the
+# volume forgets it: the next start enrols a NEW agent with the token, if the
+# token is still valid. Remove the old one from the Mesh's fleet.
+
+services:
+  velox-agent:
+    image: ${VELOX_AGENT_IMAGE:-docker.io/tornistecnologia/velox-agent:0.2.0}
+    # Build from a checkout instead: `docker compose build` (context = repo root)
+    build:
+      context: ../../..
+      dockerfile: veloxagent/deploy/docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      VELOX_MESH_URL: ${VELOX_MESH_URL:?set VELOX_MESH_URL in .env}
+      VELOX_ENROLL_TOKEN: ${VELOX_ENROLL_TOKEN:-}
+      VELOX_AGENT_INSECURE: ${VELOX_AGENT_INSECURE:-false}
+      # In a container /etc/hostname is the container id; the fleet should
+      # show the host. `echo VELOX_AGENT_HOSTNAME=$(hostname) >> .env`
+      VELOX_AGENT_HOSTNAME: ${VELOX_AGENT_HOSTNAME:?set VELOX_AGENT_HOSTNAME in .env (the host's name)}
+    volumes:
+      - state:/opt/velox-agent/state
+      # The host's logs at the paths a policy names, read-only.
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    # Root in the container with ONE capability: read any file, nothing else
+    # (see the Dockerfile for why it cannot be a non-root user).
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: [/tmp]
+    # Inputs that LISTEN (syslog on 514/udp, forward on 24224) need the host's
+    # network, plus NET_BIND_SERVICE for ports below 1024:
+    # network_mode: host
+    # cap_add: [DAC_READ_SEARCH, NET_BIND_SERVICE]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  state:

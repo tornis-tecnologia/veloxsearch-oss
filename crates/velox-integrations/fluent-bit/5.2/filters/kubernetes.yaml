@@ -1,0 +1,434 @@
+kind: filter
+name: kubernetes
+title:
+  en: Kubernetes
+  es: Kubernetes
+  pt: Kubernetes
+description:
+  en: Enriches logs (typically from tail) with Kubernetes pod and namespace metadata; the processors page
+    does not list it as an input processor.
+  es: Enriquece logs (normalmente de tail) con metadatos de pods y namespaces de Kubernetes; la página
+    de processors no lo lista como processor de entrada.
+  pt: Enriquece logs (normalmente do tail) com metadados de pods e namespaces do Kubernetes; a página
+    de processors não o lista como processor de entrada.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/kubernetes
+event_types:
+- logs
+as_processor: true
+requires:
+- kube_api
+verified: true
+params:
+- key: kube_url
+  type: string
+  default: https://kubernetes.default.svc:443
+  description:
+    en: Kubernetes API server endpoint.
+    es: Endpoint del servidor de API de Kubernetes.
+    pt: Endpoint do servidor de API do Kubernetes.
+- key: kube_ca_file
+  type: string
+  default: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  description:
+    en: CA certificate file.
+    es: Archivo de certificado de CA.
+    pt: Arquivo de certificado da CA.
+- key: kube_ca_path
+  type: string
+  description:
+    en: Absolute path to scan for certificate files.
+    es: Ruta absoluta donde buscar archivos de certificado.
+    pt: Caminho absoluto onde procurar arquivos de certificado.
+- key: kube_token_file
+  type: string
+  default: /var/run/secrets/kubernetes.io/serviceaccount/token
+  description:
+    en: Service account token file.
+    es: Archivo del token de la cuenta de servicio.
+    pt: Arquivo do token da conta de serviço.
+- key: kube_token_command
+  type: string
+  default: 'NULL'
+  advanced: true
+  description:
+    en: Command that prints the authorization token instead of reading the token file (Linux only).
+    es: Comando que imprime el token de autorización en lugar de leer el archivo de token (solo Linux).
+    pt: Comando que imprime o token de autorização em vez de ler o arquivo de token (somente Linux).
+- key: kube_token_ttl
+  type: integer
+  default: 600
+  advanced: true
+  description:
+    en: Seconds before the token is reloaded from kube_token_file or kube_token_command.
+    es: Segundos antes de recargar el token desde kube_token_file o kube_token_command.
+    pt: Segundos antes de recarregar o token de kube_token_file ou kube_token_command.
+- key: kube_namespace_file
+  type: string
+  default: /var/run/secrets/kubernetes.io/serviceaccount/namespace
+  advanced: true
+  description:
+    en: Path to the file containing the pod's namespace.
+    es: Ruta del archivo que contiene el namespace del pod.
+    pt: Caminho do arquivo que contém o namespace do pod.
+- key: kube_tag_prefix
+  type: string
+  default: kube.var.log.containers.
+  description:
+    en: Prefix used in the tail input tag, removed to extract pod metadata.
+    es: Prefijo usado en la etiqueta del input tail, que se quita para extraer metadatos del pod.
+    pt: Prefixo usado na tag do input tail, removido para extrair metadados do pod.
+- key: regex_parser
+  type: string
+  advanced: true
+  description:
+    en: Alternative parser (registered in a parsers file) that extracts pod_name, namespace_name, container_name
+      and docker_id from the tag.
+    es: Parser alternativo (registrado en un archivo de parsers) que extrae pod_name, namespace_name,
+      container_name y docker_id de la etiqueta.
+    pt: Parser alternativo (registrado em um arquivo de parsers) que extrai pod_name, namespace_name,
+      container_name e docker_id da tag.
+- key: merge_log
+  type: bool
+  default: false
+  description:
+    en: If the log field is a JSON string map, merges its fields into the record.
+    es: Si el campo log es un mapa JSON en texto, fusiona sus campos en el registro.
+    pt: Se o campo log for um mapa JSON em texto, mescla seus campos no registro.
+- key: merge_log_key
+  type: string
+  description:
+    en: With merge_log, inserts the merged fields under this key.
+    es: Con merge_log, inserta los campos fusionados bajo esta clave.
+    pt: Com merge_log, insere os campos mesclados sob esta chave.
+- key: merge_log_trim
+  type: bool
+  default: true
+  description:
+    en: With merge_log, trims \n and \r from field values.
+    es: Con merge_log, elimina \n y \r de los valores de los campos.
+    pt: Com merge_log, remove \n e \r dos valores dos campos.
+- key: merge_parser
+  type: string
+  advanced: true
+  description:
+    en: Parser used to parse the log key (developers and testing only).
+    es: Parser usado para analizar la clave log (solo desarrollo y pruebas).
+    pt: Parser usado para analisar a chave log (somente desenvolvimento e testes).
+- key: keep_log
+  type: bool
+  default: true
+  description:
+    en: With merge_log, keeps the log field after a successful merge.
+    es: Con merge_log, conserva el campo log tras una fusión correcta.
+    pt: Com merge_log, mantém o campo log após uma mesclagem bem-sucedida.
+- key: annotations
+  type: bool
+  default: true
+  description:
+    en: Includes pod annotations in the metadata.
+    es: Incluye las anotaciones del pod en los metadatos.
+    pt: Inclui as anotações do pod nos metadados.
+- key: labels
+  type: bool
+  default: true
+  description:
+    en: Includes pod labels in the metadata.
+    es: Incluye las etiquetas del pod en los metadatos.
+    pt: Inclui os rótulos do pod nos metadados.
+- key: owner_references
+  type: bool
+  default: false
+  description:
+    en: Includes owner references in the metadata.
+    es: Incluye las referencias de propietario en los metadatos.
+    pt: Inclui as referências de proprietário nos metadados.
+- key: namespace_annotations
+  type: bool
+  default: false
+  description:
+    en: Includes namespace annotations in the metadata.
+    es: Incluye las anotaciones del namespace en los metadatos.
+    pt: Inclui as anotações do namespace nos metadados.
+- key: namespace_labels
+  type: bool
+  default: false
+  description:
+    en: Includes namespace labels in the metadata.
+    es: Incluye las etiquetas del namespace en los metadatos.
+    pt: Inclui os rótulos do namespace nos metadados.
+- key: namespace_metadata_only
+  type: bool
+  default: false
+  description:
+    en: Includes only namespace metadata and no pod metadata (ignores labels and annotations).
+    es: Incluye solo metadatos del namespace y ninguno del pod (ignora labels y annotations).
+    pt: Inclui somente metadados do namespace e nenhum do pod (ignora labels e annotations).
+- key: namespace_exclude
+  type: bool
+  default: false
+  description:
+    en: Lets a namespace exclude all its pods' logs via the fluentbit.io/exclude annotation; needs get
+      permission on namespaces.
+    es: Permite que un namespace excluya los logs de todos sus pods con la anotación fluentbit.io/exclude;
+      requiere permiso get sobre namespaces.
+    pt: Permite que um namespace exclua os logs de todos os seus pods pela anotação fluentbit.io/exclude;
+      requer permissão get em namespaces.
+- key: use_kubelet
+  type: bool
+  default: false
+  description:
+    en: Gets metadata from the Kubelet instead of the API server, reducing API traffic.
+    es: Obtiene metadatos del Kubelet en lugar del servidor de API, reduciendo el tráfico a la API.
+    pt: Obtém metadados do Kubelet em vez do servidor de API, reduzindo o tráfego da API.
+- key: kubelet_host
+  type: string
+  default: 127.0.0.1
+  description:
+    en: Kubelet host (only with use_kubelet).
+    es: Host del Kubelet (solo con use_kubelet).
+    pt: Host do Kubelet (somente com use_kubelet).
+- key: kubelet_port
+  type: integer
+  default: 10250
+  description:
+    en: Kubelet port (only with use_kubelet).
+    es: Puerto del Kubelet (solo con use_kubelet).
+    pt: Porta do Kubelet (somente com use_kubelet).
+- key: use_tag_for_meta
+  type: bool
+  default: false
+  description:
+    en: Extracts metadata from the tag itself and never contacts the API server.
+    es: Extrae los metadatos de la propia etiqueta y no contacta al servidor de API.
+    pt: Extrai os metadados da própria tag e nunca contata o servidor de API.
+- key: use_journal
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Reads logs in Journald format.
+    es: Lee los logs en formato Journald.
+    pt: Lê os logs no formato Journald.
+- key: cache_use_docker_id
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Fetches metadata again from Kubernetes when docker_id changes.
+    es: Vuelve a obtener metadatos de Kubernetes cuando cambia docker_id.
+    pt: Busca metadados novamente no Kubernetes quando docker_id muda.
+- key: kube_meta_cache_ttl
+  type: duration
+  default: '0'
+  advanced: true
+  description:
+    en: Time-to-live for cached pod metadata; 0 disables TTL.
+    es: Tiempo de vida de los metadatos de pod en caché; 0 desactiva el TTL.
+    pt: Tempo de vida dos metadados de pod em cache; 0 desativa o TTL.
+- key: kube_meta_namespace_cache_ttl
+  type: integer
+  default: 900
+  advanced: true
+  description:
+    en: Time-to-live in seconds for cached namespace metadata; 0 disables TTL.
+    es: Tiempo de vida en segundos de los metadatos de namespace en caché; 0 desactiva el TTL.
+    pt: Tempo de vida em segundos dos metadados de namespace em cache; 0 desativa o TTL.
+- key: kube_meta_preload_cache_dir
+  type: string
+  advanced: true
+  description:
+    en: Directory with namespace-pod.meta JSON files used to pre-load the metadata cache.
+    es: Directorio con archivos JSON namespace-pod.meta para precargar la caché de metadatos.
+    pt: Diretório com arquivos JSON namespace-pod.meta para pré-carregar o cache de metadados.
+- key: buffer_size
+  type: size
+  default: 32k
+  advanced: true
+  description:
+    en: HTTP client buffer size for API server responses; 0 means unlimited.
+    es: Tamaño del búfer del cliente HTTP para respuestas del servidor de API; 0 es sin límite.
+    pt: Tamanho do buffer do cliente HTTP para respostas do servidor de API; 0 é sem limite.
+- key: dns_retries
+  type: integer
+  default: 6
+  advanced: true
+  description:
+    en: DNS lookup retries until the network works.
+    es: Reintentos de resolución DNS hasta que la red funcione.
+    pt: Tentativas de resolução DNS até a rede funcionar.
+- key: dns_wait_time
+  type: integer
+  default: 30
+  advanced: true
+  description:
+    en: Seconds between DNS lookup network checks.
+    es: Segundos entre comprobaciones de red en la resolución DNS.
+    pt: Segundos entre verificações de rede na resolução DNS.
+- key: dummy_meta
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Uses dummy metadata (test and development).
+    es: Usa metadatos ficticios (pruebas y desarrollo).
+    pt: Usa metadados fictícios (testes e desenvolvimento).
+- key: set_platform
+  type: select
+  options:
+  - k8s
+  - eks
+  advanced: true
+  description:
+    en: Forces the platform type (k8s or eks), skipping automatic detection.
+    es: Fuerza el tipo de plataforma (k8s o eks), omitiendo la detección automática.
+    pt: Força o tipo de plataforma (k8s ou eks), ignorando a detecção automática.
+- key: tls.verify
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Validates the API server certificate.
+    es: Valida el certificado del servidor de API.
+    pt: Valida o certificado do servidor de API.
+- key: tls.verify_hostname
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Validates the certificate hostname.
+    es: Valida el nombre de host del certificado.
+    pt: Valida o nome do host do certificado.
+- key: tls.debug
+  type: integer
+  default: -1
+  advanced: true
+  description:
+    en: TLS debug level from 0 (none) to 4 (all details); -1 is unset.
+    es: Nivel de depuración TLS de 0 (ninguno) a 4 (todo); -1 es sin definir.
+    pt: Nível de depuração TLS de 0 (nenhum) a 4 (tudo); -1 é não definido.
+- key: tls.vhost
+  type: string
+  advanced: true
+  description:
+    en: Optional TLS virtual host for the API server connection.
+    es: Host virtual TLS opcional para la conexión al servidor de API.
+    pt: Host virtual TLS opcional para a conexão ao servidor de API.
+- key: aws_use_pod_association
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Enables pod-to-service name mapping (needed for EKS platform detection).
+    es: Activa la asociación de nombre pod-servicio (necesaria para detectar la plataforma EKS).
+    pt: Ativa a associação de nome pod-serviço (necessária para detectar a plataforma EKS).
+- key: use_pod_association
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Deprecated alias of aws_use_pod_association.
+    es: Alias obsoleto de aws_use_pod_association.
+    pt: Alias obsoleto de aws_use_pod_association.
+- key: aws_pod_association_host
+  type: string
+  default: cloudwatch-agent.amazon-cloudwatch
+  advanced: true
+  description:
+    en: Host used for pod-to-service name association.
+    es: Host usado para la asociación de nombre pod-servicio.
+    pt: Host usado para a associação de nome pod-serviço.
+- key: aws_pod_association_endpoint
+  type: string
+  default: /kubernetes/pod-to-service-env-map
+  advanced: true
+  description:
+    en: Endpoint path for pod-to-service name association.
+    es: Ruta del endpoint para la asociación de nombre pod-servicio.
+    pt: Caminho do endpoint para a associação de nome pod-serviço.
+- key: aws_pod_association_port
+  type: integer
+  default: 4311
+  advanced: true
+  description:
+    en: Port used for pod-to-service name association.
+    es: Puerto usado para la asociación de nombre pod-servicio.
+    pt: Porta usada para a associação de nome pod-serviço.
+- key: aws_pod_association_host_server_ca_file
+  type: string
+  default: /etc/amazon-cloudwatch-observability-agent-server-cert/tls-ca.crt
+  advanced: true
+  description:
+    en: TLS CA certificate path for talking to the agent server.
+    es: Ruta del certificado de CA TLS para comunicarse con el servidor del agente.
+    pt: Caminho do certificado de CA TLS para falar com o servidor do agente.
+- key: aws_pod_association_host_client_cert_file
+  type: string
+  default: /etc/amazon-cloudwatch-observability-agent-client-cert/client.crt
+  advanced: true
+  description:
+    en: Client certificate path for mTLS calls to the agent server.
+    es: Ruta del certificado de cliente para llamadas mTLS al servidor del agente.
+    pt: Caminho do certificado de cliente para chamadas mTLS ao servidor do agente.
+- key: aws_pod_association_host_client_key_file
+  type: string
+  default: /etc/amazon-cloudwatch-observability-agent-client-cert/client.key
+  advanced: true
+  description:
+    en: Client certificate key path for mTLS calls to the agent server.
+    es: Ruta de la clave del certificado de cliente para llamadas mTLS al servidor del agente.
+    pt: Caminho da chave do certificado de cliente para chamadas mTLS ao servidor do agente.
+- key: aws_pod_association_host_tls_verify
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Verifies the agent server TLS peer certificate.
+    es: Verifica el certificado TLS del servidor del agente.
+    pt: Verifica o certificado TLS do servidor do agente.
+- key: aws_pod_association_host_tls_debug
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: TLS debug level for the agent server connection (0 to 4).
+    es: Nivel de depuración TLS para la conexión al servidor del agente (0 a 4).
+    pt: Nível de depuração TLS para a conexão ao servidor do agente (0 a 4).
+- key: aws_pod_service_map_refresh_interval
+  type: integer
+  default: 60
+  advanced: true
+  description:
+    en: Refresh interval in seconds of the pod-to-service map.
+    es: Intervalo de actualización en segundos del mapa pod-servicio.
+    pt: Intervalo de atualização em segundos do mapa pod-serviço.
+- key: aws_pod_service_map_ttl
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: TTL of pod-to-service map cache entries; 0 disables TTL.
+    es: TTL de las entradas de caché del mapa pod-servicio; 0 desactiva el TTL.
+    pt: TTL das entradas de cache do mapa pod-serviço; 0 desativa o TTL.
+- key: aws_pod_service_preload_cache_dir
+  type: string
+  advanced: true
+  description:
+    en: Directory with pod-to-service map files used to pre-load the cache.
+    es: Directorio con archivos del mapa pod-servicio para precargar la caché.
+    pt: Diretório com arquivos do mapa pod-serviço para pré-carregar o cache.
+- key: k8s-logging.parser
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Allow pods to suggest a parser through the fluentbit.io/parser annotation.
+    es: Permite que los pods sugieran un parser mediante la anotación fluentbit.io/parser.
+    pt: Permite que pods sugiram um parser pela anotação fluentbit.io/parser.
+- key: k8s-logging.exclude
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Allow pods to exclude their logs through the fluentbit.io/exclude annotation.
+    es: Permite que los pods excluyan sus logs mediante la anotación fluentbit.io/exclude.
+    pt: Permite que pods excluam seus logs pela anotação fluentbit.io/exclude.

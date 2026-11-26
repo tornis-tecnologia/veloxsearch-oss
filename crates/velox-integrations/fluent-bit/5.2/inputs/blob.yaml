@@ -1,0 +1,116 @@
+kind: input
+name: blob
+title:
+  en: Blob
+  es: Blob
+  pt: Blob
+description:
+  en: Ingests binary files from a directory and uploads them to the output.
+  es: Ingiere archivos binarios de un directorio y los envia a la salida.
+  pt: Ingere arquivos binarios de um diretorio e os envia para a saida.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/blob
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+verified: true
+params:
+- key: path
+  type: string
+  description:
+    en: Directory or glob pattern to scan for files.
+    es: Directorio o patron glob donde buscar archivos.
+    pt: Diretorio ou padrao glob onde procurar arquivos.
+  required: true
+- key: exclude_pattern
+  type: string
+  description:
+    en: Comma-separated shell patterns of files to skip.
+    es: Patrones shell separados por comas de archivos a omitir.
+    pt: Padroes shell separados por virgula de arquivos a ignorar.
+  multi: join
+  join: ','
+- key: database_file
+  type: string
+  description:
+    en: Database file tracking processed files across restarts.
+    es: Archivo de base de datos que registra los archivos procesados entre reinicios.
+    pt: Arquivo de banco de dados que registra os arquivos processados entre reinicializacoes.
+  operator_settable: false
+- key: scan_refresh_interval
+  type: duration
+  description:
+    en: How often to rescan for new or changed files.
+    es: Cada cuanto volver a buscar archivos nuevos o modificados.
+    pt: Com que frequencia procurar arquivos novos ou alterados.
+  default: 2s
+- key: mem_buf_limit
+  type: size
+  description:
+    en: Memory limit for the instance; the input pauses when reached.
+    es: Limite de memoria de la instancia; la entrada se pausa al alcanzarlo.
+    pt: Limite de memoria da instancia; a entrada pausa ao atingi-lo.
+  default: 0
+  advanced: true
+- key: routable
+  type: bool
+  description:
+    en: Whether generated data is forwarded or discarded.
+    es: Si los datos generados se reenvian o se descartan.
+    pt: Se os dados gerados sao encaminhados ou descartados.
+  default: true
+  advanced: true
+- key: log_suppress_interval
+  type: integer
+  description:
+    en: Seconds during which similar repeated plugin logs are suppressed.
+    es: Segundos durante los cuales se suprimen registros repetidos similares del plugin.
+    pt: Segundos durante os quais logs repetidos semelhantes do plugin sao suprimidos.
+  default: 0
+  advanced: true
+- key: upload_success_action
+  type: select
+  description:
+    en: Action after a successful upload.
+    es: Accion tras una carga correcta.
+    pt: Acao apos um upload bem-sucedido.
+  options:
+  - delete
+  - add_suffix
+  - emit_log
+- key: upload_success_suffix
+  type: string
+  description:
+    en: Suffix used when the success action is add_suffix.
+    es: Sufijo usado cuando la accion de exito es add_suffix.
+    pt: Sufixo usado quando a acao de sucesso e add_suffix.
+- key: upload_success_message
+  type: string
+  description:
+    en: Log message used when the success action is emit_log.
+    es: Mensaje de registro usado cuando la accion de exito es emit_log.
+    pt: Mensagem de log usada quando a acao de sucesso e emit_log.
+- key: upload_failure_action
+  type: select
+  description:
+    en: Action after a failed upload.
+    es: Accion tras una carga fallida.
+    pt: Acao apos um upload com falha.
+  options:
+  - delete
+  - add_suffix
+  - emit_log
+- key: upload_failure_suffix
+  type: string
+  description:
+    en: Suffix used when the failure action is add_suffix.
+    es: Sufijo usado cuando la accion de fallo es add_suffix.
+    pt: Sufixo usado quando a acao de falha e add_suffix.
+- key: upload_failure_message
+  type: string
+  description:
+    en: Log message used when the failure action is emit_log.
+    es: Mensaje de registro usado cuando la accion de fallo es emit_log.
+    pt: Mensagem de log usada quando a acao de falha e emit_log.

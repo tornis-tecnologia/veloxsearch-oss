@@ -1,0 +1,181 @@
+# Velox Mesh — the fleet controller, one-file manifest (ADR-068, ADR-072).
+#
+# One Mesh serves every deployment of this installation (ADR-072 §1). It runs
+# once, in its OWN namespace `velox-mesh` (Pod Security `restricted`), so the
+# core installs and upgrades it with rights granted in that namespace only —
+# never Deployment/Service create in `veloxsearch-system`, where a pod could
+# borrow the operator's ServiceAccount (ADR-072 amendment 5). It is a
+# separate image and release from the core (ADR-068), so this file is NOT
+# part of deploy/install.yaml and a core upgrade never restarts it.
+# Rollout order, rollback and limits: deploy/mesh/README.md.
+#
+# ── The one-click way ────────────────────────────────────────────────────────
+# Settings → Velox Mesh → "Install in this cluster". The core applies THIS
+# file (compiled into its binary), so both ways produce the same objects; it
+# also does steps 1 and 2 below itself, and step 4 is never needed. The image
+# is the one pinned below unless the core has VELOX_MESH_IMAGE set (an air-
+# gapped mirror, a development build).
+#
+# ── By hand ──────────────────────────────────────────────────────────────────
+# Prerequisites: deploy/install.yaml applied (it creates the `velox-mesh`
+# namespace and the core's Role in it), `veloxsearch-postgres-0` Ready.
+#
+# 1. Database (one time). Its OWN role and database on the existing
+#    `veloxsearch-postgres`, not a second Postgres and not the core's `velox`
+#    database: same backup story, but the two schemas never share a
+#    `schema_migrations` ledger (both runners name theirs that) and neither
+#    role can read the other's tables. Least privilege like the core's role
+#    (ADR-041). The Mesh runs its embedded migrations at start and exits if
+#    it cannot. Run in ONE shell, so the password reaches step 2:
+#
+#   MESH_PG_PW="$(openssl rand -hex 32)"     # hex: URL-safe in pg-url as-is
+#   kubectl -n veloxsearch-system exec -i veloxsearch-postgres-0 -- \
+#     psql -v ON_ERROR_STOP=1 -v pw="$MESH_PG_PW" -U postgres -d postgres <<'EOSQL'
+#   CREATE ROLE velox_mesh LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'pw';
+#   CREATE DATABASE velox_mesh OWNER velox_mesh;
+#   REVOKE ALL ON DATABASE velox_mesh FROM PUBLIC;
+#   EOSQL
+#
+# 2. Secret `velox-mesh` in `velox-mesh` (values never live in a manifest,
+#    ADR-023/034). `pg-url` with sslmode=disable (the Mesh connects with
+#    NoTls, the hop is in-cluster); `service-token`, the bearer the core
+#    presents on /api/mesh/* — the core reads it from this same Secret.
+#
+#   kubectl -n velox-mesh create secret generic velox-mesh \
+#     --from-literal=pg-url="postgres://velox_mesh:${MESH_PG_PW}@veloxsearch-postgres.veloxsearch-system.svc:5432/velox_mesh?sslmode=disable" \
+#     --from-literal=service-token="$(openssl rand -hex 32)"
+#   unset MESH_PG_PW
+#
+# 3. Apply:
+#   kubectl apply -f deploy/mesh/mesh.yaml
+#   kubectl -n velox-mesh rollout status deploy/velox-mesh
+#
+# 4. Nothing to wire. The core finds the Mesh by name — Service `velox-mesh`
+#    and Secret `velox-mesh` in namespace `velox-mesh` (src/mesh.rs
+#    `discover`) — at start and when the install button runs; a restarted
+#    core finds it again. VELOX_MESH_URL + VELOX_MESH_SERVICE_TOKEN on the
+#    core still override that, for a Mesh that lives elsewhere.
+#
+# ── Agents outside the cluster ──────────────────────────────────────────────
+# Nothing here is reachable from outside: the Service is ClusterIP. In ingress
+# mode (Settings → Access) the core gives every deployment its own route,
+# `https://<deployment>-mesh.<domain>`, `/v1` and `/healthz` only, TLS only,
+# and offers it as the deployment's Mesh endpoint (ADR-072 amendment 4).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velox-mesh
+  labels:
+    app.kubernetes.io/managed-by: veloxsearch
+    # The Deployment below already meets `restricted`; enforcing it means a
+    # pod the core is tricked into creating here cannot be privileged or
+    # mount the host either.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# Its own ServiceAccount with no API token mounted: the Mesh never talks to
+# the Kubernetes API (it does not compile policies or touch the cluster —
+# the core does both, main.rs), so it gets no RBAC and no credential to leak.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: velox-mesh
+  namespace: velox-mesh
+  labels: { app: velox-mesh }
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: velox-mesh
+  namespace: velox-mesh
+  labels: { app: velox-mesh }
+spec:
+  # Stateless — Postgres holds everything (main.rs), so replicas are
+  # interchangeable behind the Service. Scale by replicas, not by size.
+  replicas: 1
+  selector:
+    matchLabels: { app: velox-mesh }
+  template:
+    metadata:
+      labels: { app: velox-mesh }
+    spec:
+      serviceAccountName: velox-mesh
+      automountServiceAccountToken: false
+      containers:
+        - name: velox-mesh
+          # Pinned, never `:latest` (#54): the Mesh's own version, from
+          # veloxagent/Cargo.toml, which deploy/mesh/build-image.sh tags.
+          # Pin to the digest the push prints once the image is published.
+          image: docker.io/tornistecnologia/veloxsearch-mesh:0.1.0
+          imagePullPolicy: IfNotPresent
+          # Same hardening as the core (#118): admissible under the
+          # `restricted` Pod Security Standard. readOnlyRootFilesystem is safe
+          # because the Mesh writes nothing to disk — Postgres is its only
+          # state and it logs to stderr.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: http
+              containerPort: 4320
+          env:
+            # The binary's default is 127.0.0.1:4320 — unreachable in a pod.
+            # Explicit here as well as in the image, so a custom image cannot
+            # silently bind loopback.
+            - name: VELOX_MESH_ADDR
+              value: "0.0.0.0:4320"
+            # Both required (no `optional`): a missing Secret holds the pod in
+            # CreateContainerConfigError instead of starting a Mesh with no
+            # database (it would exit) or with the console face disabled.
+            - name: VELOX_MESH_PG_URL
+              valueFrom:
+                secretKeyRef:
+                  name: velox-mesh
+                  key: pg-url
+            - name: VELOX_MESH_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: velox-mesh
+                  key: service-token
+          # /healthz answers "ok" without touching Postgres, so these say "the
+          # process serves HTTP", not "the database is up". Migrations run
+          # BEFORE the listener binds and a failure exits, so a pod that is
+          # Ready did reach head at start.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 4320 }
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 4320 }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { memory: "32Mi", cpu: "25m" }
+            limits: { memory: "128Mi", cpu: "250m" }
+---
+# ClusterIP only: the console face (/api/mesh/*) is for the core alone and
+# must never leave the cluster. The core reaches it as
+# http://velox-mesh.velox-mesh.svc:4320, found by name (step 4 above).
+apiVersion: v1
+kind: Service
+metadata:
+  name: velox-mesh
+  namespace: velox-mesh
+  labels: { app: velox-mesh }
+spec:
+  type: ClusterIP
+  selector: { app: velox-mesh }
+  ports:
+    - name: http
+      port: 4320
+      targetPort: 4320

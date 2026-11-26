@@ -1,0 +1,64 @@
+kind: input
+name: winlog
+title:
+  en: Windows Event Log
+  es: Windows Event Log
+  pt: Windows Event Log
+description:
+  en: Reads Windows Event Log channels using the classic winlog API.
+  es: Lee canales del Registro de eventos de Windows mediante la API clásica winlog.
+  pt: Lê canais do Windows Event Log usando a API clássica winlog.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/windows-event-log
+verified: true
+os:
+- windows
+event_types:
+- logs
+requires:
+- root
+params:
+- key: channels
+  type: string
+  description:
+    en: Comma-separated list of channels to read from.
+    es: Lista de canales a leer, separados por comas.
+    pt: Lista de canais a ler, separados por vírgula.
+  required: true
+  multi: join
+  join: ','
+- key: db
+  type: string
+  description:
+    en: File path where read offsets are saved.
+    es: Ruta del archivo donde se guardan los offsets de lectura.
+    pt: Caminho do arquivo onde os offsets de leitura são salvos.
+  operator_settable: false
+- key: interval_sec
+  type: integer
+  description:
+    en: Polling interval in seconds.
+    es: Intervalo de sondeo en segundos.
+    pt: Intervalo de polling em segundos.
+  default: 1
+- key: interval_nsec
+  type: integer
+  description:
+    en: Additional polling interval in nanoseconds.
+    es: Intervalo de sondeo adicional en nanosegundos.
+    pt: Intervalo de polling adicional em nanossegundos.
+  default: 0
+- key: string_inserts
+  type: bool
+  description:
+    en: Include string inserts in output records.
+    es: Incluir los string inserts en los registros de salida.
+    pt: Incluir os string inserts nos registros de saída.
+  default: true
+- key: use_ansi
+  type: bool
+  description:
+    en: Use ANSI encoding for messages; helps on older Windows returning blank strings.
+    es: Usar codificación ANSI en los mensajes; ayuda en Windows antiguos que devuelven cadenas vacías.
+    pt: Usar codificação ANSI nas mensagens; ajuda em Windows antigos que retornam strings vazias.
+  default: false
+  advanced: true

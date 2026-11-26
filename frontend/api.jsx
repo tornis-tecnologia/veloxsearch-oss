@@ -151,12 +151,113 @@ const API = {
   // per row. -> { schema_version, integrations: [CatalogItem], source,
   //               age_seconds, stale, error }
   catalog: (deployment) => call("catalog", { deployment: deployment || null }),
+  // Spec 2.0 (ADR-074): the agent catalogue — packages/index.json with the
+  // version this core would install (`offered`) and the deployment's
+  // policies using each package. Always 200; `source`/`error` say how fresh.
+  catalogV2: (deployment, includePrerelease) =>
+    call("catalog_v2", { deployment: deployment || null, include_prerelease: !!includePrerelease }),
+  // One VERIFIED Spec 2.0 package as the generated form needs it: streams
+  // (fields, parsers, processors, backend), the catalogue entries of every
+  // plugin a stream may add, changelog and READMEs.
+  packageV2: (id, version) => call("package_v2", { id, version: version || null }),
   // Download → verify signature → apply through the engine → record id@version.
   // `version` is an expectation, not a selector: a mismatch is an error rather
   // than a silent downgrade. Both are Result<(), _> → empty body.
   catalogInstall: (deployment, id, version) =>
     call("catalog_install", { deployment, id, version: version || null }),
   catalogUninstall: (deployment, id) => call("catalog_uninstall", { deployment, id }),
+  // The one onboarding (ADR-073): add an integration, with the inputs the
+  // operator turned on and configured, to a target — "cluster" (the in-cluster
+  // collector) or the id of one of the deployment's Velox Mesh policies.
+  // `inputs` is { inputs: { <input id>: { vars: {name: value} } } }; an absent
+  // input is OFF. -> { target, revision? }
+  addIntegration: (deployment, id, policy, inputs) =>
+    call("add_integration", { deployment, id, policy, inputs }),
+  // Take it off one target. The backend half (pipeline, template, dashboards)
+  // goes only when no other target of the deployment still uses it.
+  // -> { target, revision?, backend_removed? }
+  removeIntegration: (deployment, id, policy) =>
+    call("remove_integration", { deployment, id, policy }),
+  // What ONE integration brings, read off the verified package: the ingest
+  // pipeline, the index template, the index patterns, the dashboards and —
+  // the part the onboarding form is generated from — its inputs, each with a
+  // signal, the targets it can be collected on and its variables. No
+  // deployment: the inventory is the package's, the same for every deployment.
+  // -> { id, version, index, ingest_pipeline, index_template, index_patterns,
+  //      dashboards, otel_config, variables, inputs: [{id, signal, index,
+  //      title, description, enabled, targets, vars: [{name, kind, default,
+  //      required, description, targets}], ingest_pipeline, index_template}] }
+  integrationArtifacts: (id) => call("integration_artifacts", { id }),
+  // ── Velox Mesh (ADR-068) ─────────────────────────────────────
+  // Is a fleet controller configured for this installation, and can we reach
+  // it? Three states the console must tell apart: not configured (show the
+  // install guide), configured but unreachable (show the URL and the error),
+  // reachable (open the fleet). -> { configured, url, reachable, error }
+  meshStatus: () => call("mesh_status", null, "GET"),
+  // Admin: install or reapply the Velox Mesh in the `velox-mesh` namespace
+  // (ADR-072 amendment 5); answers the status the screen then shows.
+  meshInstall: () => call("mesh_install", {}),
+  // Admin: remove it — workload and routes; `purge` also drops its database,
+  // role and Secret (every agent, policy and token).
+  meshUninstall: (purge) => call("mesh_uninstall", { purge: !!purge }),
+  // Everything below is about ONE deployment (ADR-072): its policies, its
+  // agents, its tokens. The server resolves `deployment` through the
+  // caller's scope before the Mesh is asked anything.
+  //
+  // The deployment's fleet in one read: where the operator is in the guided
+  // onboarding, its policies (each with the integration ids it activates),
+  // every agent's DERIVED status (the Mesh stores facts, never a status
+  // column) and each policy's rollout.
+  // -> { onboarding, policies: [{id, name, current_revision, integrations}],
+  //      agents: [{status, up, applied_revision, current_revision, config_error, ...}],
+  //      rollout: {id: {...}} }
+  meshOverview: (deployment) => call("mesh_overview", { deployment }),
+  // Compile a policy draft against VERIFIED packages and store it as a new
+  // revision. Agents pick it up on their next check-in; nothing is pushed.
+  // `draft.deployment` names the destination; the published endpoint comes
+  // from the deployment's Mesh settings, not from the draft.
+  meshSavePolicy: (draft) => call("mesh_save_policy", draft),
+  // Shown once — the Mesh keeps only its hash.
+  meshEnrollmentToken: (deployment, policy_id) =>
+    call("mesh_enrollment_token", { deployment, policy_id }),
+  // Within the deployment only; another deployment's policy is a 400 that
+  // says to re-enrol.
+  meshAssignPolicy: (deployment, instance_uid, policy_id) =>
+    call("mesh_assign_policy", { deployment, instance_uid, policy_id }),
+  // Remove an agent from the fleet: row and credential.
+  meshForgetAgent: (deployment, instance_uid) => call("mesh_forget_agent", { deployment, instance_uid }),
+  meshUnenrol: (deployment, instance_uid) =>
+    call("mesh_unenrol", { deployment, instance_uid }),
+  // Refused (400, with the count) while a live agent runs the policy.
+  meshDeletePolicy: (deployment, policy_id) =>
+    call("mesh_delete_policy", { deployment, policy_id }),
+  // An empty policy (ADR-073): the thing integrations are then added to —
+  // bound to one OpenSearch and one Mesh endpoint of the deployment's
+  // settings, both required (ADR-072 amendment 2). -> { revision }
+  meshCreatePolicy: (deployment, id, name, os_endpoint, mesh_endpoint) =>
+    call("mesh_create_policy", { deployment, id, name, os_endpoint, mesh_endpoint }),
+  // Rebind a policy to other configured endpoints: a new revision, because
+  // the OpenSearch address is baked into every collector stanza. -> { revision }
+  meshPolicyEndpoints: (deployment, policy_id, opensearch, mesh) =>
+    call("mesh_policy_endpoints", { deployment, policy_id, opensearch, mesh }),
+  // The stored document of one policy: its activations and their inputs, and
+  // the endpoint ids it is bound to.
+  // -> { revision, body: { activations: [{package_id, package_version, inputs}],
+  //      endpoints: { opensearch, mesh }, ... } }
+  meshPolicy: (deployment, policy_id) => call("mesh_policy", { deployment, policy_id }),
+  // The deployment's Mesh settings, off its CR: the named endpoints its
+  // policies bind to, plus the in-cluster OpenSearch address in endpoint
+  // shape (offered on the screen, never assumed).
+  // -> { os_endpoints: [{id, name, host}], mesh_endpoints: [{id, name, url}],
+  //      in_cluster_os_host }
+  meshSettings: (deployment) => call("mesh_settings", { deployment }),
+  // The whole document; an endpoint a policy still names cannot be removed
+  // (400 naming the policy).
+  meshSaveSettings: (deployment, { os_endpoints, mesh_endpoints }) =>
+    call("mesh_save_settings", { deployment, os_endpoints: os_endpoints || [], mesh_endpoints: mesh_endpoints || [] }),
+  // Can the control plane reach each configured Mesh endpoint? Coarse on
+  // purpose. -> [{ id, reachable, error, latency_ms }]
+  meshEndpointsStatus: (deployment) => call("mesh_endpoints_status", { deployment }),
   // ── OTel observability stack (ADR-053) ───────────────────────
   // The SECOND collection option, additive to the recipes above: it ships OTLP
   // traces + metrics, which is what fills the Trace Analytics, service-map and

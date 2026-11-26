@@ -61,7 +61,9 @@ pub(crate) fn os_base_in(name: &str, namespace: &str) -> String {
 /// than the shared Global tenant, so they're isolated per deployment. Derived
 /// from the deployment name (already DNS-safe, ADR-020).
 pub fn tenant_name(deployment: &Deployment) -> String {
-    format!("velox-{deployment}")
+    // One formula, owned by the shared crate so the `{tenant}` token renders
+    // the same under Velox Mesh (ADR-068).
+    velox_integrations::tenant_name(&deployment.to_string())
 }
 
 /// The tenant to scope saved objects to, or `None` when this deployment uses
@@ -161,27 +163,71 @@ pub fn recipe_index(recipe: &str) -> &'static str {
     }
 }
 
-/// Apply a recipe: configure OpenSearch (if needed), create the Dashboards
-/// index-pattern so data is browsable, and deploy the agent.
+/// Install a built-in recipe — the egress-less fallback (ADR-047) — through
+/// the same installer a registry package uses: the recipe is turned into the
+/// [`Package`](crate::integrations::Package) the registry would serve (the
+/// `registry_golden` gates hold the two byte-equal), and
+/// `integrations::apply_package` installs it under the `veloxagent-` names
+/// with `veloxagent-user` (ADR-070, ADR-071). Two installers would be two
+/// sets of names and two logins; one cannot drift.
 pub async fn apply(deployment: &Deployment, recipe: &str) -> Result<()> {
+    let pkg = bootstrap_package(recipe)?;
+    // A built-in recipe has one input and no variables: the defaults ARE the
+    // package.
+    crate::integrations::apply_package(
+        deployment,
+        &pkg,
+        crate::catalog::BOOTSTRAP_VERSION,
+        &velox_integrations::InputSelection::default(),
+    )
+    .await
+}
+
+/// The registry package a built-in recipe is, assembled from the in-binary
+/// generators: manifest identity and teardown from [`recipe_teardown`], the
+/// pipeline and template from [`recipe_os_config`], the saved objects as the
+/// index pattern plus [`dashboard_objects`] (the exact ndjson the registry
+/// froze), and the collector template from `agents::fluent_bit_conf_template`.
+pub(crate) fn bootstrap_package(recipe: &str) -> Result<crate::integrations::Package> {
     if !RECIPES.contains(&recipe) {
         anyhow::bail!("unknown recipe: {recipe}");
     }
-    configure_os(deployment, recipe).await?;
-    // Saved objects below land in this deployment's own Dashboards tenant —
-    // unless the ADR-053 stack owns the Dashboards, in which case they are
-    // scoped by workspace and creating a tenant would be a lie about where they
-    // live (see `tenant_scope`).
-    if tenant_scope(deployment).await.is_some() {
-        ensure_tenant(deployment).await;
-    }
     let index = recipe_index(recipe);
-    // Every recipe's ingest pipeline normalizes its own time field into
-    // `@timestamp`, so the pattern's time field is the same for all of them.
-    ensure_index_pattern(deployment, index, &format!("{index}*"), "@timestamp").await;
-    ensure_dashboard(deployment, recipe).await;
-    crate::agents::deploy_agent(deployment, recipe).await?;
-    Ok(())
+    let os = recipe_os_config(recipe);
+    let (teardown, _) = recipe_teardown(recipe);
+    let manifest: crate::integrations::Manifest = serde_json::from_value(serde_json::json!({
+        "id": recipe,
+        "index": index,
+        "dashboard": dashboard_id(recipe),
+        "assets": {
+            "pipeline": os.as_ref().map(|_| "pipeline.json"),
+            "index_template": os.as_ref().map(|_| "index-template.json"),
+            "saved_objects": "saved-objects.ndjson",
+            "agent_config": "agent.conf.tmpl",
+        },
+        "teardown": {
+            "ingest_pipeline": teardown.ingest_pipeline,
+            "index_template": teardown.index_template,
+            "index_pattern": teardown.index_pattern,
+            "saved_objects": teardown.saved_objects,
+        },
+    }))
+    .context("assembling the bootstrap manifest")?;
+    let mut ndjson = vec![format!(
+        r#"{{"type":"index-pattern","id":"{index}","attributes":{{"title":"{{index}}*","timeFieldName":"@timestamp"}}}}"#
+    )];
+    for obj in dashboard_objects(recipe) {
+        ndjson.push(obj.to_string());
+    }
+    Ok(crate::integrations::Package {
+        manifest,
+        pipeline: os.as_ref().map(|(p, _)| p.to_string()),
+        index_template: os.as_ref().map(|(_, t)| t.to_string()),
+        saved_objects: ndjson.join("\n") + "\n",
+        agent_config: crate::agents::fluent_bit_conf_template(recipe),
+        otel_config: None,
+        extra: std::collections::BTreeMap::new(),
+    })
 }
 
 /// The Dashboards URL slug for a recipe's out-of-the-box dashboard.
@@ -1339,57 +1385,6 @@ pub(crate) async fn ensure_tenant(deployment: &Deployment) {
         .await;
 }
 
-/// Create the out-of-the-box dashboard for a recipe (best-effort), scoped to the
-/// deployment's tenant via the `securitytenant` header.
-async fn ensure_dashboard(deployment: &Deployment, recipe: &str) {
-    let dash = dashboards_base(deployment);
-    let Ok(c) = http() else { return };
-    let (u, p) = crate::k8s::admin_creds(deployment).await;
-    let mut req = c
-        .post(format!(
-            "{dash}/api/saved_objects/_bulk_create?overwrite=true"
-        ))
-        .basic_auth(&u, Some(&p))
-        .header("osd-xsrf", "true");
-    if let Some(t) = tenant_scope(deployment).await {
-        req = req.header("securitytenant", t);
-    }
-    let _ = req.json(&dashboard_objects(recipe)).send().await;
-}
-
-/// Create the OpenSearch Dashboards index-pattern (best-effort) so the data is
-/// visible in Discover, scoped to the deployment's tenant via the
-/// `securitytenant` header. NOTE: Dashboards serves plain HTTP on 5601.
-/// `time_field` is a parameter rather than a constant because the OTel stack's
-/// three patterns each use a different one (`endTime`, `hashId`, `time`) — the
-/// recipes all use `@timestamp`, which is what their ingest pipelines normalize
-/// into (ADR-053).
-pub(crate) async fn ensure_index_pattern(
-    deployment: &Deployment,
-    id: &str,
-    title: &str,
-    time_field: &str,
-) {
-    let dash = dashboards_base(deployment);
-    let Ok(c) = http() else { return };
-    let (u, p) = crate::k8s::admin_creds(deployment).await;
-    let mut req = c
-        .post(format!(
-            "{dash}/api/saved_objects/index-pattern/{id}?overwrite=true"
-        ))
-        .basic_auth(&u, Some(&p))
-        .header("osd-xsrf", "true");
-    if let Some(t) = tenant_scope(deployment).await {
-        req = req.header("securitytenant", t);
-    }
-    let _ = req
-        .json(&serde_json::json!({
-            "attributes": { "title": title, "timeFieldName": time_field }
-        }))
-        .send()
-        .await;
-}
-
 /// Disable a recipe: remove its collection agent AND every OpenSearch object it
 /// created — the ingest pipeline, index template, index-pattern and saved
 /// objects (dashboard + visualizations). Historically this only removed the
@@ -1400,10 +1395,14 @@ pub(crate) async fn ensure_index_pattern(
 /// recipes and the package engine uninstall identically. Already-indexed *data*
 /// (the log documents) is intentionally left; only the config objects go.
 pub async fn disable(deployment: &Deployment, recipe: &str) -> Result<()> {
-    crate::agents::remove_agent(deployment, recipe).await?;
-    let (teardown, kinds) = recipe_teardown(recipe);
-    crate::integrations::teardown_os(deployment, &teardown, &kinds).await;
-    Ok(())
+    let pkg = bootstrap_package(recipe)?;
+    crate::integrations::uninstall_package(
+        deployment,
+        &pkg,
+        crate::catalog::BOOTSTRAP_VERSION,
+        true,
+    )
+    .await
 }
 
 /// Build a recipe's teardown inventory from its own in-binary definitions: the
@@ -1436,6 +1435,8 @@ pub(crate) fn recipe_teardown(
     let teardown = crate::integrations::Teardown {
         ingest_pipeline: has_os_config.then(|| recipe.to_string()),
         index_template: has_os_config.then(|| index.clone()),
+        ingest_pipelines: Vec::new(),
+        index_templates: Vec::new(),
         index_pattern: index,
         saved_objects: saved,
         // A recipe creates exactly one index-pattern and no ISM policy or
@@ -1754,39 +1755,6 @@ pub(crate) fn recipe_os_config(recipe: &str) -> Option<(serde_json::Value, serde
     Some((pipeline, template))
 }
 
-/// Install a recipe's OpenSearch config, if it has one: PUT the ingest
-/// pipeline (id = recipe) and the index template (id = the recipe's index,
-/// matching `{index}*`). No-op for `kubernetes` (dynamic mapping). This is
-/// what the per-recipe `configure_*` functions did by hand, now fed from the
-/// pure `recipe_os_config` catalog.
-async fn configure_os(deployment: &Deployment, recipe: &str) -> Result<()> {
-    let Some((pipeline, template)) = recipe_os_config(recipe) else {
-        return Ok(());
-    };
-    let base = os_base(deployment);
-    let c = http()?;
-    let (u, p) = crate::k8s::admin_creds(deployment).await;
-
-    c.put(format!("{base}/_ingest/pipeline/{recipe}"))
-        .basic_auth(&u, Some(&p))
-        .json(&pipeline)
-        .send()
-        .await
-        .with_context(|| format!("creating {recipe} pipeline"))?
-        .error_for_status()
-        .with_context(|| format!("{recipe} pipeline rejected"))?;
-
-    c.put(format!("{base}/_index_template/{}", recipe_index(recipe)))
-        .basic_auth(&u, Some(&p))
-        .json(&template)
-        .send()
-        .await
-        .with_context(|| format!("creating {recipe} template"))?
-        .error_for_status()
-        .with_context(|| format!("{recipe} template rejected"))?;
-    Ok(())
-}
-
 /// A grok + date pipeline (the common log-line case). `patterns` are tried in
 /// order; non-matching lines still index (`ignore_failure`). The date is read
 /// from `time_field` using `time_formats` (best-effort).
@@ -1830,7 +1798,18 @@ fn json_date_processors(time_field: &str) -> serde_json::Value {
 /// must never masquerade as "0 docs" or the UI flaps between states on
 /// transient OpenSearch hiccups.
 pub async fn doc_count(deployment: &Deployment, recipe: &str) -> Result<u64> {
-    doc_count_of(deployment, &format!("{}*", recipe_index(recipe))).await
+    doc_count_of(deployment, &recipe_pattern(recipe)).await
+}
+
+/// Every index a recipe's collector writes, across versions:
+/// `veloxagent-nginx-logs-v*` (ADR-071). What every reader keys on —
+/// "is data arriving", retention, the security detectors — so an upgrade that
+/// starts `-v2` neither reads as silence nor escapes retention.
+///
+/// [`recipe_index`] stays the package-declared name: it is what the registry
+/// froze and what the generators emit, and the rename happens at install.
+pub fn recipe_pattern(recipe: &str) -> String {
+    velox_integrations::agent_family_pattern(recipe, recipe_index(recipe))
 }
 
 /// Document count over an arbitrary index pattern. Shared with the OTel stack
@@ -1911,7 +1890,7 @@ pub async fn recency(deployment: &Deployment, recipe: &str) -> Result<Recency> {
     let c = http()?;
     let (u, p) = crate::k8s::admin_creds(deployment).await;
     let resp = c
-        .post(format!("{base}/{}*/_search", recipe_index(recipe)))
+        .post(format!("{base}/{}/_search", recipe_pattern(recipe)))
         .basic_auth(&u, Some(&p))
         .json(&recency_query())
         .send()
@@ -1995,6 +1974,46 @@ mod recency_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// The egress-less fallback installs a package the registry would serve,
+    /// and under the agent-path names like any other: every id it creates
+    /// carries the prefix, and nothing is lost in the rename.
+    #[test]
+    fn every_bootstrap_package_installs_under_veloxagent_names() {
+        for r in RECIPES {
+            let pkg = bootstrap_package(r).unwrap_or_else(|e| panic!("{r}: {e}"));
+            assert_eq!(pkg.manifest.id, *r);
+            let declared = crate::integrations::created_resources(&pkg).unwrap();
+            let renamed = velox_integrations::agent_created_resources(
+                &pkg,
+                crate::catalog::BOOTSTRAP_VERSION,
+            )
+            .unwrap();
+            assert_eq!(
+                declared.len(),
+                renamed.len(),
+                "{r}: rename lost an artifact"
+            );
+            for (_, id) in &renamed {
+                assert!(id.starts_with("veloxagent-"), "{r}: {id} was not renamed");
+            }
+        }
+        assert!(bootstrap_package("not-a-recipe").is_err());
+    }
+
+    /// Every reader of a recipe's data — retention, detectors, "is it
+    /// arriving" — keys on a pattern that spans versions and sits under the
+    /// collector account's grant.
+    #[test]
+    fn recipe_patterns_span_versions_under_the_grant() {
+        let grant = velox_integrations::AGENT_GRANT_PATTERN.trim_end_matches('*');
+        for r in RECIPES {
+            let p = recipe_pattern(r);
+            assert!(p.starts_with(grant), "{r}: {p}");
+            assert!(p.ends_with("-v*"), "{r}: {p}");
+        }
+        assert_eq!(recipe_pattern("nginx"), "veloxagent-nginx-logs-v*");
+    }
     use super::*;
     use std::collections::HashSet;
 

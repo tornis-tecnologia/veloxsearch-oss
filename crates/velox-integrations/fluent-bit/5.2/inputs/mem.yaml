@@ -1,0 +1,38 @@
+kind: input
+name: mem
+title:
+  en: Memory Metrics
+  es: Memory Metrics
+  pt: Memory Metrics
+description:
+  en: Reports memory and swap usage of the host or of one process.
+  es: Informa el uso de memoria y swap del host o de un proceso.
+  pt: Informa o uso de memória e swap do host ou de um processo.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/memory-metrics
+os:
+- linux
+event_types:
+- logs
+verified: true
+params:
+- key: pid
+  type: integer
+  description:
+    en: Process to measure; also reports proc_bytes and proc_hr.
+    es: Proceso a medir; también informa proc_bytes y proc_hr.
+    pt: Processo a medir; também informa proc_bytes e proc_hr.
+- key: interval_sec
+  type: integer
+  default: 1
+  description:
+    en: Polling interval in seconds.
+    es: Intervalo de sondeo en segundos.
+    pt: Intervalo de coleta em segundos.
+- key: interval_nsec
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Nanoseconds part of the polling interval.
+    es: Parte en nanosegundos del intervalo de sondeo.
+    pt: Parte em nanossegundos do intervalo de coleta.

@@ -1,0 +1,54 @@
+kind: filter
+name: record_modifier
+title:
+  en: Record Modifier
+  es: Record Modifier
+  pt: Record Modifier
+description:
+  en: Appends fields, removes fields or keeps only an allowlist, and can add a UUID; not listed as an
+    input processor on the processors page.
+  es: Agrega campos, elimina campos o conserva solo una lista permitida, y puede agregar un UUID; no figura
+    como processor de entrada en la página de processors.
+  pt: Adiciona campos, remove campos ou mantém apenas uma lista permitida, e pode adicionar um UUID; não
+    consta como processor de entrada na página de processors.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/record-modifier
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: record
+  type: string
+  multi: repeat
+  description:
+    en: 'Adds a field; each entry takes one key and one value (format: KEY VALUE).'
+    es: 'Agrega un campo; cada entrada lleva una clave y un valor (formato: KEY VALUE).'
+    pt: 'Adiciona um campo; cada entrada leva uma chave e um valor (formato: KEY VALUE).'
+- key: remove_key
+  type: string
+  multi: repeat
+  description:
+    en: Removes any field with this key; use this or allowlist_key, not both.
+    es: Elimina cualquier campo con esta clave; usar esta o allowlist_key, no ambas.
+    pt: Remove qualquer campo com esta chave; usar esta ou allowlist_key, não ambas.
+- key: allowlist_key
+  type: string
+  multi: repeat
+  description:
+    en: Keeps only the listed fields and removes all others; use this or remove_key, not both.
+    es: Conserva solo los campos listados y elimina el resto; usar esta o remove_key, no ambas.
+    pt: Mantém apenas os campos listados e remove os demais; usar esta ou remove_key, não ambas.
+- key: whitelist_key
+  type: string
+  multi: repeat
+  advanced: true
+  description:
+    en: Older alias of allowlist_key kept for backward compatibility.
+    es: Alias antiguo de allowlist_key mantenido por compatibilidad.
+    pt: Alias antigo de allowlist_key mantido por compatibilidade.
+- key: uuid_key
+  type: string
+  description:
+    en: When set, adds a UUID to each record under this key name.
+    es: Si se define, agrega un UUID a cada registro bajo este nombre de clave.
+    pt: Se definido, adiciona um UUID a cada registro sob este nome de chave.

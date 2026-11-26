@@ -21,3 +21,6 @@ keys/*.pem
 keys/*.key
 CLAUDE.md
 
+
+# Velox Agent / Velox Mesh workspace build output (veloxagent/Cargo.toml)
+veloxagent/target/

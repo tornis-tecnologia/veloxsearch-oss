@@ -1,0 +1,22 @@
+kind: processor
+name: sql
+title:
+  en: SQL
+  es: SQL
+  pt: SQL
+description:
+  en: Runs a SQL statement over the log stream to select and transform records.
+  es: Ejecuta una sentencia SQL sobre el flujo de logs para seleccionar y transformar registros.
+  pt: Executa uma instrucao SQL sobre o fluxo de logs para selecionar e transformar registros.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/processors/sql
+event_types:
+- logs
+verified: true
+params:
+- key: query
+  type: text
+  description:
+    en: SQL statement to query the logs stream; it must end with `;`.
+    es: Sentencia SQL para consultar el flujo de logs; debe terminar con `;`.
+    pt: Instrucao SQL para consultar o fluxo de logs; deve terminar com `;`.
+  required: true
