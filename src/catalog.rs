@@ -2150,8 +2150,16 @@ mod tests {
         // Only inventory files were loaded — the directory may hold more.
         let manifest = spec2::Manifest::parse(&pkg.manifest_yaml).unwrap();
         assert_eq!(pkg.assets.len(), manifest.files.len());
-        // The registry ships the staging placeholder until a maintainer signs.
-        let err = verify_package(&pkg.manifest_yaml, &pkg.assets).unwrap_err();
+        // The registry shipped the staging placeholder until a maintainer
+        // signed (registry f542bd9, 2026-11-13). Either state is legitimate
+        // here: the shipped bytes verify against the compiled-in keyring, or
+        // they are UNSIGNED — never a bad signature.
+        if let Err(err) = verify_package(&pkg.manifest_yaml, &pkg.assets) {
+            assert!(err.to_string().contains("UNSIGNED"), "{err:#}");
+        }
+        // The placeholder itself is UNSIGNED, whatever the registry ships.
+        let staged = replace_signature_value(&pkg.manifest_yaml, PLACEHOLDER_SIG_PREFIX).unwrap();
+        let err = verify_package(&staged, &pkg.assets).unwrap_err();
         assert!(err.to_string().contains("UNSIGNED"), "{err:#}");
         // Signing with a throwaway key produces a digest the same bytes verify
         // (the keyring path is the 1.x test's; the digest is what is 2.0 here).
