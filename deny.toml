@@ -53,6 +53,11 @@ confidence-threshold = 0.9
 # every upstream bump a blocking incident.
 multiple-versions = "warn"
 wildcards = "deny"
+# Path dependencies carry no version: the in-tree crates shared with
+# veloxagent/ (crates/velox-integrations, crates/velox-policy, ADR-068). This
+# exempts only `publish = false` crates, so a registry dependency without a
+# version still fails.
+allow-wildcard-paths = true
 deny = [
     # One rustls crypto provider, process-wide. `main.rs` installs aws-lc-rs;
     # a second provider is dead weight in the image and, worse, makes which one
