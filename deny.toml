@@ -19,6 +19,17 @@ ignore = [
     # serde_yaml, which kube-client 2.x depends on unconditionally. Revisit when
     # kube moves off serde_yaml; our own optional serde_yaml use goes with it.
     { id = "RUSTSEC-2024-0449", reason = "via kube-client's serde_yaml; no safe upgrade available" },
+    # chrono is flagged unmaintained (all versions; informational, no
+    # vulnerability). It reaches us only through k8s-openapi 0.26, whose time
+    # types are chrono-based, and kube 2.x pins that line. The exit is kube >= 3
+    # / k8s-openapi >= 0.27 (jiff-based), a major bump that also rewrites our
+    # `k8s_openapi::chrono` call sites in src/k8s.rs — drop this entry with it.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; via k8s-openapi 0.26 (kube 2.x), no safe upgrade without the kube 3 migration" },
+    # kube-client's `openssl-tls` backend trusts OpenSSL's default CA store on
+    # top of the cluster CA. We build kube with `rustls-tls` only and ban
+    # openssl-sys below, so the affected code is not in our graph. Patched only
+    # in kube >= 4.2.1 — drop this entry with the kube migration above.
+    { id = "RUSTSEC-2026-0600", reason = "openssl-tls only; we use rustls-tls and ban openssl-sys; fix needs kube >= 4.2.1" },
 ]
 
 [licenses]
