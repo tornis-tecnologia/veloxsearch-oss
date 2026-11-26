@@ -1,0 +1,38 @@
+kind: input
+name: cpu
+title:
+  en: CPU
+  es: CPU
+  pt: CPU
+description:
+  en: Collects CPU usage of the system or of one process as log records.
+  es: Recolecta el uso de CPU del sistema o de un proceso como registros de log.
+  pt: Coleta o uso de CPU do sistema ou de um processo como registros de log.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/cpu-metrics
+os:
+- linux
+event_types:
+- logs
+verified: true
+params:
+- key: interval_sec
+  type: integer
+  description:
+    en: Polling interval in seconds.
+    es: Intervalo de sondeo en segundos.
+    pt: Intervalo de coleta em segundos.
+  default: 1
+- key: interval_nsec
+  type: integer
+  description:
+    en: Polling interval in nanoseconds, added to interval_sec.
+    es: Intervalo de sondeo en nanosegundos, sumado a interval_sec.
+    pt: Intervalo de coleta em nanossegundos, somado a interval_sec.
+  default: 0
+  advanced: true
+- key: pid
+  type: integer
+  description:
+    en: Monitor only this process ID instead of the whole system.
+    es: Monitorea solo este ID de proceso en lugar de todo el sistema.
+    pt: Monitora apenas este ID de processo em vez de todo o sistema.

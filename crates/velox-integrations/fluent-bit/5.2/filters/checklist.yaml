@@ -1,0 +1,67 @@
+kind: filter
+name: checklist
+title:
+  en: Checklist
+  es: Checklist
+  pt: Checklist
+description:
+  en: Checks record values against a lookup file and adds fields on a match; can be attached to an input
+    as a processor.
+  es: Compara valores de registros con un archivo de búsqueda y agrega campos al coincidir; puede adjuntarse
+    a un input como processor.
+  pt: Compara valores de registros com um arquivo de consulta e adiciona campos ao casar; pode ser anexado
+    a um input como processor.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/checklist
+verified: true
+event_types:
+- logs
+as_processor: true
+params:
+- key: file
+  type: string
+  description:
+    en: Single-value lookup file used to check whether the lookup_key value exists.
+    es: Archivo de búsqueda de un valor por línea para comprobar si existe el valor de lookup_key.
+    pt: Arquivo de consulta de um valor por linha para verificar se o valor de lookup_key existe.
+  required: true
+  operator_settable: false
+- key: ignore_case
+  type: bool
+  description:
+    en: Ignore letter case when comparing strings.
+    es: Ignorar mayúsculas y minúsculas al comparar.
+    pt: Ignorar maiúsculas e minúsculas ao comparar.
+  default: false
+- key: lookup_key
+  type: string
+  description:
+    en: Field to look up in the file; supports record accessor syntax.
+    es: Campo a buscar en el archivo; admite sintaxis record accessor.
+    pt: Campo a consultar no arquivo; suporta sintaxe record accessor.
+  default: log
+- key: mode
+  type: select
+  description:
+    en: Match mode.
+    es: Modo de coincidencia.
+    pt: Modo de correspondência.
+  default: exact
+  options:
+  - exact
+  - partial
+- key: print_query_time
+  type: bool
+  description:
+    en: Print the elapsed query time to stdout for each matched record.
+    es: Imprimir en stdout el tiempo de consulta de cada registro coincidente.
+    pt: Imprimir no stdout o tempo de consulta de cada registro correspondente.
+  default: false
+  advanced: true
+- key: record
+  type: string
+  description:
+    en: Key-value pair added when the lookup succeeds; can be repeated.
+    es: Par clave-valor agregado cuando la búsqueda tiene éxito; se puede repetir.
+    pt: Par chave-valor adicionado quando a consulta tem sucesso; pode ser repetido.
+  required: true
+  multi: repeat

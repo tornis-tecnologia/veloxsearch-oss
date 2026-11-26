@@ -1,0 +1,55 @@
+kind: input
+name: netif
+title:
+  en: Network I/O metrics
+  es: Network I/O metrics
+  pt: Network I/O metrics
+description:
+  en: Collects network traffic counters of one interface as log records.
+  es: Recolecta contadores de trafico de una interfaz de red como registros de log.
+  pt: Coleta contadores de trafego de uma interface de rede como registros de log.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/network-io-metrics
+os:
+- linux
+event_types:
+- logs
+verified: true
+params:
+- key: interface
+  type: string
+  description:
+    en: Network interface to monitor, such as eth0.
+    es: Interfaz de red a monitorear, como eth0.
+    pt: Interface de rede a monitorar, como eth0.
+  required: true
+- key: interval_sec
+  type: integer
+  description:
+    en: Seconds between collections.
+    es: Segundos entre recolecciones.
+    pt: Segundos entre coletas.
+  default: 1
+- key: interval_nsec
+  type: integer
+  description:
+    en: Nanosecond part of the interval, added to interval_sec.
+    es: Parte en nanosegundos del intervalo, sumada a interval_sec.
+    pt: Parte em nanossegundos do intervalo, somada a interval_sec.
+  default: 0
+  advanced: true
+- key: test_at_init
+  type: bool
+  description:
+    en: Checks at startup that the interface is valid.
+    es: Verifica al iniciar que la interfaz sea valida.
+    pt: Verifica na inicializacao que a interface e valida.
+  default: false
+  advanced: true
+- key: verbose
+  type: bool
+  description:
+    en: Collects metrics with more precision.
+    es: Recolecta metricas con mayor precision.
+    pt: Coleta metricas com maior precisao.
+  default: false
+  advanced: true

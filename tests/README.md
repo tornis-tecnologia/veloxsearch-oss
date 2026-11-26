@@ -23,7 +23,7 @@ you reshape a screen.
 | `journey_check.py <base> <user> <pw>` | Playwright | The create-deployment journey, submitted with a double click that must yield one deployment |
 | `create_submit_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | The create button disables from the first click and sends one request; it holds `create_cluster` in the browser, so it never provisions anything (#56) |
 | `profile_dialog_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | The Capacity view's cluster-profile dialog (ADR-060): one request per names setting, and the saved file is byte-for-byte the preview. It answers `cluster_profile` and `cluster_capacity` in the browser |
-| `frontend_robustness_check.py <base> [shots_dir]` | Playwright, **no cluster or backend needed** | Copy buttons report the truth with the Clipboard API denied or missing, render errors stay inside an error boundary, and tooltips are translated in pt/en/es (#141). It answers every `/api/*` call in the browser, so a static server over `frontend/build` is enough: `python3 -m http.server -d frontend/build 8099` |
+| `frontend_robustness_check.py <base> [shots_dir]` | Playwright, **no cluster or backend needed** | Copy buttons report the truth with the Clipboard API denied or missing, render errors stay inside an error boundary, tooltips are translated in pt/en/es (#141), and a standing alert is a popup in the top-right tray that can be muted (remembered across reloads) and brought back from the bell. It answers every `/api/*` call in the browser, so a static server over `frontend/build` is enough: `python3 -m http.server -d frontend/build 8099` |
 | `access_settings_check.py <base> <user> <pw>` | Playwright, **no cluster needed** | Settings → Access shows why an ingress class the cluster lacks cannot be saved, and disables Save until one it has (or port-forward) is picked (#139). It answers `access_settings` and `save_access_settings` in the browser |
 | `browser_check.py <base> <user> <pw>` | Playwright | Browser smoke plus a network gate: the console must stay free of hydration and panic errors |
 
@@ -89,6 +89,40 @@ each form, and for the one thing that is not obvious: with
 `VELOX_MULTITENANT_AUTH` on, the ADR-044 tenant NetworkPolicy set has no LDAP
 egress hole, so the LDAP fixture needs `netpol-tenant-egress-ldap.yaml` applied
 to the tenant namespace.
+
+`mesh_check.py <base> <user> <pw> [shot.png]` drives the **Velox Mesh** tab
+of a deployment (`/deployments/:id/mesh/:sub`, ADR-072; the old `/mesh` must
+redirect, and `/mesh/agents` lands on the overview): the overview, which IS
+the fleet (ADR-072 amendment 3: the summary, then a Fleet-shaped table with
+CPU, memory, last report and versions, no policy picker on the rows — the
+agent's editor is where the policy is picked, with the policy's endpoints
+and integrations as dependencies and a *Deploy* that stays disabled until
+something changes), the settings sub-tab (the Mesh's state, the ordered
+first run, the daemons table with the controller and each configured Mesh
+address probed, and the two endpoint lists — OpenSearch `host[:port]` or
+URL, and Mesh URL — with the in-cluster address offered, never assumed;
+ADR-072 amendment 2), the policies tab (a table — policy, agents, revision,
+integrations — with a menu per row; *New policy* is a dialog that asks for
+a name AND both endpoints; *Set endpoints* rebinds, an unbound legacy
+policy is flagged; *Settings* shows the binding and configures/removes
+integrations through the SAME dialog the Data tab uses with the policy as
+the fixed target, ADR-073; *Remove* deletes a throwaway `e2e-remove`
+policy and is disabled on a policy live agents run) and the **add-agent page** (`/mesh/add-agent?policy=`):
+three steps — the policy, its token, the per-target install guide (whose
+tab set mirrors the Fluent Bit project's own downloads index, ADR-069) with
+the enrol command completed from the policy's Mesh endpoint and the token,
+and a watch on the fleet; a policy card opens it with the policy chosen. It
+then drives the onboarding on the Data tab — the catalogue, where an
+installed integration is a green card with no received-data facts and no
+policy pills (the policy's own settings carry those; the deployment's
+overview has no received-data table): *Add* opens the dialog that asks where
+(this cluster, a policy — preselected when sent over with `?policy=` — or a
+new one, enabled only with endpoints configured) and what (the package's
+inputs and variables). Without a Mesh the dialog's only target is the
+cluster and the fleet assertions are skipped. It creates the endpoints
+`e2e-os`/`e2e-mesh` on the deployment's settings and `e2e-policy` on the
+Mesh, mints a token for it, and adds/removes `ssh` on it; it touches no
+cluster state otherwise. Needs Playwright and an authenticated install.
 
 ## Fixtures
 

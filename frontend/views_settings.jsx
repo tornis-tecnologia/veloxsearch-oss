@@ -10,6 +10,7 @@ import { useState, useEffect } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
 import { Field, Btn, Icon, Copyable, Confirm, FormSection, PageHeader, Banner } from "./ui.jsx";
+import { MeshInstallGuide } from "./views_mesh.jsx";
 
 // Local, tiny: this view had no formatter and needs exactly one.
 function fmtS(s, ...args) {
@@ -472,6 +473,14 @@ function SettingsView({ lang, onToast, buildInfo, isTenant }) {
       {!isTenant && (
         <FormSection title={t.set_h_op} desc={t.set_d_op} testid="set-operator">
           <OperatorBlock t={t} onToast={onToast} />
+        </FormSection>
+      )}
+
+      {/* One controller per installation (ADR-072 §1); each deployment has
+          its own Mesh tab. Installing it is the admin's, so it lives here. */}
+      {!isTenant && (
+        <FormSection title={t.set_h_mesh} desc={t.set_d_mesh} testid="set-mesh">
+          <MeshInstallGuide lang={lang} onToast={onToast} />
         </FormSection>
       )}
 

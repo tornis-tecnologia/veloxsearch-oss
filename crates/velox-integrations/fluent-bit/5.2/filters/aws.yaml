@@ -1,0 +1,122 @@
+kind: filter
+name: aws
+title:
+  en: AWS Metadata
+  es: AWS Metadata
+  pt: AWS Metadata
+description:
+  en: Enriches records with AWS EC2 instance metadata; can be attached to an input as a processor.
+  es: Enriquece los registros con metadatos de instancias AWS EC2; puede adjuntarse a un input como processor.
+  pt: Enriquece registros com metadados de instâncias AWS EC2; pode ser anexado a um input como processor.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/aws-metadata
+verified: true
+event_types:
+- logs
+as_processor: true
+params:
+- key: account_id
+  type: bool
+  description:
+    en: Add the account ID of the EC2 instance.
+    es: Agregar el ID de cuenta de la instancia EC2.
+    pt: Adicionar o ID da conta da instância EC2.
+  default: false
+- key: ami_id
+  type: bool
+  description:
+    en: Add the image ID of the EC2 instance.
+    es: Agregar el ID de imagen de la instancia EC2.
+    pt: Adicionar o ID da imagem da instância EC2.
+  default: false
+- key: az
+  type: bool
+  description:
+    en: Add the availability zone, such as us-east-1a.
+    es: Agregar la zona de disponibilidad, como us-east-1a.
+    pt: Adicionar a zona de disponibilidade, como us-east-1a.
+  default: true
+- key: ec2_instance_id
+  type: bool
+  description:
+    en: Add the EC2 instance ID.
+    es: Agregar el ID de la instancia EC2.
+    pt: Adicionar o ID da instância EC2.
+  default: true
+- key: ec2_instance_type
+  type: bool
+  description:
+    en: Add the EC2 instance type.
+    es: Agregar el tipo de instancia EC2.
+    pt: Adicionar o tipo da instância EC2.
+  default: false
+- key: enable_entity
+  type: bool
+  description:
+    en: Add an entity prefix to the fields used to build an entity.
+    es: Agregar un prefijo de entidad a los campos usados para construir una entidad.
+    pt: Adicionar um prefixo de entidade aos campos usados para construir uma entidade.
+  default: false
+- key: hostname
+  type: bool
+  description:
+    en: Add the hostname of the EC2 instance.
+    es: Agregar el hostname de la instancia EC2.
+    pt: Adicionar o hostname da instância EC2.
+  default: false
+- key: imds_version
+  type: select
+  description:
+    en: Instance metadata service version to use.
+    es: Versión del servicio de metadatos de instancia a usar.
+    pt: Versão do serviço de metadados de instância a usar.
+  default: v2
+  options:
+  - v1
+  - v2
+- key: private_ip
+  type: bool
+  description:
+    en: Add the private IP of the EC2 instance.
+    es: Agregar la IP privada de la instancia EC2.
+    pt: Adicionar o IP privado da instância EC2.
+  default: false
+- key: retry_interval_s
+  type: integer
+  description:
+    en: Minimum seconds between retries when fetching EC2 tags.
+    es: Segundos mínimos entre reintentos al obtener las etiquetas EC2.
+    pt: Segundos mínimos entre tentativas ao obter as tags EC2.
+  default: 300
+  advanced: true
+- key: tags_enabled
+  type: bool
+  description:
+    en: Attach EC2 instance tags; requires the instance-metadata-tags option.
+    es: Adjuntar las etiquetas de la instancia EC2; requiere la opción instance-metadata-tags.
+    pt: Anexar as tags da instância EC2; requer a opção instance-metadata-tags.
+  default: false
+- key: tags_exclude
+  type: string
+  description:
+    en: Comma-separated tag keys to leave out; cannot be combined with tags_include.
+    es: Claves de etiquetas a excluir, separadas por comas; no combinable con tags_include.
+    pt: Chaves de tags a excluir, separadas por vírgula; não combinável com tags_include.
+  multi: join
+  join: ','
+  advanced: true
+- key: tags_include
+  type: string
+  description:
+    en: Comma-separated tag keys to inject; other tags are ignored.
+    es: Claves de etiquetas a inyectar, separadas por comas; las demás se ignoran.
+    pt: Chaves de tags a injetar, separadas por vírgula; as demais são ignoradas.
+  multi: join
+  join: ','
+  advanced: true
+- key: vpc_id
+  type: bool
+  description:
+    en: Add the VPC ID of the EC2 instance.
+    es: Agregar el ID de VPC de la instancia EC2.
+    pt: Adicionar o ID da VPC da instância EC2.
+  default: false

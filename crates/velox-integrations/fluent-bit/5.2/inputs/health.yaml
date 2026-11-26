@@ -1,0 +1,69 @@
+kind: input
+name: health
+title:
+  en: Health
+  es: Health
+  pt: Health
+description:
+  en: Checks whether a TCP service is reachable and records the result.
+  es: Comprueba si un servicio TCP es accesible y registra el resultado.
+  pt: Verifica se um serviço TCP está acessível e registra o resultado.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/health
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+verified: true
+params:
+- key: host
+  type: string
+  required: true
+  description:
+    en: Target hostname or IP address.
+    es: Nombre de host o dirección IP de destino.
+    pt: Hostname ou endereço IP de destino.
+- key: port
+  type: integer
+  required: true
+  description:
+    en: TCP port used for the connection request.
+    es: Puerto TCP usado para la conexión.
+    pt: Porta TCP usada na conexão.
+- key: interval_sec
+  type: integer
+  default: 1
+  description:
+    en: Seconds between service checks.
+    es: Segundos entre comprobaciones del servicio.
+    pt: Segundos entre verificações do serviço.
+- key: interval_nsec
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Nanoseconds part of the check interval.
+    es: Parte en nanosegundos del intervalo de comprobación.
+    pt: Parte em nanossegundos do intervalo de verificação.
+- key: alert
+  type: bool
+  default: false
+  description:
+    en: Generates records only when the target TCP service is down.
+    es: Genera registros solo cuando el servicio TCP de destino está caído.
+    pt: Gera registros somente quando o serviço TCP de destino está fora do ar.
+- key: add_host
+  type: bool
+  default: false
+  description:
+    en: Appends the hostname to each record.
+    es: Agrega el nombre de host a cada registro.
+    pt: Adiciona o hostname a cada registro.
+- key: add_port
+  type: bool
+  default: false
+  description:
+    en: Appends the port number to each record.
+    es: Agrega el número de puerto a cada registro.
+    pt: Adiciona o número da porta a cada registro.

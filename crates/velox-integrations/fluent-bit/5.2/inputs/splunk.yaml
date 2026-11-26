@@ -1,0 +1,152 @@
+kind: input
+name: splunk
+title:
+  en: Splunk HEC
+  es: Splunk HEC
+  pt: Splunk HEC
+description:
+  en: Receives records over HTTP using the Splunk HTTP Event Collector protocol.
+  es: Recibe registros por HTTP con el protocolo Splunk HTTP Event Collector.
+  pt: Recebe registros via HTTP com o protocolo Splunk HTTP Event Collector.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/splunk
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+requires:
+- network_listen
+verified: true
+params:
+- key: listen
+  type: string
+  default: 0.0.0.0
+  description:
+    en: Address the HTTP listener binds to.
+    es: Dirección en la que escucha el servidor HTTP.
+    pt: Endereço em que o servidor HTTP escuta.
+- key: port
+  type: integer
+  default: 8088
+  description:
+    en: TCP port the listener uses.
+    es: Puerto TCP que usa el servidor.
+    pt: Porta TCP usada pelo servidor.
+- key: splunk_token
+  type: password
+  secret: true
+  description:
+    en: One or more comma-separated HEC tokens required for authentication.
+    es: Uno o más tokens HEC separados por comas requeridos para autenticar.
+    pt: Um ou mais tokens HEC separados por vírgula exigidos para autenticar.
+- key: splunk_token_key
+  type: string
+  default: '@splunk_token'
+  advanced: true
+  description:
+    en: Record key that stores the token when tokens are not kept in metadata.
+    es: Clave del registro que guarda el token cuando no se guarda en metadatos.
+    pt: Chave do registro que guarda o token quando ele não fica nos metadados.
+- key: store_token_in_metadata
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Keep HEC tokens in Fluent Bit metadata instead of record data.
+    es: Guarda los tokens HEC en los metadatos de Fluent Bit en lugar de en el registro.
+    pt: Mantém os tokens HEC nos metadados do Fluent Bit em vez de no registro.
+- key: add_remote_addr
+  type: bool
+  default: false
+  description:
+    en: Add the client address to each record.
+    es: Agrega la dirección del cliente a cada registro.
+    pt: Adiciona o endereço do cliente a cada registro.
+- key: remote_addr_key
+  type: string
+  default: remote_addr
+  description:
+    en: Field name used for the client address.
+    es: Nombre del campo usado para la dirección del cliente.
+    pt: Nome do campo usado para o endereço do cliente.
+- key: tag_key
+  type: string
+  advanced: true
+  description:
+    en: Record key whose value overwrites the tag.
+    es: Clave del registro cuyo valor reemplaza la etiqueta.
+    pt: Chave do registro cujo valor substitui a tag.
+- key: success_header
+  type: string
+  multi: repeat
+  advanced: true
+  description:
+    en: Extra HTTP header returned on successful requests; can be repeated.
+    es: Cabecera HTTP extra devuelta en solicitudes exitosas; se puede repetir.
+    pt: Cabeçalho HTTP extra devolvido em requisições bem-sucedidas; pode ser repetido.
+- key: buffer_chunk_size
+  type: size
+  default: 512K
+  advanced: true
+  description:
+    en: Chunk size for incoming JSON (alias of http_server.buffer_chunk_size).
+    es: Tamaño de chunk para el JSON entrante (alias de http_server.buffer_chunk_size).
+    pt: Tamanho do chunk do JSON recebido (alias de http_server.buffer_chunk_size).
+- key: buffer_max_size
+  type: size
+  default: 4M
+  advanced: true
+  description:
+    en: Maximum size of a received JSON message (alias of http_server.buffer_max_size).
+    es: Tamaño máximo de un mensaje JSON recibido (alias de http_server.buffer_max_size).
+    pt: Tamanho máximo de uma mensagem JSON recebida (alias de http_server.buffer_max_size).
+- key: http2
+  type: bool
+  default: true
+  advanced: true
+  description:
+    en: Enable HTTP/2 (alias of http_server.http2).
+    es: Habilita HTTP/2 (alias de http_server.http2).
+    pt: Habilita HTTP/2 (alias de http_server.http2).
+- key: http_server.max_connections
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Concurrent connection cap; 0 means unlimited.
+    es: Límite de conexiones concurrentes; 0 significa sin límite.
+    pt: Limite de conexões simultâneas; 0 significa sem limite.
+- key: http_server.workers
+  type: integer
+  default: 1
+  advanced: true
+  description:
+    en: Number of listener worker threads.
+    es: Cantidad de hilos de trabajo del servidor.
+    pt: Número de threads de trabalho do servidor.
+- key: http_server.ingress_queue_event_limit
+  type: integer
+  default: 8192
+  advanced: true
+  description:
+    en: Deferred queue entry cap, relevant only with more than one worker.
+    es: Límite de entradas de la cola diferida, relevante solo con más de un worker.
+    pt: Limite de entradas da fila diferida, relevante só com mais de um worker.
+- key: http_server.ingress_queue_byte_limit
+  type: size
+  default: 256M
+  advanced: true
+  description:
+    en: Deferred queue size cap, relevant only with more than one worker.
+    es: Límite de tamaño de la cola diferida, relevante solo con más de un worker.
+    pt: Limite de tamanho da fila diferida, relevante só com mais de um worker.
+- key: http_server.max_decoded_body_size
+  type: size
+  default: 100M
+  since: 5.2.0
+  advanced: true
+  description:
+    en: Maximum request body size after decompression.
+    es: Tamaño máximo del cuerpo de la solicitud tras descomprimir.
+    pt: Tamanho máximo do corpo da requisição após descompactar.

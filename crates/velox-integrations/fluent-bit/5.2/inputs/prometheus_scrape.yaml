@@ -1,0 +1,179 @@
+kind: input
+name: prometheus_scrape
+title:
+  en: Prometheus scrape
+  es: Prometheus scrape
+  pt: Prometheus scrape
+description:
+  en: Scrapes metrics from a Prometheus-compatible HTTP endpoint.
+  es: Obtiene metricas de un endpoint HTTP compatible con Prometheus.
+  pt: Coleta metricas de um endpoint HTTP compativel com Prometheus.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/prometheus-scrape
+os:
+- linux
+- windows
+- darwin
+event_types:
+- metrics
+verified: true
+params:
+- key: host
+  type: string
+  description:
+    en: Host of the endpoint to scrape.
+    es: Host del endpoint a consultar.
+    pt: Host do endpoint a coletar.
+  default: localhost
+- key: port
+  type: integer
+  description:
+    en: Port of the endpoint to scrape.
+    es: Puerto del endpoint a consultar.
+    pt: Porta do endpoint a coletar.
+  default: 9100
+- key: metrics_path
+  type: string
+  description:
+    en: URI path of the metrics endpoint, starting with / and optionally with query parameters.
+    es: Ruta URI del endpoint de metricas, empezando por / y opcionalmente con parametros de consulta.
+    pt: Caminho URI do endpoint de metricas, comecando com / e opcionalmente com parametros de consulta.
+  default: /metrics
+- key: scrape_interval
+  type: duration
+  description:
+    en: How often metrics are scraped.
+    es: Frecuencia de obtencion de metricas.
+    pt: Frequencia de coleta das metricas.
+  default: 10s
+- key: bearer_token
+  type: password
+  description:
+    en: Bearer token for authentication.
+    es: Token bearer para autenticacion.
+    pt: Token bearer para autenticacao.
+  secret: true
+- key: http_user
+  type: string
+  description:
+    en: User name for HTTP basic authentication.
+    es: Usuario para autenticacion HTTP basica.
+    pt: Usuario para autenticacao HTTP basica.
+- key: http_passwd
+  type: password
+  description:
+    en: Password for HTTP basic authentication.
+    es: Contrasena para autenticacion HTTP basica.
+    pt: Senha para autenticacao HTTP basica.
+  default: ''
+  secret: true
+- key: buffer_max_size
+  type: size
+  description:
+    en: Maximum buffer size for the HTTP response.
+    es: Tamano maximo de buffer de la respuesta HTTP.
+    pt: Tamanho maximo do buffer da resposta HTTP.
+  default: 10M
+  advanced: true
+- key: tls
+  type: bool
+  description:
+    en: Enables TLS.
+    es: Habilita TLS.
+    pt: Habilita TLS.
+  default: false
+- key: tls.ca_file
+  type: string
+  description:
+    en: CA certificate file.
+    es: Archivo de certificado CA.
+    pt: Arquivo de certificado CA.
+  advanced: true
+- key: tls.ca_path
+  type: string
+  description:
+    en: Directory with CA certificates.
+    es: Directorio con certificados CA.
+    pt: Diretorio com certificados CA.
+  advanced: true
+- key: tls.crt_file
+  type: string
+  description:
+    en: Certificate file.
+    es: Archivo de certificado.
+    pt: Arquivo de certificado.
+  advanced: true
+- key: tls.key_file
+  type: string
+  description:
+    en: Private key file.
+    es: Archivo de clave privada.
+    pt: Arquivo de chave privada.
+  advanced: true
+- key: tls.key_passwd
+  type: password
+  description:
+    en: Password of the key file.
+    es: Contrasena del archivo de clave.
+    pt: Senha do arquivo de chave.
+  advanced: true
+  secret: true
+- key: tls.crl_file
+  type: string
+  description:
+    en: CRL file used to reject revoked certificates.
+    es: Archivo CRL para rechazar certificados revocados.
+    pt: Arquivo CRL para rejeitar certificados revogados.
+  advanced: true
+  since: 5.1.3
+- key: tls.ciphers
+  type: string
+  description:
+    en: Allowed ciphers (up to TLSv1.2).
+    es: Cifrados permitidos (hasta TLSv1.2).
+    pt: Cifras permitidas (ate TLSv1.2).
+  advanced: true
+- key: tls.min_version
+  type: string
+  description:
+    en: Minimum TLS version.
+    es: Version minima de TLS.
+    pt: Versao minima de TLS.
+  advanced: true
+- key: tls.max_version
+  type: string
+  description:
+    en: Maximum TLS version.
+    es: Version maxima de TLS.
+    pt: Versao maxima de TLS.
+  advanced: true
+- key: tls.verify
+  type: bool
+  description:
+    en: Enables certificate validation.
+    es: Habilita la validacion de certificados.
+    pt: Habilita a validacao de certificados.
+  default: true
+  advanced: true
+- key: tls.verify_hostname
+  type: bool
+  description:
+    en: Enables hostname verification.
+    es: Habilita la verificacion del nombre de host.
+    pt: Habilita a verificacao do nome do host.
+  default: false
+  advanced: true
+- key: tls.vhost
+  type: string
+  description:
+    en: SNI hostname.
+    es: Nombre de host SNI.
+    pt: Nome de host SNI.
+  advanced: true
+- key: tls.debug
+  type: integer
+  description:
+    en: TLS debug level, 0 to 4.
+    es: Nivel de depuracion TLS, 0 a 4.
+    pt: Nivel de depuracao TLS, 0 a 4.
+  default: 1
+  advanced: true

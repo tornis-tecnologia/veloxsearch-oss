@@ -8,6 +8,75 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- **Velox Agent 0.2.0: a host installer, one install root and a container
+  image (ADR-069 amendment 1).**
+  - `veloxagent/deploy/install.sh` detects the distribution and installs
+    Fluent Bit from the upstream repository. It then downloads the agent from
+    its own `velox-agent-v*` GitHub release, checked against SHA256SUMS and,
+    with cosign, the signature.
+  - The agent runs as a `velox-agent` user holding `CAP_DAC_READ_SEARCH`, so
+    it reads logs the way Filebeat does and writes only its state.
+    `--run-as-root` keeps Filebeat's model.
+  - Everything lives in `/opt/velox-agent`.
+  - `docker.io/tornistecnologia/velox-agent` is upstream's Fluent Bit image
+    with the agent added, plus a `docker-compose.yml`.
+  - *Add agent* offers three methods: script (default), Docker, and manual
+    per distribution.
+
+### Changed
+- **The agent's state is `/opt/velox-agent/state` by default**, no longer
+  `~/.local/state/velox-agent`. `sudo velox-agent enroll` therefore lands
+  where the service reads, and root hands the identity to the state
+  directory's owner. Set `VELOX_AGENT_STATE` to keep an old location.
+  `install.sh` moves an existing identity; `velox-agent doctor` names one it
+  finds stranded.
+
+## [0.15.0] - 2026-11-13
+
+### Added
+- **Velox Mesh and Velox Agent: collection from hosts outside the cluster
+  (ADR-068 to ADR-074).** A fleet controller (`velox-mesh`) and a host agent
+  (`velox-agent`) in their own workspace, `veloxagent/`, speaking OpAMP. The
+  agent supervises the Fluent Bit the operator installed (ADR-069); policies
+  are compiled by the core and rolled out with a revision, a dry-run and a
+  rollback on the host.
+- **The Mesh is a deployment's (ADR-072).** A *Velox Mesh* tab per deployment:
+  the fleet (status, host, policy and revision, CPU, memory, last report,
+  versions) with a status filter and per-agent remove; policies as a table
+  bound to named OpenSearch and Mesh endpoints; an *Add agent* page with the
+  enrol command completed for each distribution.
+- **Installed from the console (ADR-072 amendment 5).** *Settings → Velox Mesh
+  → Install in this cluster* applies `deploy/mesh/mesh.yaml` into its own
+  `velox-mesh` namespace (Pod Security `restricted`), creates its database on
+  the installation's Postgres, and is found by the core with no wiring;
+  *Uninstall* removes it, optionally with its data. `VELOX_MESH_IMAGE`
+  replaces the pinned image; `VELOX_MESH_URL` still points at a Mesh
+  elsewhere.
+- **Public URLs for agents (ADR-072 amendment 4).** In ingress mode every
+  deployment gets `https://<name>-mesh.<domain>` (`/v1` and `/healthz` only)
+  and both its routes are offered as endpoints. On an `sslip.io` domain
+  without a TLS Secret they are marked insecure: `tls.verify Off` on the
+  output and `velox-agent enroll --insecure`.
+- **Registry Spec 2.0 packages (ADR-074).** The Data tab's catalogue is the
+  registry's `packages/index.json`: per stream the operator picks paths,
+  parser, processors and options in a generated form; the core verifies the
+  signed manifest and its file inventory, compiles Fluent Bit YAML equal to
+  the registry's reference compiler, and installs the backend (templates,
+  pipelines, ISM, data stream, index pattern) before the revision that writes
+  to it. Secrets travel to agents only, as environment variables. The plugin
+  allowlist is vendored into the binary.
+- **Collectors write with their own account (ADR-070).** `veloxagent-user`,
+  limited to `veloxagent-*`, replaces the admin credentials on every
+  collector, in-cluster and on hosts.
+- Standing alerts are popups in a top-right tray, each one mutable.
+
+### Changed
+- **The cluster's 1.x catalogue is no longer offered.** What it installed
+  stays listed on the Data tab, to configure or remove; new integrations come
+  from the registry's Spec 2.0 catalogue.
+- Packages under Spec 2.0 require this release (`min_mesh_version 0.15.0`).
+
 ## [0.14.0] - 2026-11-08
 
 ### Changed

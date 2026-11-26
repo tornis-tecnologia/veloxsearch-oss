@@ -1,0 +1,56 @@
+kind: filter
+name: type_converter
+title:
+  en: Type converter
+  es: Conversor de tipos
+  pt: Conversor de tipos
+description:
+  en: Converts data types and appends the converted values as new key-value pairs.
+  es: Convierte tipos de datos y agrega los valores convertidos como nuevos pares clave-valor.
+  pt: Converte tipos de dados e acrescenta os valores convertidos como novos pares chave-valor.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/type-converter
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: float_key
+  type: string
+  multi: repeat
+  description:
+    en: Conversion from a float source, as `<src_key> <dst_key> <dst_type>` where dst_type is int, uint,
+      float or string.
+    es: Conversión desde un origen float, como `<src_key> <dst_key> <dst_type>` donde dst_type es int,
+      uint, float o string.
+    pt: Conversão de uma origem float, como `<src_key> <dst_key> <dst_type>` onde dst_type é int, uint,
+      float ou string.
+- key: int_key
+  type: string
+  multi: repeat
+  description:
+    en: Conversion from an integer source, as `<src_key> <dst_key> <dst_type>` where dst_type is int,
+      uint, float or string.
+    es: Conversión desde un origen entero, como `<src_key> <dst_key> <dst_type>` donde dst_type es int,
+      uint, float o string.
+    pt: Conversão de uma origem inteira, como `<src_key> <dst_key> <dst_type>` onde dst_type é int, uint,
+      float ou string.
+- key: str_key
+  type: string
+  multi: repeat
+  description:
+    en: Conversion from a string source, as `<src_key> <dst_key> <dst_type>` where dst_type is int, uint,
+      float or string.
+    es: Conversión desde un origen string, como `<src_key> <dst_key> <dst_type>` donde dst_type es int,
+      uint, float o string.
+    pt: Conversão de uma origem string, como `<src_key> <dst_key> <dst_type>` onde dst_type é int, uint,
+      float ou string.
+- key: uint_key
+  type: string
+  multi: repeat
+  description:
+    en: Conversion from an unsigned integer source, as `<src_key> <dst_key> <dst_type>` where dst_type
+      is int, uint, float or string.
+    es: Conversión desde un origen entero sin signo, como `<src_key> <dst_key> <dst_type>` donde dst_type
+      es int, uint, float o string.
+    pt: Conversão de uma origem inteira sem sinal, como `<src_key> <dst_key> <dst_type>` onde dst_type
+      é int, uint, float ou string.

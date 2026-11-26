@@ -1,0 +1,96 @@
+kind: filter
+name: multiline
+title:
+  en: Multiline
+  es: Multiline
+  pt: Multiline
+description:
+  en: Concatenates multi-line records (such as stack traces) using multiline parsers or Docker partial-message
+    joining; should be the first filter, and cannot run as an input processor per the page.
+  es: Concatena registros multilínea (como stack traces) con parsers multilínea o unión de mensajes parciales
+    de Docker; debe ser el primer filter y la página no lo documenta como processor de entrada.
+  pt: Concatena registros multilinha (como stack traces) com parsers multilinha ou junção de mensagens
+    parciais do Docker; deve ser o primeiro filter e a página não o documenta como processor de entrada.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/multiline-stacktrace
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: multiline.parser
+  type: string
+  multi: join
+  join: ','
+  description:
+    en: Multiline parser definitions, comma-separated, used to detect formats; mutually exclusive with
+      mode partial_message.
+    es: Definiciones de parsers multilínea, separadas por comas, para detectar formatos; excluyente con
+      mode partial_message.
+    pt: Definições de parsers multilinha, separadas por vírgula, para detectar formatos; exclusivo com
+      mode partial_message.
+- key: multiline.key_content
+  type: string
+  description:
+    en: Record key holding the content to process; overrides key_content of the multiline parser.
+    es: Clave del registro con el contenido a procesar; reemplaza key_content del parser multilínea.
+    pt: Chave do registro com o conteúdo a processar; substitui o key_content do parser multilinha.
+- key: mode
+  type: select
+  options:
+  - parser
+  - partial_message
+  description:
+    en: parser does regex-based concatenation; partial_message joins Docker split logs.
+    es: parser concatena mediante regex; partial_message une los logs divididos de Docker.
+    pt: parser concatena por regex; partial_message junta os logs divididos do Docker.
+- key: buffer
+  type: bool
+  description:
+    en: Enables buffered mode so records sent one at a time (e.g. Forward) can be concatenated and re-emitted
+      via an emitter.
+    es: Activa el modo con búfer para concatenar registros enviados de uno en uno (p. ej. Forward) y reemitirlos
+      mediante un emisor.
+    pt: 'Ativa o modo com buffer para concatenar registros enviados um a um (ex.: Forward) e reemiti-los
+      por um emissor.'
+- key: flush_ms
+  type: integer
+  default: 2000
+  advanced: true
+  description:
+    en: Flush interval in milliseconds for pending multiline records.
+    es: Intervalo de vaciado en milisegundos para registros multilínea pendientes.
+    pt: Intervalo de flush em milissegundos para registros multilinha pendentes.
+- key: debug_flush
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Enables debug logging of flush operations.
+    es: Activa el registro de depuración de las operaciones de vaciado.
+    pt: Ativa o log de depuração das operações de flush.
+- key: emitter_name
+  type: string
+  advanced: true
+  description:
+    en: Name of the emitter input instance that re-emits completed records.
+    es: Nombre de la instancia de entrada emisora que reemite los registros completos.
+    pt: Nome da instância de entrada emissora que reemite os registros completos.
+- key: emitter_mem_buf_limit
+  type: size
+  default: 10M
+  advanced: true
+  description:
+    en: Emitter memory limit; the pipeline pauses when exceeded.
+    es: Límite de memoria del emisor; el pipeline se pausa al superarlo.
+    pt: Limite de memória do emissor; o pipeline pausa ao excedê-lo.
+- key: emitter_storage.type
+  type: select
+  default: memory
+  options:
+  - memory
+  - filesystem
+  advanced: true
+  description:
+    en: 'Storage type of the emitter: memory or filesystem.'
+    es: 'Tipo de almacenamiento del emisor: memory o filesystem.'
+    pt: 'Tipo de armazenamento do emissor: memory ou filesystem.'

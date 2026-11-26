@@ -33,7 +33,14 @@ These reconcile 1:1 with the set named in ADR-039:
 
 - **`agent_config`** (`agent.conf.tmpl`) — `{os_host}` (Host), `{os_user}`
   (HTTP_User), `{os_password}` (HTTP_Passwd), `{index}` (Index). This is where
-  `fluent_bit_conf` interpolates today.
+  `fluent_bit_conf` interpolates today. On the **host path** (a Velox Mesh
+  policy, ADR-072 amendment 2) `{os_host}` is the bare host of the policy's
+  OpenSearch endpoint, and the compiler then rewrites the `Host`, `Port`,
+  `tls` and `Path` keys of every `[OUTPUT]` with `Name opensearch` from that
+  endpoint (`velox_policy::bind_fluent_bit_output`): the `Port 9200` /
+  `tls On` a package writes are the in-cluster defaults, right for the
+  DaemonSet path and replaced for a host. A package keeps every other key
+  of the stanza, and must not rely on those four.
 - **`pipeline` / `index_template`** — need no interpolation in the nginx recipe
   (they are static JSON PUT under the fixed ids `{recipe_id}` / `{index}`). The
   ids themselves are engine-owned, so a package that parameterizes them uses
@@ -58,6 +65,42 @@ These reconcile 1:1 with the set named in ADR-039:
 > ConfigMap, and an admin-password reset reaches every collector (the sampler
 > re-syncs the Secret and restarts the pods once OpenSearch accepts the new
 > password). A package needs no change for this.
+
+## Package variables are not tokens (schema 1.1)
+
+A manifest at `schema_version: "1.1"` may declare `variables` (name, type,
+default, required — see `manifest.schema.json`). They exist so a Velox Mesh
+policy can parameterise an activation (a log path, a port) and so the core's
+DaemonSet path can fill the same holes from `default`. They do **not** widen
+the closed set above:
+
+- A declared variable is referenced as **`${name}`**, the shell/Fluent Bit
+  spelling, never as `{name}`. The engine (`velox_integrations::apply_variables`)
+  substitutes *exactly the declared names* and leaves every other `${...}`
+  alone — `${VELOX_OS_PASSWORD}`, which the agent builder injects, keeps
+  passing through to the collector untouched.
+- A variable may not be named after a closed token (`index`, `ns`, ...): the
+  engine refuses the package. The two syntaxes would otherwise be one
+  character apart.
+- Values are validated against the declared type and must be single-line
+  (`velox_integrations::resolve_variables`). A `required` variable with no
+  `default` makes the package un-installable on the DaemonSet path, which is
+  the author saying there is no sensible default.
+- The same declared variables apply to the optional `otel_config` asset.
+
+## Inputs (schema 1.2, ADR-073)
+
+A manifest at `schema_version: "1.2"` declares `inputs` instead of top-level
+`variables`: each input has a `signal`, a template per target
+(`templates.cluster` / `templates.host` / `templates.otel_host`), its own
+`vars` (same shape, plus `targets: [cluster|host]` to say where a variable
+applies), and optionally its own `pipeline`, `index_template` and
+`saved_objects`. The rules above hold per input: `${name}` substitutes
+exactly that input's declared names in that input's templates, nothing
+else, and a variable that does not apply to a target is neither required
+nor substituted there — a value given for it is refused by name. Every file
+an input names is an asset and is covered by the digest. The engine replaces
+each template's `[SERVICE]` section with its own, once per configuration.
 
 ## The rule
 

@@ -162,7 +162,7 @@ fn read(dir: &std::path::Path, recipe: &str, file: &str) -> String {
 
 /// Fixed off-cluster variable values for render checks.
 fn test_vars(recipe: &str) -> Vars {
-    Vars::new(
+    integrations::vars(
         &golden_deployment(),
         recipes::recipe_index(recipe),
         recipe,
@@ -248,6 +248,72 @@ fn packages_load_and_carry_the_catalog_identity() {
     }
 }
 
+/// The egress-less fallback (`recipes::bootstrap_package`) installs what the
+/// registry would have served, under the same `veloxagent-` names: identical
+/// collector template and saved objects, JSON-identical pipeline and
+/// template, the same teardown, and therefore the same renamed inventory. If
+/// this drifts, a deployment installed offline and one installed online end up
+/// with different artifacts under the same names.
+#[test]
+fn the_bootstrap_package_is_the_registry_package() {
+    let Some(dir) = registry_dir() else { return };
+    let json = |s: &Option<String>| {
+        s.as_deref()
+            .map(|t| serde_json::from_str::<serde_json::Value>(t).expect("asset JSON"))
+    };
+    for recipe in recipes::RECIPES {
+        let reg = Package::load_from_dir(&dir.join(recipe)).expect(recipe);
+        let boot = recipes::bootstrap_package(recipe).expect(recipe);
+        assert_eq!(boot.manifest.id, reg.manifest.id, "{recipe}: id");
+        assert_eq!(boot.manifest.index, reg.manifest.index, "{recipe}: index");
+        // The recipe IS the registry package's first input collected in the
+        // cluster (ADR-073): a schema 1.2 package may add a host template and
+        // further inputs the recipe never had, but its first input's cluster
+        // template, pipeline and index template are the recipe's, byte for
+        // byte.
+        let first = reg.inputs().into_iter().next().expect(recipe);
+        assert_eq!(
+            Some(boot.agent_config.as_str()),
+            first.template(velox_integrations::TargetKind::Cluster),
+            "{recipe}: the first input's cluster template is the recipe's agent.conf.tmpl"
+        );
+        assert_eq!(
+            boot.saved_objects, reg.saved_objects,
+            "{recipe}: saved objects"
+        );
+        assert_eq!(
+            json(&boot.pipeline),
+            json(&first.pipeline.map(str::to_string)),
+            "{recipe}: pipeline"
+        );
+        assert_eq!(
+            json(&boot.index_template),
+            json(&first.index_template.map(str::to_string)),
+            "{recipe}: index template"
+        );
+        // Everything the recipe tears down and creates, the package does too;
+        // a 1.2 package may have more (its other inputs'), never less.
+        let boot_teardown = integrations::teardown_resources(&boot.manifest.teardown);
+        let reg_teardown = integrations::teardown_resources(&reg.manifest.teardown);
+        assert!(
+            boot_teardown.is_subset(&reg_teardown),
+            "{recipe}: teardown lost {:?}",
+            boot_teardown.difference(&reg_teardown).collect::<Vec<_>>()
+        );
+        let boot_created = velox_integrations::agent_created_resources(&boot, "1.0.0").unwrap();
+        let reg_created = velox_integrations::agent_created_resources(&reg, "1.0.0").unwrap();
+        assert!(
+            boot_created.is_subset(&reg_created),
+            "{recipe}: renamed inventory lost {:?}",
+            boot_created.difference(&reg_created).collect::<Vec<_>>()
+        );
+        if reg.manifest.inputs.is_empty() {
+            assert_eq!(boot_teardown, reg_teardown, "{recipe}: teardown");
+            assert_eq!(boot_created, reg_created, "{recipe}: renamed inventory");
+        }
+    }
+}
+
 /// ADR-039 golden gate: each package's `pipeline.json` / `index-template.json`,
 /// rendered by the engine, is byte-equivalent (canonical serde serialization —
 /// the exact bytes PUT on the wire) to the pre-extraction Rust output.
@@ -324,7 +390,7 @@ fn agent_config_is_frozen_rust_output() {
         );
 
         // Round-trip with the same namespace `fluent_bit_conf` resolves.
-        let live_vars = Vars::new(
+        let live_vars = integrations::vars(
             &golden_deployment(),
             recipes::recipe_index(recipe),
             recipe,

@@ -1,0 +1,13 @@
+kind: multiline_parser
+name: ruby
+title:
+  en: Ruby
+  es: Ruby
+  pt: Ruby
+description:
+  en: Joins Ruby application log entries that span multiple lines.
+  es: Une entradas de log de aplicaciones Ruby que abarcan varias lineas.
+  pt: Junta entradas de log de aplicacoes Ruby que ocupam varias linhas.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/parsers/multiline-parsing
+verified: true
+params: []

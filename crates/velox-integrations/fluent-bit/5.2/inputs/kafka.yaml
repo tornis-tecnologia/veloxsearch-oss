@@ -1,0 +1,100 @@
+kind: input
+name: kafka
+title:
+  en: Kafka
+  es: Kafka
+  pt: Kafka
+description:
+  en: Consumes messages from Apache Kafka topics.
+  es: Consume mensajes de temas de Apache Kafka.
+  pt: Consome mensagens de tópicos do Apache Kafka.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/inputs/kafka
+os:
+- linux
+- windows
+- darwin
+event_types:
+- logs
+verified: true
+params:
+- key: brokers
+  type: string
+  required: true
+  multi: join
+  join: ','
+  description:
+    en: Kafka broker addresses, one or more.
+    es: Direcciones de los brokers de Kafka, una o más.
+    pt: Endereços dos brokers Kafka, um ou mais.
+- key: topics
+  type: string
+  required: true
+  multi: join
+  join: ','
+  description:
+    en: Topics to subscribe to, comma-separated.
+    es: Temas a los que suscribirse, separados por comas.
+    pt: Tópicos a assinar, separados por vírgula.
+- key: format
+  type: select
+  default: none
+  options:
+  - none
+  - json
+  description:
+    en: Message serialization; json parses the payload as JSON.
+    es: Serialización del mensaje; json interpreta la carga como JSON.
+    pt: Serialização da mensagem; json interpreta a carga como JSON.
+- key: client_id
+  type: string
+  description:
+    en: Client ID passed to librdkafka.
+    es: ID de cliente pasado a librdkafka.
+    pt: ID de cliente passado ao librdkafka.
+- key: group_id
+  type: string
+  default: fluent-bit
+  description:
+    en: Consumer group ID passed to librdkafka.
+    es: ID del grupo de consumidores pasado a librdkafka.
+    pt: ID do grupo de consumidores passado ao librdkafka.
+- key: enable_auto_commit
+  type: bool
+  default: false
+  advanced: true
+  description:
+    en: Uses Kafka auto-commit, committing in batches.
+    es: Usa el auto-commit de Kafka, confirmando por lotes.
+    pt: Usa o auto-commit do Kafka, confirmando em lotes.
+- key: buffer_max_size
+  type: size
+  default: 4M
+  advanced: true
+  description:
+    en: Maximum buffer per poll cycle; larger values raise throughput.
+    es: Búfer máximo por ciclo de sondeo; valores mayores aumentan el rendimiento.
+    pt: Buffer máximo por ciclo de poll; valores maiores aumentam a vazão.
+- key: poll_ms
+  type: integer
+  default: 500
+  advanced: true
+  description:
+    en: Broker polling interval in milliseconds.
+    es: Intervalo de sondeo al broker en milisegundos.
+    pt: Intervalo de poll no broker em milissegundos.
+- key: poll_timeout_ms
+  type: integer
+  default: 1
+  advanced: true
+  description:
+    en: Consumer poll timeout in milliseconds; applies only with threaded enabled.
+    es: Tiempo de espera del sondeo del consumidor en ms; solo con threaded activo.
+    pt: Timeout do poll do consumidor em ms; só com threaded ativo.
+- key: rdkafka.*
+  type: string
+  multi: 'no'
+  advanced: true
+  description:
+    en: Any librdkafka property, set as rdkafka.<property>.
+    es: Cualquier propiedad de librdkafka, definida como rdkafka.<propiedad>.
+    pt: Qualquer propriedade do librdkafka, definida como rdkafka.<propriedade>.

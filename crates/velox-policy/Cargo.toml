@@ -1,0 +1,35 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Shared by all three sides (ADR-068): the core COMPILES a policy (it owns the
+# registry client and the signing keyring, so it is the only place a verified
+# package exists), Velox Mesh stores and serves the result, and Velox Agent
+# applies it. Pure — no Kubernetes, no HTTP, no crypto — which is what lets it
+# sit in `crates/` beside `velox-integrations` rather than inside either
+# workspace.
+[package]
+name = "velox-policy"
+description = "Pure policy model and compiler: policy + integration fragments -> collector configs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+authors = ["Tornis Desenvolvimento <tornis@tornis.com.br>"]
+repository = "https://github.com/tornis-tecnologia/veloxsearch-oss"
+publish = false
+
+[lints.clippy]
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
+
+[dependencies]
+velox-integrations = { path = "../velox-integrations" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The Spec 2.0 compiler builds the Fluent Bit YAML document as an object and
+# serialises it (ADR-074 decision 6) — never text concatenation. Same crate
+# and major as `velox-integrations`, so a package's YAML and the compiled
+# YAML agree on one parser.
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2"

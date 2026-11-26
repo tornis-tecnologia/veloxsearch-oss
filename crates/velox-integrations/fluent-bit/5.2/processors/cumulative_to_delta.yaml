@@ -1,0 +1,56 @@
+kind: processor
+name: cumulative_to_delta
+title:
+  en: Cumulative to Delta
+  es: Cumulative to Delta
+  pt: Cumulative to Delta
+description:
+  en: Converts cumulative metrics (monotonic sums and histograms) into delta metrics.
+  es: Convierte metricas acumulativas (sumas monotonicas e histogramas) en metricas delta.
+  pt: Converte metricas cumulativas (somas monotonicas e histogramas) em metricas delta.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/processors/cumulative-to-delta
+event_types:
+- metrics
+verified: true
+params:
+- key: drop_first
+  type: bool
+  description:
+    en: Whether the first sample of a new series is dropped; used only when initial_value is unset.
+    es: Si se descarta la primera muestra de una serie nueva; solo se usa si initial_value no esta definido.
+    pt: Se a primeira amostra de uma serie nova e descartada; usado apenas quando initial_value nao esta
+      definido.
+  default: true
+- key: drop_on_reset
+  type: bool
+  description:
+    en: Drops the sample that triggers a counter or histogram reset.
+    es: Descarta la muestra que provoca un reinicio de contador o histograma.
+    pt: Descarta a amostra que provoca um reinicio de contador ou histograma.
+  default: true
+- key: initial_value
+  type: select
+  description:
+    en: How the first sample of a new series is handled.
+    es: Como se trata la primera muestra de una serie nueva.
+    pt: Como a primeira amostra de uma serie nova e tratada.
+  options:
+  - auto
+  - keep
+  - drop
+- key: max_series
+  type: integer
+  description:
+    en: Maximum number of series tracked in memory; 0 disables size-based eviction.
+    es: Numero maximo de series en memoria; 0 desactiva el desalojo por tamano.
+    pt: Numero maximo de series em memoria; 0 desativa a remocao por tamanho.
+  default: 65536
+  advanced: true
+- key: max_staleness
+  type: duration
+  description:
+    en: How long state is kept after a series stops reporting; 0 disables staleness eviction.
+    es: Cuanto tiempo se conserva el estado tras dejar de reportar una serie; 0 desactiva el desalojo.
+    pt: Quanto tempo o estado e mantido apos uma serie parar de reportar; 0 desativa a remocao.
+  default: 1h
+  advanced: true

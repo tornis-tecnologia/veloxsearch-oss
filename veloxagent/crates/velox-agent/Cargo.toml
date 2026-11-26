@@ -1,0 +1,36 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+
+[package]
+name = "velox-agent"
+description = "Velox Agent: supervises Fluent Bit and the OpenTelemetry Collector on a host under Velox Mesh policies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Just `kill(2)`: the agent has to be able to stop an engine that is no longer
+# its child (a process left behind by a previous agent run), and std has no
+# way to signal a non-child pid. libc is the smallest possible surface for
+# that — no runtime, no abstraction layer.
+libc = "0.2"
+velox-opamp = { path = "../velox-opamp" }
+# Only to name the engine the way the compiler names it: a test here asserts
+# the key the agent looks for is the one `velox_policy::Engine` serialises,
+# so a rename on either side fails the build instead of silently delivering
+# an empty configuration.
+velox-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The check-in loop. Outbound only: the agent has no listening socket, which
+# is what lets it live behind NAT (ARCHITECTURE.md §4.3).
+reqwest.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

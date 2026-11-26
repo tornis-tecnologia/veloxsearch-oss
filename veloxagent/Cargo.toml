@@ -1,0 +1,69 @@
+# Copyright (C) 2026 Tornis Desenvolvimento
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# The Velox Mesh / Velox Agent workspace. Same licence as the core
+# (AGPL-3.0-only) but deliberately NOT a member of the root crate: separate
+# binaries, separate images, HTTP between them (ADR-068). The agent is a
+# static binary for hosts outside the cluster and must not pull in kube or the
+# console's stack; the controller releases on its own cadence.
+#
+#   cd veloxagent && cargo test            # everything here
+#   cd veloxagent && cargo build --release # target/release/velox-mesh, velox-agent
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+# Same MSRV as the core so one toolchain builds both.
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+authors = ["Tornis Desenvolvimento <tornis@tornis.com.br>"]
+repository = "https://github.com/tornis-tecnologia/veloxsearch-oss"
+publish = false
+
+# Versions follow the core's Cargo.lock where the crate is shared, so a
+# developer with the core built has the sources cached and the two trees never
+# disagree on a wire format (serde_json, serde_yaml).
+[workspace.dependencies]
+# The integration-package contract, shared with the core (ADR-068). The one
+# path outside this workspace, on purpose: it is what makes "an integration
+# written for the core works unchanged under Velox Mesh" true by construction.
+velox-integrations = { path = "../crates/velox-integrations" }
+velox-policy = { path = "../crates/velox-policy" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+# Canonical hashes of compiled configs and licence documents.
+sha2 = "0.10"
+base64 = "0.23"
+# ed25519 for licence verification — the SAME provider the core uses for
+# registry signatures and as its rustls backend. One crypto stack across the
+# product; never add ring or dalek next to it.
+aws-lc-rs = { version = "1.17", default-features = false, features = ["aws-lc-sys"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "signal"] }
+axum = "0.8"
+# The Mesh's only state (ARCHITECTURE.md §4.1). Deliberately the bare driver
+# and a hand-rolled migration runner, exactly like the core's `db.rs`: the
+# query layer is a later, separate decision, and two trees running two ORMs
+# over one product's conventions would be worse than none.
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+# The agent's HTTP client (OpAMP over plain HTTP) and the core's reach into
+# the Mesh. rustls + aws-lc-rs to match the one crypto provider this product
+# links; `rustls-tls` is NOT used because it drags in ring as a second one.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots-no-provider",
+    "json",
+] }
+# Named explicitly because the `-no-provider` reqwest feature above leaves
+# installing the process-wide crypto provider to the caller — the same
+# invariant the core keeps in its `main()`. One provider per process; a
+# second one makes which is in force a function of link order.
+rustls = "0.23"
+
+[workspace.lints.clippy]
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"

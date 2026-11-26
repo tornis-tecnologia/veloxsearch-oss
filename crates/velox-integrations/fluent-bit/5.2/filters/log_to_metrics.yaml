@@ -1,0 +1,145 @@
+kind: filter
+name: log_to_metrics
+title:
+  en: Log to Metrics
+  es: Log to Metrics
+  pt: Log to Metrics
+description:
+  en: Accepts log records and emits metric events (counter, gauge or histogram) generated from them; the
+    metrics are emitted under a new tag, so the filter is not attachable as an input processor on the
+    page.
+  es: Acepta registros de log y emite eventos de métrica (counter, gauge o histogram) generados a partir
+    de ellos; las métricas salen con una nueva etiqueta y la página no lo documenta como processor de
+    entrada.
+  pt: Aceita registros de log e emite eventos de métrica (counter, gauge ou histogram) gerados a partir
+    deles; as métricas saem com uma nova tag e a página não o documenta como processor de entrada.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/log_to_metrics
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: metric_mode
+  type: select
+  default: counter
+  options:
+  - counter
+  - gauge
+  - histogram
+  description:
+    en: 'Metric type to generate: counter, gauge or histogram.'
+    es: 'Tipo de métrica a generar: counter, gauge o histogram.'
+    pt: 'Tipo de métrica a gerar: counter, gauge ou histogram.'
+- key: metric_name
+  type: string
+  default: a
+  description:
+    en: Name of the generated metric.
+    es: Nombre de la métrica generada.
+    pt: Nome da métrica gerada.
+- key: metric_description
+  type: string
+  description:
+    en: Description of the generated metric.
+    es: Descripción de la métrica generada.
+    pt: Descrição da métrica gerada.
+- key: metric_namespace
+  type: string
+  default: log_metric
+  description:
+    en: Namespace of the generated metric.
+    es: Namespace de la métrica generada.
+    pt: Namespace da métrica gerada.
+- key: metric_subsystem
+  type: string
+  description:
+    en: Subsystem of the generated metric.
+    es: Subsistema de la métrica generada.
+    pt: Subsistema da métrica gerada.
+- key: value_field
+  type: string
+  description:
+    en: Numeric record field used by gauge and histogram modes; ignored in counter mode.
+    es: Campo numérico del registro usado por los modos gauge e histogram; ignorado en counter.
+    pt: Campo numérico do registro usado pelos modos gauge e histogram; ignorado em counter.
+- key: bucket
+  type: string
+  multi: repeat
+  description:
+    en: Histogram bucket boundary; repeat for each bucket (Prometheus defaults apply if unset).
+    es: Límite de bucket del histograma; repetir para cada bucket (valores Prometheus por defecto si no
+      se define).
+    pt: Limite de bucket do histograma; repetir para cada bucket (padrões do Prometheus se não definido).
+- key: add_label
+  type: string
+  multi: repeat
+  description:
+    en: 'Adds a label NAME whose value comes from record KEY (format: NAME KEY).'
+    es: 'Agrega una etiqueta NAME cuyo valor viene de la clave KEY del registro (formato: NAME KEY).'
+    pt: 'Adiciona um rótulo NAME cujo valor vem da chave KEY do registro (formato: NAME KEY).'
+- key: label_field
+  type: string
+  multi: repeat
+  description:
+    en: Record field used as a label dimension (record accessor notation supported).
+    es: Campo del registro usado como dimensión de etiqueta (admite record accessor).
+    pt: Campo do registro usado como dimensão de rótulo (suporta record accessor).
+- key: regex
+  type: regex
+  multi: repeat
+  description:
+    en: 'Only records whose KEY value matches the regex generate metrics (format: KEY REGEX).'
+    es: 'Solo los registros cuyo valor de KEY coincide con la regex generan métricas (formato: KEY REGEX).'
+    pt: 'Apenas registros cujo valor de KEY casa com a regex geram métricas (formato: KEY REGEX).'
+- key: exclude
+  type: regex
+  multi: repeat
+  description:
+    en: 'Records whose KEY value matches the regex do not generate metrics (format: KEY REGEX).'
+    es: 'Los registros cuyo valor de KEY coincide con la regex no generan métricas (formato: KEY REGEX).'
+    pt: 'Registros cujo valor de KEY casa com a regex não geram métricas (formato: KEY REGEX).'
+- key: kubernetes_mode
+  type: bool
+  default: false
+  description:
+    en: Adds Kubernetes metadata fields as labels.
+    es: Agrega los campos de metadatos de Kubernetes como etiquetas.
+    pt: Adiciona os campos de metadados do Kubernetes como rótulos.
+- key: discard_logs
+  type: bool
+  default: false
+  description:
+    en: Discards all logs after processing, whether or not they produced metrics.
+    es: Descarta todos los logs tras procesarlos, hayan generado métricas o no.
+    pt: Descarta todos os logs após o processamento, tenham gerado métricas ou não.
+- key: flush_interval_sec
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Emission interval in seconds; 0 together with flush_interval_nsec emits after each match.
+    es: Intervalo de emisión en segundos; 0 junto con flush_interval_nsec emite tras cada coincidencia.
+    pt: Intervalo de emissão em segundos; 0 junto com flush_interval_nsec emite a cada correspondência.
+- key: flush_interval_nsec
+  type: integer
+  default: 0
+  advanced: true
+  description:
+    en: Emission interval in nanoseconds, added to flush_interval_sec.
+    es: Intervalo de emisión en nanosegundos, sumado a flush_interval_sec.
+    pt: Intervalo de emissão em nanossegundos, somado a flush_interval_sec.
+- key: emitter_name
+  type: string
+  advanced: true
+  description:
+    en: Name of the internal metrics emitter instance.
+    es: Nombre de la instancia emisora interna de métricas.
+    pt: Nome da instância emissora interna de métricas.
+- key: emitter_mem_buf_limit
+  type: size
+  default: 10M
+  advanced: true
+  description:
+    en: Memory buffer limit of the internal metrics emitter.
+    es: Límite del búfer de memoria del emisor interno de métricas.
+    pt: Limite do buffer de memória do emissor interno de métricas.

@@ -1,0 +1,60 @@
+kind: filter
+name: nest
+title:
+  en: Nest
+  es: Nest
+  pt: Nest
+description:
+  en: Nests record keys matching a wildcard under a new key, or lifts nested keys to the top level; not
+    listed as an input processor on the processors page.
+  es: Anida bajo una nueva clave las claves que coinciden con un comodín, o sube claves anidadas al nivel
+    superior; no figura como processor de entrada en la página de processors.
+  pt: Aninha sob uma nova chave as chaves que casam com um curinga, ou eleva chaves aninhadas ao nível
+    superior; não consta como processor de entrada na página de processors.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/nest
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: operation
+  type: select
+  required: true
+  options:
+  - nest
+  - lift
+  description:
+    en: 'Mode: nest or lift.'
+    es: 'Modo: nest o lift.'
+    pt: 'Modo: nest ou lift.'
+- key: wildcard
+  type: string
+  multi: repeat
+  description:
+    en: 'With nest: field names matching this wildcard are nested.'
+    es: 'Con nest: se anidan los campos cuyo nombre coincide con este comodín.'
+    pt: 'Com nest: campos cujo nome casa com este curinga são aninhados.'
+- key: nest_under
+  type: string
+  description:
+    en: 'With nest: key under which matching records are nested.'
+    es: 'Con nest: clave bajo la cual se anidan los registros coincidentes.'
+    pt: 'Com nest: chave sob a qual os registros correspondentes são aninhados.'
+- key: nested_under
+  type: string
+  description:
+    en: 'With lift: key whose nested content is lifted.'
+    es: 'Con lift: clave cuyo contenido anidado se sube.'
+    pt: 'Com lift: chave cujo conteúdo aninhado é elevado.'
+- key: add_prefix
+  type: string
+  description:
+    en: Prefix added to affected keys; works with any operation.
+    es: Prefijo agregado a las claves afectadas; funciona con cualquier operación.
+    pt: Prefixo adicionado às chaves afetadas; funciona com qualquer operação.
+- key: remove_prefix
+  type: string
+  description:
+    en: Prefix removed from affected keys when it matches; works with any operation.
+    es: Prefijo eliminado de las claves afectadas si coincide; funciona con cualquier operación.
+    pt: Prefixo removido das chaves afetadas quando casa; funciona com qualquer operação.

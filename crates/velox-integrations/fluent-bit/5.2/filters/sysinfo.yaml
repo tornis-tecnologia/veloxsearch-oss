@@ -1,0 +1,47 @@
+kind: filter
+name: sysinfo
+title:
+  en: Sysinfo
+  es: Sysinfo
+  pt: Sysinfo
+description:
+  en: Appends system information such as the Fluent Bit version or hostname to records.
+  es: Agrega a los registros información del sistema, como la versión de Fluent Bit o el hostname.
+  pt: Acrescenta aos registros informações do sistema, como a versão do Fluent Bit ou o hostname.
+docs_url: https://docs.fluentbit.io/manual/data-pipeline/filters/sysinfo
+event_types:
+- logs
+as_processor: true
+verified: true
+params:
+- key: fluentbit_version_key
+  type: string
+  description:
+    en: Key name under which the Fluent Bit version is added.
+    es: Nombre de la clave donde se agrega la versión de Fluent Bit.
+    pt: Nome da chave onde a versão do Fluent Bit é adicionada.
+- key: hostname_key
+  type: string
+  description:
+    en: Key name under which the hostname is added.
+    es: Nombre de la clave donde se agrega el hostname.
+    pt: Nome da chave onde o hostname é adicionado.
+- key: kernel_version_key
+  type: string
+  description:
+    en: Key name for the kernel version (Linux only; not supported on some platforms).
+    es: Nombre de la clave para la versión del kernel (solo Linux; no soportado en algunas plataformas).
+    pt: Nome da chave para a versão do kernel (somente Linux; não suportado em algumas plataformas).
+- key: os_name_key
+  type: string
+  description:
+    en: Key name for the operating system name, for example Linux, win64 or macOS.
+    es: Nombre de la clave para el nombre del sistema operativo, por ejemplo Linux, win64 o macOS.
+    pt: Nome da chave para o nome do sistema operacional, por exemplo Linux, win64 ou macOS.
+- key: os_version_key
+  type: string
+  description:
+    en: Key name for the operating system version (Linux only; not supported on some platforms).
+    es: Nombre de la clave para la versión del sistema operativo (solo Linux; no soportado en algunas
+      plataformas).
+    pt: Nome da chave para a versão do sistema operacional (somente Linux; não suportado em algumas plataformas).

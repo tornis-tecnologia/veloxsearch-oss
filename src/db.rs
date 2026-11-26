@@ -216,6 +216,111 @@ async fn connect(cfg: &PgConfig, password: &str) -> Result<tokio_postgres::Clien
     Ok(client)
 }
 
+/// The superuser password, for the ONE thing the app does as superuser:
+/// provisioning the Velox Mesh's role and database (ADR-072 amendment 5).
+/// Same fail-closed read as the app password.
+async fn superuser_password(client: &Client) -> Result<String> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), crate::k8s::ns());
+    let secret = secrets
+        .get_opt(PG_SECRET)
+        .await?
+        .with_context(|| format!("Secret {PG_SECRET} not found in {}", crate::k8s::ns()))?;
+    secret
+        .data
+        .as_ref()
+        .and_then(|d| d.get(KEY_SUPERUSER_PW))
+        .map(|b| String::from_utf8_lossy(&b.0).into_owned())
+        .filter(|p| !p.is_empty())
+        .with_context(|| format!("Secret {PG_SECRET} has no {KEY_SUPERUSER_PW} key"))
+}
+
+/// The statements that make `velox_mesh` exist with `password`, given what
+/// exists (pure, so the exact SQL is tested). The role is created or has its
+/// password set — the Mesh's Secret is the source of truth for it — and the
+/// database is created only when missing: a reinstall never drops data. No
+/// superuser, no CREATEDB, no CREATEROLE (ADR-041's least privilege).
+/// DDL takes no bind parameters, so the password is a quoted literal; it is
+/// always our own hex, and quoting is applied regardless.
+pub fn mesh_database_sql(role_exists: bool, db_exists: bool, password: &str) -> Vec<String> {
+    let pw = password.replace('\'', "''");
+    let mut out = vec![if role_exists {
+        format!(
+            "ALTER ROLE velox_mesh WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '{pw}'"
+        )
+    } else {
+        format!("CREATE ROLE velox_mesh LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '{pw}'")
+    }];
+    if !db_exists {
+        out.push("CREATE DATABASE velox_mesh OWNER velox_mesh".into());
+        out.push("REVOKE ALL ON DATABASE velox_mesh FROM PUBLIC".into());
+    }
+    out
+}
+
+/// Ensure the Velox Mesh's role and database on the installation's Postgres
+/// (deploy/mesh/mesh.yaml step 1, done by the install button). The only
+/// superuser connection the app makes: `velox` has no CREATEROLE by design,
+/// and the alternative — `exec` into the database pod — would grant the
+/// app `pods/exec` on every pod of its namespace. Connection-per-call, closed
+/// when this returns.
+pub async fn ensure_mesh_database(password: &str) -> Result<()> {
+    let cfg = PgConfig::from_env()?;
+    let kube = crate::k8s::client().await?;
+    let su = superuser_password(&kube).await?;
+    let admin = PgConfig {
+        dbname: "postgres".into(),
+        user: "postgres".into(),
+        ..cfg
+    };
+    let pg = connect(&admin, &su).await?;
+    let role_exists = !pg
+        .query("SELECT 1 FROM pg_roles WHERE rolname = 'velox_mesh'", &[])
+        .await?
+        .is_empty();
+    let db_exists = !pg
+        .query(
+            "SELECT 1 FROM pg_database WHERE datname = 'velox_mesh'",
+            &[],
+        )
+        .await?
+        .is_empty();
+    for stmt in mesh_database_sql(role_exists, db_exists, password) {
+        // CREATE DATABASE cannot run inside a transaction block, so each
+        // statement is its own simple query.
+        pg.batch_execute(&stmt).await.with_context(|| {
+            format!(
+                "provisioning the Mesh database: {}",
+                stmt.split(" PASSWORD").next().unwrap_or("")
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Drop the Velox Mesh's database and role (uninstall with purge, ADR-072
+/// amendment 5). `WITH (FORCE)` ends the Mesh's own connection if its pod is
+/// still terminating; `IF EXISTS` makes a second purge a no-op.
+pub async fn drop_mesh_database() -> Result<()> {
+    let cfg = PgConfig::from_env()?;
+    let kube = crate::k8s::client().await?;
+    let su = superuser_password(&kube).await?;
+    let admin = PgConfig {
+        dbname: "postgres".into(),
+        user: "postgres".into(),
+        ..cfg
+    };
+    let pg = connect(&admin, &su).await?;
+    for stmt in [
+        "DROP DATABASE IF EXISTS velox_mesh WITH (FORCE)",
+        "DROP ROLE IF EXISTS velox_mesh",
+    ] {
+        pg.batch_execute(stmt)
+            .await
+            .with_context(|| stmt.to_string())?;
+    }
+    Ok(())
+}
+
 /// Open a fresh application connection for a control-plane query (#79).
 ///
 /// Deliberately connection-per-operation rather than a pool: every caller is a
@@ -323,6 +428,24 @@ pub async fn bring_up() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-072 amendment 5: a reinstall resets the role's password to the
+    /// Secret's and never touches an existing database; a first install
+    /// creates both, least-privilege, and closes the database to PUBLIC.
+    #[test]
+    fn the_mesh_database_sql_creates_once_and_never_drops() {
+        let first = mesh_database_sql(false, false, "abc");
+        assert_eq!(first.len(), 3);
+        assert!(first[0]
+            .starts_with("CREATE ROLE velox_mesh LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE"));
+        assert!(first[1].contains("OWNER velox_mesh"));
+        assert!(first[2].starts_with("REVOKE ALL"));
+        let again = mesh_database_sql(true, true, "abc");
+        assert_eq!(again.len(), 1);
+        assert!(again[0].starts_with("ALTER ROLE velox_mesh"));
+        assert!(again.iter().all(|s| !s.contains("DROP")));
+        assert!(mesh_database_sql(false, true, "a'b")[0].contains("'a''b'"));
+    }
 
     fn s(v: &str) -> Option<String> {
         Some(v.to_string())

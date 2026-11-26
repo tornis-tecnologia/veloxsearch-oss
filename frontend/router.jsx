@@ -11,8 +11,16 @@
      /deployments               the list
      /deployments/new           the create wizard
      /deployments/:id           → /deployments/:id/overview
-     /deployments/:id/:tab      overview | data | backup | access | config | activity
+     /deployments/:id/:tab      overview | data | backup | access | config | activity | mesh
+     /deployments/:id/mesh/:sub overview | policies | settings | add-agent (ADR-072: the
+                                Mesh is the deployment's; `agents` → overview;
+                                add-agent?policy=<id> starts the page on that policy)
+     /deployments/:id/data?integration=<id>&policy=<cluster|id>
+                                opens the add-integration dialog on that
+                                integration and/or with that target preselected
+                                (ADR-073) — one-shot intents, stripped once used
      /capacity
+     /mesh, /mesh/*             → /deployments (the pre-ADR-072 global screen)
      /settings
      /login, /setup             owned by the boot gate (app.jsx), never rendered
                                 as screens by this router
@@ -28,11 +36,19 @@
    ============================================================ */
 import { useState, useEffect, useCallback } from "react";
 
-const TABS = ["overview", "data", "backup", "access", "config", "activity"];
+const TABS = ["overview", "data", "backup", "access", "config", "activity", "mesh"];
+// The Mesh tab's sub-screens (ADR-072). Same rule as the deployment tabs:
+// an unknown segment falls back rather than 404ing a bookmark.
+const MESH_TABS = ["overview", "policies", "settings", "add-agent"];
+// The pre-merge Agents sub-tab: the fleet is the overview now.
+const MESH_ALIASES = { agents: "overview" };
 const TAB_ALIASES = {
   edit: "config", integrations: "data", snapshot: "backup",
   security: "access", auth: "access",
 };
+// An integration id is a package component (catalog::valid_component):
+// lowercase, digits, dashes. Anything else on the query string is dropped.
+const INTEGRATION_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 function parse(pathname, search) {
   const q = new URLSearchParams(search || "");
@@ -46,9 +62,27 @@ function parse(pathname, search) {
       let tab = seg[2] || "overview";
       tab = TAB_ALIASES[tab] || tab;
       if (!TABS.includes(tab)) tab = "overview";
-      return { name: "deployment", id, tab, upgrade: q.get("upgrade") === "1" };
+      const r = { name: "deployment", id, tab, upgrade: q.get("upgrade") === "1" };
+      if (tab === "mesh") {
+        const sub = MESH_ALIASES[seg[3]] || seg[3];
+        r.sub = MESH_TABS.includes(sub) ? sub : "overview";
+        // An aliased sub-tab is replaced on the URL (app.jsx), so the
+        // canonical path is what the bar shows and the Back button keeps.
+        if (MESH_ALIASES[seg[3]]) r.redirect = pathFor(r);
+      }
+      // One-shot intents for the Data tab's onboarding (ADR-073): the
+      // integration to open the dialog on, and/or the policy to preselect
+      // as its target ("cluster" or a policy id). The Mesh tab sends them.
+      const integ = q.get("integration") || "";
+      if (INTEGRATION_RE.test(integ)) r.integration = integ;
+      const policy = q.get("policy") || "";
+      if (INTEGRATION_RE.test(policy)) r.policy = policy;
+      return r;
     }
     case "capacity": return { name: "capacity" };
+    // The pre-ADR-072 global screen. A bookmark lands on the list, where
+    // every deployment has its own Mesh tab; app.jsx replaces the URL.
+    case "mesh": return { name: "deployments", redirect: "/deployments" };
     case "settings": return { name: "settings" };
     case "login": case "setup": return { name: "auth" };
     default: return { name: "deployments" };
@@ -58,7 +92,15 @@ function parse(pathname, search) {
 function pathFor(r) {
   switch (r.name) {
     case "create": return "/deployments/new";
-    case "deployment": return `/deployments/${r.id}/${r.tab || "overview"}${r.upgrade ? "?upgrade=1" : ""}`;
+    case "deployment": {
+      const tab = r.tab || "overview";
+      const sub = tab === "mesh" && r.sub && r.sub !== "overview" ? `/${r.sub}` : "";
+      const q = [];
+      if (r.upgrade) q.push("upgrade=1");
+      if (r.integration) q.push(`integration=${encodeURIComponent(r.integration)}`);
+      if (r.policy) q.push(`policy=${encodeURIComponent(r.policy)}`);
+      return `/deployments/${r.id}/${tab}${sub}${q.length ? `?${q.join("&")}` : ""}`;
+    }
     case "capacity": return "/capacity";
     case "settings": return "/settings";
     default: return "/deployments";
@@ -105,4 +147,4 @@ function nextAfterLogin() {
   return /^\/(?!\/)[A-Za-z0-9/_-]*$/.test(n) && n !== "/login" && n !== "/setup" ? n : "/deployments";
 }
 
-export { useRouter, parse as parseRoute, pathFor, nextAfterLogin, TABS as DEPLOYMENT_TABS };
+export { useRouter, parse as parseRoute, pathFor, nextAfterLogin, TABS as DEPLOYMENT_TABS, MESH_TABS };
