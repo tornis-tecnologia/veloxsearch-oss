@@ -160,8 +160,10 @@ sudo bash install-veloxsearch-full.sh platform --expect-nodes N
 `sudo bash install-veloxsearch-full.sh install --expect-nodes 1` does the whole
 thing in one step. VeloxSearch needs at least 8 GiB schedulable RAM across
 the cluster (R4), so a small server needs an agent before you create a
-deployment. Longhorn keeps fewer than three replicas until there are three
-nodes.
+deployment. With fewer than three nodes, the Postgres volume starts
+`degraded` (three replicas wanted, at most one per node) but attaches and
+serves; once the app sizes Longhorn's replica count to the nodes, volumes are
+`healthy`.
 
 ---
 
