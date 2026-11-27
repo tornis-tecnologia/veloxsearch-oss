@@ -21,6 +21,9 @@ are called out explicitly.
   - It runs from node 1 over SSH (`install --peers`) or node by node
     (`init`/`join`/`platform`).
   - The release now also publishes `longhorn.yaml`.
+  - One server works too, and `join --agent` adds machines as k3s agents
+    (workers, no etcd), with the token on stdin; it is the single from-zero
+    route in INSTALL.md and the READMEs. k3s is pinned at v1.36.6+k3s1.
 
 ## [0.15.0] - 2026-11-26
 
