@@ -48,7 +48,7 @@ path leaves to each operator, and each one is easy to get wrong:
    default exists, the control-plane Postgres claim also lands on Longhorn,
    with three replicas.
 4. **Node preparation is part of the install**, as are its checks:
-   - Hard preflight: systemd, amd64, at least 4 GiB, 2 vCPU, 30 GiB on
+   - Hard preflight: systemd, amd64, at least 4 GiB, 2 vCPU, 30 GiB free on
      `/var/lib`, free ports, a unique hostname, no other kubelet, and egress.
    - Packages: open-iscsi, the NFS client and cryptsetup, plus the
      modules-load and sysctl files.
@@ -64,7 +64,18 @@ path leaves to each operator, and each one is easy to get wrong:
      node 1. The join token travels on stdin, never in an argument.
    - `init` / `join` / `platform` is the same thing, one node at a time,
      for sites without SSH between servers.
-6. **The admin stays out of it.** The script ends at "open `/setup`". The
+6. **Agents, and a single server.** `join --agent` adds a machine as a
+   k3s agent: it runs workloads and Longhorn replicas but holds no etcd
+   member and no API server, so the etcd quorum stays the three servers'.
+   It takes the same server token, by `--token-file`, `--token-stdin` or
+   `VELOX_K3S_TOKEN`, and refuses to run without one. `init` and
+   `platform --expect-nodes N` (or `install --expect-nodes 1`) also make a
+   single-server cluster, with or without agents, for evaluation and small
+   sites; it has no control-plane redundancy. This absorbs the
+   one-server-plus-agents installer of #192, so there is one from-zero
+   script. A separate agent-only token (k3s `agent-token`), so agents never
+   hold a secret that admits a server, is a possible follow-up.
+7. **The admin stays out of it.** The script ends at "open `/setup`". The
    admin password is chosen in the browser and never passes through a
    script, an argument or a log. cert-manager and the operator stay the
    app's first-run job (bootstrap.rs), as on any cluster.

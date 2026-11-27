@@ -1,8 +1,15 @@
 # Installing VeloxSearch — minikube · k0s · k3s · vanilla k8s
 
-This is the **canonical install guide.** On a cluster you already have, installing
-is one command — the image is published to a **public registry**, so the cluster
-pulls it anonymously and there is no client binary to install:
+This is the **canonical install guide.** There are two routes, and the only
+question that picks one is whether you already have Kubernetes:
+
+| You have… | Route | What you run |
+|---|---|---|
+| **Bare Linux servers or VMs** (no Kubernetes) | **A. From zero**: [§0](#0-no-kubernetes-cluster-yet) | `install-veloxsearch-full.sh`: it builds k3s, then installs Longhorn and VeloxSearch |
+| **A Kubernetes cluster** (any of §1) | **B. Existing Kubernetes**: below | one `kubectl apply` of the release manifest |
+
+**B. Existing Kubernetes.** The image is published to a **public registry**, so
+the cluster pulls it anonymously and there is no client binary to install:
 
 ```bash
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
@@ -12,7 +19,7 @@ kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80
 # open http://localhost:3000 — first run: create the admin account
 ```
 
-No cluster yet? Start at [§0](#0-no-kubernetes-cluster-yet). Pulling from a
+No cluster yet? That is route A: start at [§0](#0-no-kubernetes-cluster-yet). Pulling from a
 private mirror instead of the public image? That is the one case the `velox` CLI
 exists for — see [§2b](#2b-private-mirror-authenticated-pull--alternative) and
 [`INSTALLER.md`](INSTALLER.md).
@@ -43,33 +50,28 @@ already there.
 
 ## 0. No Kubernetes cluster yet?
 
-VeloxSearch installs *into* a Kubernetes cluster. On bare servers, the full
-installer builds that cluster for you (ADR-075).
+Route A. VeloxSearch installs *into* a Kubernetes cluster. On bare servers,
+one script, `install-veloxsearch-full.sh`, builds that cluster for you and then
+does route B on it (ADR-075):
 
-- **Three Linux servers (production, redundant):** use
-  `install-veloxsearch-full.sh`, described in [§0a](#0a-three-servers-the-full-installer).
-  It installs a k3s HA cluster, Longhorn and VeloxSearch.
-- **One Linux server or VM** (amd64, ≥ 12 GiB RAM / 4 vCPU recommended — see R4):
-  install single-node k3s with its official one-liner, then follow
-  [§3b](#3b-k3s-verified--k3s-greenfield) for the Longhorn node packages and
-  the kubeconfig:
-
-  ```bash
-  curl -sfL https://get.k3s.io | sh -    # k3s quick start: https://docs.k3s.io/quick-start
-  ```
-
-- **A laptop** with Docker or a hypervisor: minikube, sized above the R4 floor —
-  [§3a](#3a-minikube) has the exact `minikube start` line.
-
-Either way, once `kubectl get nodes` shows a `Ready` node, the one-command install
-at the top of this page is all that is left.
+- **Three Linux servers (production, redundant):** a k3s HA cluster on
+  embedded etcd, Longhorn and VeloxSearch. See
+  [§0a](#0a-three-servers-the-full-installer).
+- **One Linux server or VM**, optionally with more machines joined as k3s
+  agents (workers): the same script with a single server. See
+  [§0b](#0b-one-server-and-agents). Losing that server loses the control
+  plane, so this is for evaluation and small sites.
+- **A laptop** with Docker or a hypervisor: minikube, sized above the R4 floor.
+  [§3a](#3a-minikube) has the exact `minikube start` line; then follow route B.
 
 ### 0a. Three servers: the full installer
 
 `install-veloxsearch-full.sh` turns three bare Linux servers into a redundant
 VeloxSearch. It needs amd64, systemd, and Debian/Ubuntu, RHEL/Rocky/Alma, Amazon
 Linux or SUSE. Each node needs at least 4 GiB RAM (8 GiB or more recommended), 2 vCPU,
-and 30 GiB free on `/var/lib` (100 GiB or more recommended). Every node also needs a
+and 30 GiB of **free space** on `/var/lib`, not disk size: a 30 GiB disk leaves
+about 27 GiB free and fails (100 GiB or more recommended). The install itself
+takes 8–9 GiB, so a re-run on a node already set up only warns below 30 GiB. Every node also needs a
 unique hostname and outbound access to get.k3s.io, github.com and Docker Hub.
 
 The script does the following:
@@ -92,13 +94,16 @@ The script does the following:
    The script ends by printing each node's URL.
 
 **From node 1, reaching the others over SSH.** This needs key-based SSH and
-either passwordless sudo or root:
+either passwordless sudo or root on the peers. Run it with `sudo` from the user
+who holds the SSH key: ssh then runs as that user, with its keys and agent.
+`--ssh-user` is the login on the peers (default: that same user); `--ssh-key
+FILE` uses that key instead, and ssh then runs as root.
 
 ```bash
 base=https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download
 curl -fsSLO "$base/install-veloxsearch-full.sh" && curl -fsSLO "$base/SHA256SUMS"
 sha256sum --ignore-missing -c SHA256SUMS
-sudo bash install-veloxsearch-full.sh install --peers 10.0.0.12,10.0.0.13 --ssh-user ubuntu
+sudo bash install-veloxsearch-full.sh install --peers 10.0.0.12,10.0.0.13      # add --ssh-user ubuntu if the peers' login differs
 ```
 
 **Node by node, with no SSH between them:**
@@ -129,9 +134,34 @@ Two other commands:
 - `preflight` checks a node without changing anything.
 - `status` shows nodes, storage and pods.
 
-`uninstall` removes k3s from one node. It asks for the hostname first, and
+`uninstall` removes k3s from one node, server or agent. It asks for the
+hostname first (with no terminal, pass `--confirm <hostname>`), and
 `--purge-data` also deletes `/var/lib/longhorn`. Run `--help` for the full
 list.
+
+### 0b. One server, and agents
+
+The same script with a single server. Machines added later join as **k3s
+agents**: they run workloads and Longhorn replicas but hold no etcd member and
+no API server. Agents can also join a three-server cluster from §0a.
+
+```bash
+# the server
+sudo bash install-veloxsearch-full.sh init
+sudo cat /var/lib/rancher/k3s/server/token > token     # a secret: copy it to each agent
+# each further machine (optional)
+sudo bash install-veloxsearch-full.sh join --agent --server https://10.0.0.11:6443 --token-stdin < token
+# the server, once every machine is Ready: N counts the server and the agents
+sudo bash install-veloxsearch-full.sh platform --expect-nodes N
+```
+
+`join` refuses to run without the token (`--token-file`, `--token-stdin` or
+`VELOX_K3S_TOKEN`); `--token-stdin` keeps it out of `ps`. With no agents,
+`sudo bash install-veloxsearch-full.sh install --expect-nodes 1` does the whole
+thing in one step. VeloxSearch needs at least 8 GiB schedulable RAM across
+the cluster (R4), so a small server needs an agent before you create a
+deployment. Longhorn keeps fewer than three replicas until there are three
+nodes.
 
 ---
 

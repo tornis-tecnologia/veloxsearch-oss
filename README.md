@@ -31,19 +31,28 @@ your version over a network, you must offer them its source. [Details below](#li
 
 ## Install
 
+Two routes — pick by whether you already have Kubernetes.
+
+**From zero** (bare Linux servers or VMs): one script builds k3s (three servers
+in HA, or one server with optional agents), installs Longhorn and VeloxSearch,
+then prints the URL.
+
+```bash
+curl -fsSLO https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install-veloxsearch-full.sh
+sudo bash install-veloxsearch-full.sh install --peers 10.0.0.12,10.0.0.13   # one server: install --expect-nodes 1
+```
+
+**Existing Kubernetes**: apply the release manifest.
+
 ```bash
 kubectl apply -f https://github.com/tornis-tecnologia/veloxsearch-oss/releases/latest/download/install.yaml
 ```
 
-Then `kubectl -n veloxsearch-system port-forward svc/veloxsearch 3000:80`, open
-<http://localhost:3000> and create the admin account — the app takes it from
-there. On a cluster with a default IngressClass (a fresh k3s, say) it also
-answers on `http://<node-ip>/`, no port-forward needed.
-
-> **Starting from zero, without a Kubernetes cluster?** Follow
-> [`docs/INSTALL.md`](docs/INSTALL.md#0-no-kubernetes-cluster-yet) — from a bare
-> Linux machine or a laptop to a running UI — or the
-> [user guide on the site](https://get.veloxsearch.ai/docs/en).
+Then open `http://<node-ip>:30080` (or `kubectl -n veloxsearch-system
+port-forward svc/veloxsearch 3000:80` and <http://localhost:3000>) and create
+the admin account — the app takes it from there. Both routes in detail:
+[`docs/INSTALL.md`](docs/INSTALL.md), or the
+[user guide on the site](https://get.veloxsearch.ai/docs/en).
 
 ## Screens
 
