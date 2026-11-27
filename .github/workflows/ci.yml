@@ -57,6 +57,20 @@ jobs:
           done
           echo "install.yaml pins veloxsearch-oss:$version"
 
+      # The full installer (ADR-075) applies this tree's Longhorn bundle on
+      # the k3s it pins; that pair is what was tested. A bundle that moves to
+      # another Longhorn must fail here until the pin is re-tested and
+      # LONGHORN_TESTED follows it.
+      - name: install-veloxsearch-full.sh was tested with this Longhorn bundle
+        run: |
+          set -euo pipefail
+          bundle=$(grep -Eom1 'longhornio/longhorn-manager:v[0-9.]+' deploy/bootstrap/longhorn.yaml | cut -d: -f2)
+          tested=$(sed -n 's/^LONGHORN_TESTED="\(.*\)"$/\1/p' deploy/install-veloxsearch-full.sh)
+          k3s=$(sed -n 's/^K3S_VERSION_DEFAULT="\(.*\)"$/\1/p' deploy/install-veloxsearch-full.sh)
+          [ -n "$k3s" ] || { echo "::error file=deploy/install-veloxsearch-full.sh::no K3S_VERSION_DEFAULT"; exit 1; }
+          [ "$tested" = "$bundle" ] || { echo "::error file=deploy/install-veloxsearch-full.sh::LONGHORN_TESTED=$tested != the bundle's Longhorn $bundle: re-test k3s $k3s with it, then bump"; exit 1; }
+          echo "install-veloxsearch-full.sh: k3s $k3s with Longhorn $bundle"
+
       # release.yml derives the upgrade asset with this script (ADR-057); a
       # manifest it cannot split must fail on the PR, not on the release.
       - name: The upgrade manifest drops only the bootstrap binding and the env ConfigMap

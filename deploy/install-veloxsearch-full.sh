@@ -47,6 +47,10 @@
 #     node 3:  (the same)
 #     node 1:  sudo ./install-veloxsearch-full.sh platform
 #
+#   More machines as k3s agents (workers: no etcd, no control plane), on a
+#   single server or next to the three:
+#     node N:  sudo ./install-veloxsearch-full.sh join --agent --server https://10.0.0.11:6443 --token-stdin < token
+#
 # Every phase checks before it acts, so re-running is safe. Usage: --help
 set -euo pipefail
 
@@ -55,7 +59,11 @@ REPO="${VELOX_REPO:-tornis-tecnologia/veloxsearch-oss}"
 # with a real Longhorn default, k3s v1.36.x). Pinned, not "stable": a fresh
 # install six months from now must get the cluster that was tested, and the
 # vendored Longhorn (v1.8.1) is only claimed for Kubernetes versions we ran.
-K3S_VERSION_DEFAULT="v1.36.4+k3s1"
+K3S_VERSION_DEFAULT="v1.36.6+k3s1"
+# The Longhorn the bundle carries when this k3s pin was last tested with it.
+# CI fails when deploy/bootstrap/longhorn.yaml moves to another Longhorn and
+# this does not, so a new bundle is a reason to re-test the pin.
+LONGHORN_TESTED="v1.8.1"
 IMAGE_REPO="docker.io/tornistecnologia/veloxsearch-oss"
 NS=veloxsearch-system
 # The field manager VeloxSearch's own bootstrap applies Longhorn with
@@ -72,7 +80,7 @@ MODULES_FILE=/etc/modules-load.d/veloxsearch.conf
 POD_CIDR=10.42.0.0/16
 SVC_CIDR=10.43.0.0/16
 
-CMD="" PEERS="" SERVER="" TOKEN_FILE_IN="" TOKEN_STDIN=0 NODE_IP=""
+CMD="" PEERS="" SERVER="" TOKEN_FILE_IN="" TOKEN_STDIN=0 NODE_IP="" AGENT=0
 K3S_VERSION="$K3S_VERSION_DEFAULT" VERSION="" MANIFEST="" LONGHORN=""
 EXPECT_NODES=3 SKIP_FIREWALL=0 KEEP_SWAP=0 SKIP_PREREQS=0 SKIP_PLATFORM=0
 SSH_USER="${SUDO_USER:-root}" SSH_KEY="" SSH_PORT=22 CONFIRM="" PURGE_DATA=0
@@ -86,7 +94,8 @@ Commands:
   install     (on the FIRST node) prepare this node, create the cluster, join
               every --peers node over SSH, then install Longhorn + VeloxSearch
   init        (first node, manual path) prepare + start the first k3s server
-  join        (nodes 2 and 3, manual path) prepare + join --server
+  join        (nodes 2 and 3, manual path) prepare + join --server;
+              with --agent, any further machine joins as a worker
   platform    (any server node, after all have joined) Longhorn + VeloxSearch
   preflight   check this node against the requirements; change nothing
   status      nodes, storage and VeloxSearch pods, as this node sees them
@@ -102,11 +111,14 @@ Cluster:
   --token-file FILE      'join': file holding node 1's
                          ${K3S_SERVER_TOKEN} (it pins the cluster CA)
   --token-stdin          'join': read that token from standard input
+  --agent                'join' as a k3s agent: runs workloads and Longhorn
+                         replicas, holds no etcd member and no API server
   --node-ip IP           this node's cluster address (default: the source
                          address of the default route)
   --tls-san NAME         extra API name/IP (a VIP or DNS name in front of the
                          three nodes); repeatable
-  --expect-nodes N       'platform' waits for N Ready nodes (default 3)
+  --expect-nodes N       'platform' waits for N Ready nodes, agents included
+                         (default 3; 1 for a single server)
   --k3s-version V        k3s release (default ${K3S_VERSION_DEFAULT})
 
 VeloxSearch:
@@ -151,6 +163,7 @@ while [ $# -gt 0 ]; do
     --server) SERVER="${2:?--server needs a URL}"; shift 2 ;;
     --token-file) TOKEN_FILE_IN="${2:?--token-file needs a file}"; shift 2 ;;
     --token-stdin) TOKEN_STDIN=1; shift ;;
+    --agent) AGENT=1; shift ;;
     --node-ip) NODE_IP="${2:?--node-ip needs an address}"; shift 2 ;;
     --tls-san) SANS+=("${2:?--tls-san needs a name}"); shift 2 ;;
     --expect-nodes) EXPECT_NODES="${2:?--expect-nodes needs N}"; shift 2 ;;
@@ -176,8 +189,9 @@ for s in ${SANS[@]+"${SANS[@]}"} ${NODE_IP:+"$NODE_IP"}; do
 done
 [[ "$EXPECT_NODES" =~ ^[1-9][0-9]*$ ]] || die "--expect-nodes must be a positive number"
 [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || die "--ssh-port must be a number"
-[[ "$K3S_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$ ]] || die "--k3s-version looks like v1.36.4+k3s1"
+[[ "$K3S_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$ ]] || die "--k3s-version looks like ${K3S_VERSION_DEFAULT}"
 [ -z "$VERSION" ] || [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "--version looks like 0.15.0"
+[ "$AGENT" -eq 0 ] || [ "$CMD" = join ] || die "--agent goes with 'join'"
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo $0 $CMD ...)"
 [ "$(uname -s)" = Linux ] || die "Linux only"
@@ -200,7 +214,9 @@ fetch_or_copy() { # path-or-url dest
 
 kc() { /usr/local/bin/k3s kubectl "$@"; }
 k3s_ours() { [ -f "$K3S_CONFIG" ] && grep -q "$MARKER" "$K3S_CONFIG"; }
-k3s_present() { [ -x /usr/local/bin/k3s ] || [ -f /etc/systemd/system/k3s.service ]; }
+k3s_present() { [ -x /usr/local/bin/k3s ] || [ -f /etc/systemd/system/k3s.service ] || [ -f /etc/systemd/system/k3s-agent.service ]; }
+# k3s's installer names the unit after the role: k3s (server), k3s-agent.
+k3s_is_agent() { [ -f /etc/systemd/system/k3s-agent.service ]; }
 # uname -n, not hostname(1): minimal images (Amazon Linux, SLES) lack the latter.
 node_name() { uname -n | tr '[:upper:]' '[:lower:]'; }
 
@@ -422,9 +438,20 @@ configure_firewall() {
 }
 
 # ---------------------------------------------------------------------- k3s
-write_k3s_config() { # role: init | join
+write_k3s_config() { # role: init | join | agent
   local s
   install -d -m 0755 /etc/rancher/k3s
+  if [ "$1" = agent ]; then
+    # An agent takes only what reaches a server: the rest are server flags.
+    {
+      echo "# Written by ${MARKER} (VeloxSearch agent); k3s reads it at start."
+      echo "node-ip: \"${NODE_IP}\""
+      echo "server: \"${SERVER}\""
+      echo "token-file: \"${K3S_TOKEN_FILE}\""
+    } > "$K3S_CONFIG"
+    chmod 0600 "$K3S_CONFIG"
+    return 0
+  fi
   {
     echo "# Written by ${MARKER} (VeloxSearch HA cluster); k3s reads it at start."
     echo "node-ip: \"${NODE_IP}\""
@@ -445,8 +472,14 @@ write_k3s_config() { # role: init | join
   chmod 0600 "$K3S_CONFIG"
 }
 
-install_k3s() { # role
-  if k3s_ours && systemctl is-active --quiet k3s; then
+install_k3s() { # role: init | join | agent
+  local exec=server unit=k3s
+  if [ "$1" = agent ]; then exec=agent unit=k3s-agent; fi
+  if k3s_present; then
+    if [ "$1" = agent ] && ! k3s_is_agent; then die "this node is a k3s server: an agent joins from a fresh machine"; fi
+    if [ "$1" != agent ] && k3s_is_agent; then die "this node is a k3s agent: uninstall it first to make it a server"; fi
+  fi
+  if k3s_ours && systemctl is-active --quiet "$unit"; then
     say "k3s already running here (installed by this script): left as it is"
     return 0
   fi
@@ -454,7 +487,13 @@ install_k3s() { # role
   write_k3s_config "$1"
   say "k3s ${K3S_VERSION} ($1) — this takes a minute or two"
   fetch https://get.k3s.io "$TMP/k3s-install.sh"
-  INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC=server sh "$TMP/k3s-install.sh"
+  INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC="$exec" sh "$TMP/k3s-install.sh"
+  if [ "$1" = agent ]; then
+    # An agent has no kubeconfig to watch itself with: the server sees it.
+    systemctl is-active --quiet k3s-agent || die "k3s-agent is not running: journalctl -u k3s-agent"
+    say "agent $(node_name) joined: on a server, kubectl get nodes shows it Ready within a minute"
+    return 0
+  fi
   wait_own_node
 }
 
@@ -493,7 +532,10 @@ join_hint() {
       node 1:   sudo cat ${K3S_SERVER_TOKEN} > token     # then copy 'token' over
       node N:   sudo $0 join --server https://${NODE_IP}:6443 --token-file token
 
+    Add --agent to join a machine as a worker (no etcd, no control plane).
     When all three are Ready, back on this node:  sudo $0 platform
+    (a single server, with or without agents: platform --expect-nodes N,
+    N counting this node and the agents)
 EOF
 }
 
@@ -519,7 +561,7 @@ cmd_join() {
     (umask 077; printf '%s\n' "$token" > "$K3S_TOKEN_FILE")
   fi
   prepare_node
-  install_k3s join
+  if [ "$AGENT" -eq 1 ]; then install_k3s agent; else install_k3s join; fi
 }
 
 # ------------------------------------------------------ install (over SSH)
@@ -637,6 +679,10 @@ install_longhorn() {
     # own tag (v* tags cannot move, the tag ruleset forbids it).
     fetch "https://raw.githubusercontent.com/${REPO}/v${VERSION}/deploy/bootstrap/longhorn.yaml" "$TMP/longhorn.yaml"
   fi
+  local tag
+  tag="$(grep -Eom1 'longhornio/longhorn-manager:v[0-9.]+' "$TMP/longhorn.yaml" | cut -d: -f2 || true)"
+  [ "$tag" = "$LONGHORN_TESTED" ] \
+    || warn "this bundle is Longhorn ${tag:-of unknown version}; k3s ${K3S_VERSION_DEFAULT} was tested with ${LONGHORN_TESTED}"
   kc apply --server-side --force-conflicts --field-manager="$FIELD_MANAGER" -f "$TMP/longhorn.yaml" >/dev/null
   info "waiting for longhorn-manager on every node"
   kc -n longhorn-system rollout status daemonset/longhorn-manager --timeout=900s >/dev/null \
@@ -649,7 +695,9 @@ install_longhorn() {
     [ "$i" -eq 60 ] && die "the longhorn StorageClass never appeared: kubectl -n longhorn-system get pods"
     sleep 10
   done
-  say "Longhorn ready: StorageClass 'longhorn', 3 replicas per volume, default"
+  # The class exists once the CSI driver registers; the rest of Longhorn's
+  # pods are still starting. Postgres, the first volume, proves it serves.
+  say "Longhorn StorageClass 'longhorn' up (default, 3 replicas per volume); its pods keep starting"
 }
 
 install_veloxsearch() {
@@ -675,9 +723,12 @@ install_veloxsearch() {
   kc -n "$NS" rollout status deploy/veloxsearch --timeout=900s >/dev/null \
     || die "the console did not become ready: kubectl -n $NS get pods; kubectl -n $NS logs deploy/veloxsearch"
   # The Postgres pod waits for the Secret the app writes on its first boot
-  # (install.yaml), so it settles a few seconds after the console.
+  # (install.yaml), so it settles a few seconds after the console. It is also
+  # the cluster's first Longhorn volume: its rollout is the proof that storage
+  # provisions and attaches, so no success is printed before it.
   kc -n "$NS" rollout status statefulset/veloxsearch-postgres --timeout=600s >/dev/null \
-    || warn "veloxsearch-postgres is not ready yet: kubectl -n $NS describe pod veloxsearch-postgres-0"
+    || die "Postgres did not start; its volume is on Longhorn: kubectl -n longhorn-system get pods; kubectl -n $NS describe pod veloxsearch-postgres-0"
+  info "Postgres ready on its Longhorn volume"
 }
 
 cmd_platform() {
@@ -702,7 +753,15 @@ cmd_platform() {
 }
 
 print_access() {
-  local ips ip code="" i
+  local ips ip code="" i servers redundancy
+  servers="$(kc get nodes -l node-role.kubernetes.io/control-plane --no-headers 2>/dev/null | wc -l)"
+  if [ "$servers" -ge 3 ]; then
+    redundancy="any one of the ${servers} servers can fail; the console
+                      reschedules to a live node within ~5 minutes"
+  else
+    redundancy="${servers} server(s): losing one loses the control plane
+                      (three servers on embedded etcd survive a loss)"
+  fi
   ips="$(kc get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{" "}{end}')"
   for i in $(seq 1 36); do
     code="$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://${NODE_IP}/api/auth_state" || true)"
@@ -730,8 +789,7 @@ print_access() {
                       to use it elsewhere, change 'server:' to a node or VIP
       etcd snapshots  every 6 h on each node, /var/lib/rancher/k3s/server/db/snapshots
                       — copy them off the nodes (k3s etcd-snapshot save --s3 ...)
-      redundancy      any one of the ${EXPECT_NODES} nodes can fail; the console
-                      reschedules to a live node within ~5 minutes
+      redundancy      ${redundancy}
       HTTPS           set VELOX_COOKIE_SECURE=1 in the veloxsearch-env ConfigMap
                       once a TLS ingress fronts the console
 EOF
@@ -740,6 +798,7 @@ EOF
 # -------------------------------------------------------------------- status
 cmd_status() {
   k3s_present || die "no k3s on this node"
+  k3s_is_agent && die "this node is a k3s agent: run status on a server"
   say "nodes";       kc get nodes -o wide
   say "storage";     kc get storageclass
   say "VeloxSearch"; kc -n "$NS" get pods -o wide
@@ -768,8 +827,10 @@ EOF
   else die "no terminal: pass --confirm $n"
   fi
   [ "$answer" = "$n" ] || die "not confirmed; nothing removed"
-  if [ -x /usr/local/bin/k3s-uninstall.sh ]; then /usr/local/bin/k3s-uninstall.sh
-  else die "/usr/local/bin/k3s-uninstall.sh is missing; remove k3s by hand"
+  local u=/usr/local/bin/k3s-uninstall.sh
+  k3s_is_agent && u=/usr/local/bin/k3s-agent-uninstall.sh
+  if [ -x "$u" ]; then "$u"
+  else die "$u is missing; remove k3s by hand"
   fi
   rm -f "$K3S_TOKEN_FILE"
   if [ "$PURGE_DATA" -eq 1 ]; then rm -rf /var/lib/longhorn; fi
