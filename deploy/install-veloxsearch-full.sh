@@ -263,8 +263,13 @@ preflight() {
   # Longhorn keeps replicas under /var/lib/longhorn and reserves 30% of the
   # disk for the OS (bootstrap/longhorn.yaml), k3s its images under
   # /var/lib/rancher: both live on /var/lib's filesystem.
+  # FREE space, not disk size: a 30 GiB disk leaves ~27 GiB free. The install
+  # itself takes 8-9 GiB, so on a re-run (k3s already ours) the floor only
+  # warns, the way the port checks below are skipped then.
   free_gib="$(df -Pk /var/lib | awk 'NR == 2 {print int($4 / 1024 / 1024)}')"
-  if [ "$free_gib" -lt 30 ]; then fail_ "${free_gib} GiB free on /var/lib: at least 30 GiB"
+  if [ "$free_gib" -lt 30 ] && k3s_ours; then
+    warn_ "${free_gib} GiB free on /var/lib, under the 30 GiB free a first install needs; k3s is already ours (re-run), so going on"
+  elif [ "$free_gib" -lt 30 ]; then fail_ "${free_gib} GiB free on /var/lib: at least 30 GiB of free space (not disk size)"
   elif [ "$free_gib" -lt 100 ]; then warn_ "${free_gib} GiB free on /var/lib: data volumes come out of it; 100 GiB+ recommended"
   else ok_ "${free_gib} GiB free on /var/lib"
   fi
@@ -518,9 +523,9 @@ cmd_join() {
 }
 
 # ------------------------------------------------------ install (over SSH)
-SSH_ARGS=()
+SSH_ARGS=() SSH_AS=()
 # shellcheck disable=SC2029  # the command line is built for the peer on purpose
-remote() { ssh "${SSH_ARGS[@]}" "${SSH_USER}@$1" "${@:2}"; }
+remote() { ${SSH_AS[@]+"${SSH_AS[@]}"} ssh "${SSH_ARGS[@]}" "${SSH_USER}@$1" "${@:2}"; }
 
 cmd_install() {
   local self peers=() p sudo="" host names tmpf ip_arg
@@ -536,6 +541,13 @@ cmd_install() {
     EXPECT_NODES=$(( ${#peers[@]} + 1 ))
     SSH_ARGS=(-p "$SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
     [ -z "$SSH_KEY" ] || SSH_ARGS+=(-i "$SSH_KEY")
+    # Under sudo the keys (and agent) belong to the user who called it, not
+    # to root: without --ssh-key, ssh runs as that user. Redirects are still
+    # opened by root, so the token can feed its stdin.
+    if [ -z "$SSH_KEY" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+      SSH_AS=(sudo -u "$SUDO_USER")
+      [ -z "${SSH_AUTH_SOCK:-}" ] || SSH_AS+=(env "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+    fi
     [ "$SSH_USER" = root ] || sudo="sudo -n"
   else
     warn "no --peers: a single-node cluster, no redundancy (--expect-nodes ${EXPECT_NODES} still applies to 'platform')"
@@ -550,7 +562,7 @@ cmd_install() {
   local -A remote_file=()
   for p in ${peers[@]+"${peers[@]}"}; do
     say "peer $p: copying the script and running preflight"
-    remote "$p" true || die "cannot SSH to ${SSH_USER}@$p (key-based, BatchMode)"
+    remote "$p" true || die "cannot SSH to ${SSH_USER}@$p (key-based, BatchMode, as ${SUDO_USER:-root}${SSH_KEY:+ with $SSH_KEY}): --ssh-user / --ssh-key"
     # shellcheck disable=SC2016  # expanded on the peer, not here
     tmpf="$(remote "$p" 'umask 077; f=$(mktemp /tmp/veloxsearch-install.XXXXXX); cat > "$f"; echo "$f"' < "$self")"
     remote_file[$p]="$tmpf"
@@ -750,7 +762,9 @@ cmd_uninstall() {
 
 EOF
   if [ -n "$CONFIRM" ]; then answer="$CONFIRM"
-  elif [ -r /dev/tty ]; then printf "  Type this node's name (%s) to go on: " "$n" >&2; read -r answer < /dev/tty
+  # Opening it, not -r: with no controlling terminal /dev/tty still looks
+  # readable and only the read fails ("No such device or address").
+  elif { : </dev/tty; } 2>/dev/null; then printf "  Type this node's name (%s) to go on: " "$n" >&2; read -r answer < /dev/tty
   else die "no terminal: pass --confirm $n"
   fi
   [ "$answer" = "$n" ] || die "not confirmed; nothing removed"
