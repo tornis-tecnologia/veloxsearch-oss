@@ -383,6 +383,35 @@ fn agent_name(deployment: &Deployment, recipe: &str) -> String {
     format!("velox-agent-{deployment}-{recipe}")
 }
 
+/// How far one deployment×integration collector has rolled out:
+/// `(desired, ready)` pods, `None` when no collector workload exists. A
+/// DaemonSet reports per-node scheduling (`desiredNumberScheduled` — 0 means
+/// no node can run it), a Deployment its replicas. Read by the install
+/// contract (ADR-075) to tell "nothing collects" from "nothing to collect".
+pub(crate) async fn collector_readiness(
+    deployment: &Deployment,
+    recipe: &str,
+) -> Result<Option<(i64, i64)>> {
+    let client = client().await?;
+    let name = agent_name(deployment, recipe);
+    if let Some(ds) = get_dynamic(&client, "apps", "v1", "DaemonSet", Some(AGENT_NS), &name).await?
+    {
+        let st = &ds["status"];
+        return Ok(Some((
+            st["desiredNumberScheduled"].as_i64().unwrap_or(0),
+            st["numberReady"].as_i64().unwrap_or(0),
+        )));
+    }
+    if let Some(d) = get_dynamic(&client, "apps", "v1", "Deployment", Some(AGENT_NS), &name).await?
+    {
+        return Ok(Some((
+            d["spec"]["replicas"].as_i64().unwrap_or(1),
+            d["status"]["readyReplicas"].as_i64().unwrap_or(0),
+        )));
+    }
+    Ok(None)
+}
+
 /// Deploy (or update) an agent from a **pre-rendered** Fluent Bit config — the
 /// integration-engine path (ADR-039). Same k8s apply as `deploy_agent`, but the
 /// config is supplied by the package (already interpolated with the closed

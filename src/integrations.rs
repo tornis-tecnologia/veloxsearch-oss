@@ -103,21 +103,7 @@ async fn install_backend(
         };
         per_input.push((name, pipeline, index_template));
     }
-    let base = vars(deployment, &renaming.name, &pkg.manifest.id, &u, &p);
-    let mut saved_objects =
-        velox_integrations::agent_saved_objects(&render(&pkg.saved_objects, &base)?, &renaming)?;
-    // Each enabled input's own saved objects, rendered with that input's
-    // index as `{index}`.
-    for (input, _) in selection.enabled(pkg)? {
-        if let Some(nd) = input.saved_objects {
-            let name = velox_integrations::input_artifact_name(pkg, &input, version);
-            let v = vars(deployment, &name, &pkg.manifest.id, &u, &p);
-            saved_objects.push_str(&velox_integrations::agent_saved_objects(
-                &render(nd, &v)?,
-                &renaming,
-            )?);
-        }
-    }
+    let saved_objects = backend_saved_objects(deployment, pkg, version, selection, &u, &p)?;
 
     let base = crate::recipes::os_base(deployment);
     let c = crate::recipes::http()?;
@@ -146,6 +132,11 @@ async fn install_backend(
                 .context("creating index template")?
                 .error_for_status()
                 .context("index template rejected")?;
+            // The index itself, now, from that template: its mapping is what
+            // `_fields_for_wildcard` reads, so the pattern written below gets
+            // its field list at install instead of waiting for the first
+            // document (ADR-075). The collector writes into it unchanged.
+            ensure_index(&c, &base, &u, &p, name).await?;
         }
     }
 
@@ -158,8 +149,9 @@ async fn install_backend(
     if scope.is_some() {
         crate::recipes::ensure_tenant(deployment).await;
     }
-    let objs = saved_objects_bulk(&saved_objects)?;
+    let mut objs = saved_objects_bulk(&saved_objects)?;
     let dash = crate::recipes::dashboards_base(deployment);
+    attach_pattern_fields(&c, &dash, scope.as_deref(), &u, &p, &mut objs).await;
     let mut req = c
         .post(format!(
             "{dash}/api/saved_objects/_bulk_create?overwrite=true"
@@ -171,6 +163,37 @@ async fn install_backend(
     }
     let _ = req.json(&objs).send().await;
     Ok(renaming)
+}
+
+/// The saved objects (index patterns, visualizations, dashboards) a package
+/// installs under the renamed ids, rendered: the package-level ndjson with the
+/// shared name as `{index}`, then each enabled input's own with that input's
+/// index. What `install_backend` writes, and what the install contract
+/// (`integration_contract`) reads its panels and patterns from — one renderer,
+/// so the verification looks at exactly what was installed.
+pub(crate) fn backend_saved_objects(
+    deployment: &Deployment,
+    pkg: &Package,
+    version: &str,
+    selection: &velox_integrations::InputSelection,
+    u: &str,
+    p: &str,
+) -> Result<String> {
+    let renaming = velox_integrations::agent_renaming(pkg, version)?;
+    let base = vars(deployment, &renaming.name, &pkg.manifest.id, u, p);
+    let mut saved_objects =
+        velox_integrations::agent_saved_objects(&render(&pkg.saved_objects, &base)?, &renaming)?;
+    for (input, _) in selection.enabled(pkg)? {
+        if let Some(nd) = input.saved_objects {
+            let name = velox_integrations::input_artifact_name(pkg, &input, version);
+            let v = vars(deployment, &name, &pkg.manifest.id, u, p);
+            saved_objects.push_str(&velox_integrations::agent_saved_objects(
+                &render(nd, &v)?,
+                &renaming,
+            )?);
+        }
+    }
+    Ok(saved_objects)
 }
 
 /// The collector config a package renders to on the in-cluster path: every
@@ -251,6 +274,10 @@ pub async fn apply_package(
             let _ = crate::agents::remove_agent(deployment, &pkg.manifest.id).await;
         }
     }
+    // The install is not done when the objects are written: the contract
+    // (ADR-075) follows it until the dashboards work or a blocker is named,
+    // refreshing the index patterns' fields as data lands.
+    crate::integration_contract::follow_install(deployment, pkg, version, selection);
     Ok(())
 }
 
@@ -583,6 +610,7 @@ pub async fn install_backend_v2(
             crate::recipes::ensure_tenant(deployment).await;
         }
         let dash = crate::recipes::dashboards_base(deployment);
+        attach_pattern_fields(&c, &dash, scope.as_deref(), &u, &p, &mut saved_objects).await;
         let mut req = c
             .post(format!(
                 "{dash}/api/saved_objects/_bulk_create?overwrite=true"
@@ -595,6 +623,112 @@ pub async fn install_backend_v2(
         let _ = req.json(&saved_objects).send().await;
     }
     Ok(())
+}
+
+/// Create `index` (empty, shaped by its index template) unless it exists.
+/// A concurrent first write from the collector is the one benign refusal.
+async fn ensure_index(
+    c: &reqwest::Client,
+    base: &str,
+    u: &str,
+    p: &str,
+    index: &str,
+) -> Result<()> {
+    let url = format!("{base}/{index}");
+    let exists = c
+        .head(&url)
+        .basic_auth(u, Some(p))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success());
+    if exists {
+        return Ok(());
+    }
+    let res = c
+        .put(&url)
+        .basic_auth(u, Some(p))
+        .send()
+        .await
+        .with_context(|| format!("creating index {index}"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        if !body.contains("resource_already_exists") {
+            anyhow::bail!("creating index {index}: {status} {body}");
+        }
+    }
+    Ok(())
+}
+
+/// Attach the live field list to every index pattern in a `_bulk_create` batch,
+/// so the fields are written in the same request as the pattern.
+///
+/// OpenSearch Dashboards never fetches the fields of a *saved* index pattern
+/// when it loads one (3.x `IndexPatternsService.get` builds it with
+/// `skipFetchFields = true`). A pattern written with only `title` +
+/// `timeFieldName` therefore stays empty, and every panel that aggregates on a
+/// field fails with "Could not locate that index-pattern-field (id: …)" even
+/// once data is flowing. `otel_stack::ensure_index_patterns` already does this
+/// for the OTel patterns; the integration installers did not.
+///
+/// One attempt per pattern, best-effort: with no index behind the pattern yet
+/// there is nothing to read, and the pattern is written as before.
+async fn attach_pattern_fields(
+    c: &reqwest::Client,
+    dash: &str,
+    scope: Option<&str>,
+    u: &str,
+    p: &str,
+    objs: &mut [serde_json::Value],
+) {
+    for o in objs.iter_mut() {
+        let Some(title) = pattern_title(o) else {
+            continue;
+        };
+        let mut req = c
+            .get(format!("{dash}/api/index_patterns/_fields_for_wildcard"))
+            .query(&[("pattern", title.as_str())])
+            .basic_auth(u, Some(p))
+            .header("osd-xsrf", "true");
+        if let Some(t) = scope {
+            req = req.header("securitytenant", t);
+        }
+        let Ok(resp) = req.send().await else {
+            continue;
+        };
+        let Ok(body) = resp.json::<serde_json::Value>().await else {
+            continue;
+        };
+        if let Some(fields) = body.get("fields").and_then(|f| f.as_array()) {
+            set_pattern_fields(o, fields);
+        }
+    }
+}
+
+/// The title of an `index-pattern` saved object, `None` for any other type.
+fn pattern_title(o: &serde_json::Value) -> Option<String> {
+    if o.get("type")?.as_str()? != "index-pattern" {
+        return None;
+    }
+    o.get("attributes")?
+        .get("title")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Store `fields` on an index-pattern saved object the way Dashboards does: a
+/// JSON array serialized into the string attribute `fields`. An empty list is
+/// not written — it would only replace "unknown" with "known to be empty".
+fn set_pattern_fields(o: &mut serde_json::Value, fields: &[serde_json::Value]) {
+    if fields.is_empty() {
+        return;
+    }
+    if let Some(attrs) = o.get_mut("attributes").and_then(|a| a.as_object_mut()) {
+        attrs.insert(
+            "fields".into(),
+            serde_json::Value::String(serde_json::Value::Array(fields.to_vec()).to_string()),
+        );
+    }
 }
 
 /// Remove one activation's Spec 2.0 backend once nothing on the deployment
@@ -809,6 +943,42 @@ mod tests {
             objs.len(),
             11,
             "11 saved objects (index-pattern + dashboard + 9 viz)"
+        );
+    }
+
+    /// The installers write index patterns WITH their field list:
+    /// only `index-pattern` objects are touched, the list is stored the way
+    /// Dashboards stores it (a JSON string), and an empty list writes nothing.
+    #[test]
+    fn pattern_fields_attach_only_to_index_patterns() {
+        let mut pattern = serde_json::json!({
+            "type": "index-pattern", "id": "k8s-audit-logs",
+            "attributes": {"title": "k8s-audit-logs*", "timeFieldName": "@timestamp"}
+        });
+        let viz = serde_json::json!({
+            "type": "visualization", "id": "v", "attributes": {"title": "Verbs"}
+        });
+        assert_eq!(pattern_title(&pattern).as_deref(), Some("k8s-audit-logs*"));
+        assert_eq!(pattern_title(&viz), None);
+
+        let fields = vec![serde_json::json!({
+            "name": "verb", "type": "string", "esTypes": ["keyword"],
+            "searchable": true, "aggregatable": true, "readFromDocValues": true
+        })];
+        set_pattern_fields(&mut pattern, &[]);
+        assert!(
+            pattern["attributes"].get("fields").is_none(),
+            "empty list must not be written"
+        );
+        set_pattern_fields(&mut pattern, &fields);
+        let stored = pattern["attributes"]["fields"]
+            .as_str()
+            .expect("fields is a JSON string");
+        let back: Vec<serde_json::Value> = serde_json::from_str(stored).unwrap();
+        assert_eq!(back, fields);
+        assert_eq!(
+            pattern["attributes"]["title"], "k8s-audit-logs*",
+            "other attributes kept"
         );
     }
 }

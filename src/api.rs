@@ -2420,13 +2420,67 @@ mod server {
     async fn catalog_install(
         scope: Scope,
         Json(req): Json<crate::catalog::CatalogInstallReq>,
-    ) -> Result<StatusCode, ApiError> {
+    ) -> Result<Json<serde_json::Value>, ApiError> {
         let dep = scope.require(&req.deployment).await?;
         integration_id(&req.id)?;
         crate::catalog::install(&dep, &req.id, req.version.as_deref(), req.inputs.as_ref())
             .await
             .map_err(ApiError::internal)?;
-        Ok(StatusCode::OK)
+        Ok(Json(
+            serde_json::json!({ "status": install_status(&dep, &req.id).await }),
+        ))
+    }
+
+    /// Where an integration stands right after its install (ADR-075): never
+    /// a bare "OK". `null` only when the status itself could not be read —
+    /// the console then polls `/integration_status`.
+    async fn install_status(dep: &crate::scope::Deployment, id: &str) -> serde_json::Value {
+        match crate::integration_contract::status(dep, id).await {
+            Ok(s) => serde_json::to_value(s).unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!("integration {id} on {dep}: status after install: {e:#}");
+                serde_json::Value::Null
+            }
+        }
+    }
+
+    /// What stands between this cluster and a working integration, before
+    /// anything is installed (ADR-075). Blockers are shown, not enforced.
+    async fn integration_preflight(
+        scope: Scope,
+        Json(req): Json<IntegrationReq>,
+    ) -> Result<Json<crate::integration_contract::Preflight>, ApiError> {
+        let dep = scope.require(&req.deployment).await?;
+        integration_id(&req.id)?;
+        crate::integration_contract::preflight(&dep, &req.id)
+            .await
+            .map(Json)
+            .map_err(ApiError::internal)
+    }
+
+    /// `working` | `waiting_for_data` | `blocked` for one installed
+    /// integration (ADR-075). Reading it also heals: a pattern missing a
+    /// panel's field is refreshed. 404 when the cluster does not have it.
+    async fn integration_status(
+        scope: Scope,
+        Json(req): Json<IntegrationReq>,
+    ) -> Result<Json<crate::integration_contract::IntegrationStatus>, ApiError> {
+        let dep = scope.require(&req.deployment).await?;
+        integration_id(&req.id)?;
+        match crate::integration_contract::status(&dep, &req.id).await {
+            Ok(Some(s)) => Ok(Json(s)),
+            Ok(None) => Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                format!("integration {} is not installed on this cluster", req.id),
+            )),
+            Err(e) => Err(ApiError::internal(e)),
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct IntegrationReq {
+        deployment: String,
+        id: String,
     }
     /// What one integration brings, before anything is installed: the
     /// collection config, the ingest pipeline, the index template, the index
@@ -2838,7 +2892,10 @@ mod server {
             crate::catalog::install(&dep, &req.id, None, Some(&req.inputs))
                 .await
                 .map_err(ApiError::internal)?;
-            return Ok(Json(serde_json::json!({ "target": "cluster" })));
+            return Ok(Json(serde_json::json!({
+                "target": "cluster",
+                "status": install_status(&dep, &req.id).await,
+            })));
         }
         if !crate::catalog::valid_component(&req.policy) {
             return Err(ApiError::bad_request(format!(
@@ -3582,6 +3639,8 @@ mod server {
         RoutePolicy { path: "/mesh_create_policy", policy: TenantScoped, note: "creates an empty policy on the deployment (ADR-073); resolve-before-mutate." },
         RoutePolicy { path: "/catalog_v2", policy: TenantScoped, note: "Spec 2.0 package index (ADR-074): installation-wide; the policies-using overlay is per deployment, and an unowned name reads as no-deployment." },
         RoutePolicy { path: "/package_v2", policy: TenantScoped, note: "one Spec 2.0 package's streams/fields/plugins, read off the VERIFIED package; installation-wide metadata like /catalog_v2, no deployment named, no write." },
+        RoutePolicy { path: "/integration_preflight", policy: TenantScoped, note: "reads the cluster (nodes, pods, SSARs, the API server's /metrics) for blockers to installing an integration on THAT deployment (ADR-075); unowned is 404, no write." },
+        RoutePolicy { path: "/integration_status", policy: TenantScoped, note: "verifies an installed integration on THAT deployment and refreshes its index patterns' field lists — a write to its Dashboards, so resolve-before-mutate (ADR-075)." },
         RoutePolicy { path: "/integration_artifacts", policy: TenantScoped, note: "what a package brings (pipeline/template/index patterns/dashboards), read off the VERIFIED package; installation-wide metadata like /catalog, no deployment named, no write." },
         RoutePolicy { path: "/mesh_install", policy: AdminOnly, note: "installs or reapplies the Velox Mesh in its own namespace — its database, Secret and workload (ADR-072 amendment 5); one Mesh per installation, never a tenant action." },
         RoutePolicy { path: "/mesh_uninstall", policy: AdminOnly, note: "removes the Velox Mesh installed here — workload and routes, and with `purge` its database, role and Secret (ADR-072 amendment 5)." },
@@ -3694,6 +3753,8 @@ mod server {
             .route(p("/remove_integration"), post(remove_integration))
             .route(p("/mesh_create_policy"), post(mesh_create_policy))
             .route(p("/integration_artifacts"), post(integration_artifacts))
+            .route(p("/integration_preflight"), post(integration_preflight))
+            .route(p("/integration_status"), post(integration_status))
             .route(p("/catalog_v2"), post(catalog_v2))
             .route(p("/package_v2"), post(package_v2))
             .route(p("/mesh_status"), get(mesh_status))

@@ -97,11 +97,15 @@ pub use crate::retention::RetentionOutcome;
 /// Does velox's own live policy already say what it should? Age and the index
 /// patterns — the patterns are derived from the recipe catalog, so a build that
 /// adds a recipe must still reach an unchanged-age policy.
-fn policy_is_current(live: &serde_json::Value, age: &str) -> bool {
+fn policy_is_current(live: &serde_json::Value, age: &str, snapshot: bool) -> bool {
+    let has_snapshot = live["policy"]["states"]
+        .as_array()
+        .is_some_and(|s| s.iter().any(|s| s["name"] == "snapshot"));
     let patterns: Option<Vec<&str>> = live["policy"]["ism_template"][0]["index_patterns"]
         .as_array()
         .map(|a| a.iter().filter_map(|p| p.as_str()).collect());
     delete_age(live) == Some(age)
+        && has_snapshot == snapshot
         && patterns.is_some_and(|p| {
             p == log_patterns()
                 .iter()
@@ -112,7 +116,30 @@ fn policy_is_current(live: &serde_json::Value, age: &str) -> bool {
 
 /// The retention ISM policy document (`hot → snapshot → delete`). Pure so the
 /// state machine can be asserted without a live cluster.
-fn retention_policy(age: &str) -> serde_json::Value {
+///
+/// `snapshot` is whether `SNAPSHOT_REPO` is registered on the cluster. Without
+/// it the snapshot state is not a no-op: ISM fails the managed index in that
+/// step and stops there, so the index is never deleted (ADR-075). The policy
+/// then goes `hot → delete` at the same age; the profile is re-applied on
+/// every save, so configuring snapshots puts the step back.
+fn retention_policy(age: &str, snapshot: bool) -> serde_json::Value {
+    if !snapshot {
+        return serde_json::json!({
+            "policy": {
+                "description": retention_description(age),
+                "default_state": "hot",
+                "states": [
+                    { "name": "hot", "actions": [
+                        { "rollover": { "min_index_age": ROLLOVER_AGE, "min_primary_shard_size": ROLLOVER_SIZE } }
+                    ], "transitions": [
+                        { "state_name": "delete", "conditions": { "min_index_age": age } }
+                    ]},
+                    { "name": "delete", "actions": [{ "delete": {} }], "transitions": [] }
+                ],
+                "ism_template": [{ "index_patterns": log_patterns(), "priority": 100 }]
+            }
+        });
+    }
     serde_json::json!({
         "policy": {
             "description": retention_description(age),
@@ -178,7 +205,13 @@ pub async fn ensure_retention(
     // written onto the CR and reconciled by the operator. This policy simply
     // references it: where the user configured one, the snapshot state works;
     // where they did not, the state no-ops exactly as it did before.
-    let policy = retention_policy(&age);
+    let snapshot = c
+        .get(format!("{base}/_snapshot/{SNAPSHOT_REPO}"))
+        .basic_auth(&u, Some(&p))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success());
+    let policy = retention_policy(&age, snapshot);
 
     let url = format!("{base}/_plugins/_ism/policies/{POLICY_ID}");
     let (outcome, written) = crate::retention::apply_once(
@@ -192,7 +225,7 @@ pub async fn ensure_retention(
         },
         stamp,
         force,
-        |live| policy_is_current(live, &age),
+        |live| policy_is_current(live, &age, snapshot),
     )
     .await?;
     if outcome == RetentionOutcome::Customized {
@@ -529,7 +562,7 @@ mod tests {
     /// (rollover) in hot, backup (snapshot) in the middle, delete at `age`.
     #[test]
     fn retention_policy_covers_rotate_snapshot_delete() {
-        let p = retention_policy("30d");
+        let p = retention_policy("30d", true);
         let states = p["policy"]["states"].as_array().unwrap();
         assert_eq!(p["policy"]["default_state"], "hot");
         let names: Vec<&str> = states.iter().map(|s| s["name"].as_str().unwrap()).collect();
@@ -562,7 +595,7 @@ mod tests {
     /// contract preserved across the new lifecycle).
     #[test]
     fn retention_age_is_the_delete_trigger() {
-        let p = retention_policy("90d");
+        let p = retention_policy("90d", true);
         let states = p["policy"]["states"].as_array().unwrap();
         assert_eq!(
             states[1]["transitions"][0]["conditions"]["min_index_age"],
@@ -576,7 +609,7 @@ mod tests {
     fn the_policy_builder_takes_the_configured_days() {
         for days in [1, 14, 45, 365] {
             let age = crate::retention::render_age(days);
-            let p = retention_policy(&age);
+            let p = retention_policy(&age, true);
             assert_eq!(delete_age(&p), Some(age.as_str()));
             assert_eq!(p["policy"]["description"], retention_description(&age));
             assert!(p["policy"]["description"]
@@ -590,7 +623,7 @@ mod tests {
     /// metadata, and fields OpenSearch adds on its own (which must not read as
     /// a user edit).
     fn live(age: &str, seq: i64, term: i64) -> serde_json::Value {
-        let mut doc = retention_policy(age);
+        let mut doc = retention_policy(age, true);
         doc["_id"] = POLICY_ID.into();
         doc["_seq_no"] = seq.into();
         doc["_primary_term"] = term.into();
@@ -642,14 +675,36 @@ mod tests {
     /// patterns differ — not on every save.
     #[test]
     fn a_current_policy_is_not_rewritten() {
-        assert!(policy_is_current(&live("30d", 1, 1), "30d"));
-        assert!(!policy_is_current(&live("30d", 1, 1), "45d"));
+        assert!(policy_is_current(&live("30d", 1, 1), "30d", true));
+        assert!(!policy_is_current(&live("30d", 1, 1), "45d", true));
+        assert!(
+            !policy_is_current(&live("30d", 1, 1), "30d", false),
+            "the repository went away: the snapshot step must go"
+        );
         let mut narrower = live("30d", 1, 1);
         narrower["policy"]["ism_template"][0]["index_patterns"] = serde_json::json!(["x-*"]);
         assert!(
-            !policy_is_current(&narrower, "30d"),
+            !policy_is_current(&narrower, "30d", true),
             "a new recipe's pattern"
         );
+    }
+
+    /// No snapshot repository → no snapshot step: the index is deleted at the
+    /// same age instead of stalling, failed, in a step that cannot run.
+    #[test]
+    fn without_a_repository_the_policy_has_no_snapshot_step() {
+        let p = retention_policy("30d", false);
+        let states = p["policy"]["states"].as_array().unwrap();
+        let names: Vec<&str> = states.iter().map(|s| s["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["hot", "delete"]);
+        assert_eq!(delete_age(&p), Some("30d"));
+        assert!(!p.to_string().contains(SNAPSHOT_REPO));
+        assert_eq!(p["policy"]["description"], retention_description("30d"));
+        let mut live = p.clone();
+        live["_seq_no"] = 1.into();
+        live["_primary_term"] = 1.into();
+        assert!(policy_is_current(&live, "30d", false));
+        assert!(!policy_is_current(&live, "30d", true));
     }
 
     #[test]

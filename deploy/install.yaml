@@ -150,6 +150,10 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
     verbs: ["get", "list", "create", "update", "patch"]
+  # Integration preflight (ADR-075): is API-server audit logging on? Read off
+  # `apiserver_audit_event_total`, which every distribution exposes.
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
 ---
 # Namespaced day-to-day perms in the app's own namespace: per-deployment admin
 # Secrets, dashboards Ingress (ingress mode only), managed credentials (ADR-023),
