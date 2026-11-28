@@ -8,6 +8,17 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+- **Integrations report whether they work (ADR-075).** Installing an
+  integration now ends in a verdict on its card: *Working*, *Waiting for data*
+  (what is expected and from where) or *Blocked* (why, with the exact
+  remediation, e.g. the API-server flags and audit policy when audit logging
+  is off, or the host-side route when control-plane nodes run no kubelet). A
+  preflight shows known blockers before the user commits. New routes
+  `/integration_preflight` and `/integration_status`; `/catalog_install` and
+  `/add_integration` return the status. The runtime ClusterRole gains `get`
+  on `/metrics` (audit-logging check).
+
 ### Fixed
 - **Integration dashboards fail with "Could not locate that
   index-pattern-field".** The integration installers (1.x and Spec 2.0
@@ -17,6 +28,15 @@ are called out explicitly.
   from `_fields_for_wildcard` and written with the pattern, as the OTel stack
   already did. Best-effort: with no index behind the pattern yet, it is written
   as before.
+- **Index patterns stay fieldless when created before their index (ADR-075).**
+  The install now creates the index from its template first, so the pattern
+  gets its fields at install; fields that appear only with data are refreshed
+  after the install, on every status read and once at startup, which also heals
+  patterns earlier versions saved without fields.
+- **Retention stalls on a snapshot step with no repository.** Without
+  `velox-snapshots` registered, ISM failed every managed index in the snapshot
+  state and never deleted it. The policy is now `hot → delete` until a
+  repository is configured.
 
 ## [0.15.0] - 2026-11-26
 
