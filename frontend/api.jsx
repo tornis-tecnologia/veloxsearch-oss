@@ -162,9 +162,15 @@ const API = {
   packageV2: (id, version) => call("package_v2", { id, version: version || null }),
   // Download → verify signature → apply through the engine → record id@version.
   // `version` is an expectation, not a selector: a mismatch is an error rather
-  // than a silent downgrade. Both are Result<(), _> → empty body.
+  // than a silent downgrade. -> { status } (ADR-075; null if unreadable).
   catalogInstall: (deployment, id, version) =>
     call("catalog_install", { deployment, id, version: version || null }),
+  // The install contract (ADR-075). Preflight: blockers known before an
+  // install -> { id, findings: [{ blocker, reason, remediation }] }. Status:
+  // -> { id, state: "working"|"waiting_for_data"|"blocked", docs, checks,
+  //      expected?, source?, reason?, remediation? }; 404 when not installed.
+  integrationPreflight: (deployment, id) => call("integration_preflight", { deployment, id }),
+  integrationStatus: (deployment, id) => call("integration_status", { deployment, id }),
   catalogUninstall: (deployment, id) => call("catalog_uninstall", { deployment, id }),
   // The one onboarding (ADR-073): add an integration, with the inputs the
   // operator turned on and configured, to a target — "cluster" (the in-cluster

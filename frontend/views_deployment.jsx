@@ -33,6 +33,7 @@ import { SnapshotTab } from "./views_snapshot.jsx";
 import { MeshTab } from "./views_mesh.jsx";
 import { AddIntegrationDialog, CLUSTER_TARGET } from "./views_integration_add.jsx";
 import { AgentCatalogue } from "./views_integration_v2.jsx";
+import { IntegrationStatus } from "./views_integration_status.jsx";
 import { ActivityPanel, ActivityDetails, lockReason, LockNotice } from "./views_activity.jsx";
 import { relAge } from "./views_status.jsx";
 import { Popup } from "./alerts.jsx";
@@ -1259,6 +1260,8 @@ function DataTab({ d, lang, onToggleStack, onToast, locked, onTab, intent }) {
                         </p>
                       )}
                       {err && <div className="field-err" data-testid={`error-${it.id}`}>{err}</div>}
+                      {/* ADR-075: working / waiting for data / blocked, never a bare "installed". */}
+                      {onCluster(it) && <IntegrationStatus d={d} id={it.id} lang={lang} />}
                       <div className="ft">
                         {!on ? (
                           <Btn variant="outline" size="sm" icon="plus" disabled={!!working || !!locked || !it.compatible}

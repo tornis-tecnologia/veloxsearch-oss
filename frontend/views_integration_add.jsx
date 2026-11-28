@@ -27,6 +27,7 @@ import { useEffect, useMemo, useState } from "react";
 import { STR } from "./i18n.jsx";
 import { API } from "./api.jsx";
 import { Banner, Btn, Dialog, Field, Icon } from "./ui.jsx";
+import { PreflightFindings } from "./views_integration_status.jsx";
 
 const CLUSTER = "cluster";
 const NEW_POLICY = "__new__";
@@ -199,6 +200,8 @@ function AddIntegrationDialog({ open, onClose, lang, d, item, policies, meshRead
               <input type="radio" name="target" checked={target === CLUSTER} onChange={() => setTarget(CLUSTER)} style={{ marginRight: 8 }} />
               <b>{t.add_integ_cluster}</b>
               <div className="hint" style={{ marginLeft: 22 }}>{t.add_integ_cluster_p}</div>
+              {/* ADR-075: what would stand in the way, before anything is written. */}
+              {target === CLUSTER && <div style={{ marginTop: 8 }}><PreflightFindings d={d} id={item.id} lang={lang} /></div>}
             </label>
             {meshReady && (policies || []).map(p => (
               <label key={p.id} className={`mesh-card${target === p.id ? " on" : ""}`} style={{ display: "block", cursor: "pointer" }} data-testid={`add-target-${p.id}`}>
