@@ -8,6 +8,16 @@ are called out explicitly.
 
 ## [Unreleased]
 
+### Fixed
+- **Integration dashboards fail with "Could not locate that
+  index-pattern-field".** The integration installers (1.x and Spec 2.0
+  backends) wrote index patterns with only `title` and `timeFieldName`;
+  OpenSearch Dashboards 3.x never fetches fields for a saved pattern, so every
+  field-based panel failed even with data flowing. The field list is now read
+  from `_fields_for_wildcard` and written with the pattern, as the OTel stack
+  already did. Best-effort: with no index behind the pattern yet, it is written
+  as before.
+
 ## [0.15.0] - 2026-11-26
 
 ### Added
