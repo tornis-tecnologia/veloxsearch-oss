@@ -103,21 +103,7 @@ async fn install_backend(
         };
         per_input.push((name, pipeline, index_template));
     }
-    let base = vars(deployment, &renaming.name, &pkg.manifest.id, &u, &p);
-    let mut saved_objects =
-        velox_integrations::agent_saved_objects(&render(&pkg.saved_objects, &base)?, &renaming)?;
-    // Each enabled input's own saved objects, rendered with that input's
-    // index as `{index}`.
-    for (input, _) in selection.enabled(pkg)? {
-        if let Some(nd) = input.saved_objects {
-            let name = velox_integrations::input_artifact_name(pkg, &input, version);
-            let v = vars(deployment, &name, &pkg.manifest.id, &u, &p);
-            saved_objects.push_str(&velox_integrations::agent_saved_objects(
-                &render(nd, &v)?,
-                &renaming,
-            )?);
-        }
-    }
+    let saved_objects = backend_saved_objects(deployment, pkg, version, selection, &u, &p)?;
 
     let base = crate::recipes::os_base(deployment);
     let c = crate::recipes::http()?;
@@ -146,6 +132,11 @@ async fn install_backend(
                 .context("creating index template")?
                 .error_for_status()
                 .context("index template rejected")?;
+            // The index itself, now, from that template: its mapping is what
+            // `_fields_for_wildcard` reads, so the pattern written below gets
+            // its field list at install instead of waiting for the first
+            // document (ADR-075). The collector writes into it unchanged.
+            ensure_index(&c, &base, &u, &p, name).await?;
         }
     }
 
@@ -172,6 +163,37 @@ async fn install_backend(
     }
     let _ = req.json(&objs).send().await;
     Ok(renaming)
+}
+
+/// The saved objects (index patterns, visualizations, dashboards) a package
+/// installs under the renamed ids, rendered: the package-level ndjson with the
+/// shared name as `{index}`, then each enabled input's own with that input's
+/// index. What `install_backend` writes, and what the install contract
+/// (`integration_contract`) reads its panels and patterns from — one renderer,
+/// so the verification looks at exactly what was installed.
+pub(crate) fn backend_saved_objects(
+    deployment: &Deployment,
+    pkg: &Package,
+    version: &str,
+    selection: &velox_integrations::InputSelection,
+    u: &str,
+    p: &str,
+) -> Result<String> {
+    let renaming = velox_integrations::agent_renaming(pkg, version)?;
+    let base = vars(deployment, &renaming.name, &pkg.manifest.id, u, p);
+    let mut saved_objects =
+        velox_integrations::agent_saved_objects(&render(&pkg.saved_objects, &base)?, &renaming)?;
+    for (input, _) in selection.enabled(pkg)? {
+        if let Some(nd) = input.saved_objects {
+            let name = velox_integrations::input_artifact_name(pkg, &input, version);
+            let v = vars(deployment, &name, &pkg.manifest.id, u, p);
+            saved_objects.push_str(&velox_integrations::agent_saved_objects(
+                &render(nd, &v)?,
+                &renaming,
+            )?);
+        }
+    }
+    Ok(saved_objects)
 }
 
 /// The collector config a package renders to on the in-cluster path: every
@@ -252,6 +274,10 @@ pub async fn apply_package(
             let _ = crate::agents::remove_agent(deployment, &pkg.manifest.id).await;
         }
     }
+    // The install is not done when the objects are written: the contract
+    // (ADR-075) follows it until the dashboards work or a blocker is named,
+    // refreshing the index patterns' fields as data lands.
+    crate::integration_contract::follow_install(deployment, pkg, version, selection);
     Ok(())
 }
 
@@ -595,6 +621,41 @@ pub async fn install_backend_v2(
             req = req.header("securitytenant", t);
         }
         let _ = req.json(&saved_objects).send().await;
+    }
+    Ok(())
+}
+
+/// Create `index` (empty, shaped by its index template) unless it exists.
+/// A concurrent first write from the collector is the one benign refusal.
+async fn ensure_index(
+    c: &reqwest::Client,
+    base: &str,
+    u: &str,
+    p: &str,
+    index: &str,
+) -> Result<()> {
+    let url = format!("{base}/{index}");
+    let exists = c
+        .head(&url)
+        .basic_auth(u, Some(p))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success());
+    if exists {
+        return Ok(());
+    }
+    let res = c
+        .put(&url)
+        .basic_auth(u, Some(p))
+        .send()
+        .await
+        .with_context(|| format!("creating index {index}"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        if !body.contains("resource_already_exists") {
+            anyhow::bail!("creating index {index}: {status} {body}");
+        }
     }
     Ok(())
 }

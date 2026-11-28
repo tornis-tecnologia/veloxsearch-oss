@@ -1717,6 +1717,78 @@ pub async fn install(
     Ok(())
 }
 
+/// Verified 1.x packages by id, for the install contract's reads (ADR-075):
+/// a status poll must not download and re-verify the package every time.
+static PACKAGE_CACHE: std::sync::Mutex<
+    BTreeMap<String, (std::time::Instant, Arc<velox_integrations::Package>)>,
+> = std::sync::Mutex::new(BTreeMap::new());
+const PACKAGE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// The package `install` would apply for `id`, verified: the registry's,
+/// else — registry unreachable — the in-binary recipe for an id the core
+/// carries. Cached for [`PACKAGE_TTL`]; read-only callers only.
+pub async fn package_for(id: &str) -> Result<Arc<velox_integrations::Package>> {
+    if !valid_component(id) {
+        bail!("invalid integration id: {id:?}");
+    }
+    if let Some((at, pkg)) = PACKAGE_CACHE.lock().ok().and_then(|m| m.get(id).cloned()) {
+        if at.elapsed() < PACKAGE_TTL {
+            return Ok(pkg);
+        }
+    }
+    let pkg = match Registry::from_env().fetch_package(id).await {
+        Ok(fetched) => {
+            verify_package(&fetched.manifest_yaml, &fetched.assets)
+                .with_context(|| format!("refusing to read integration {id}"))?;
+            fetched.into_package()?
+        }
+        Err(_) if crate::recipes::RECIPES.contains(&id) => crate::recipes::bootstrap_package(id)?,
+        Err(e) => return Err(e).with_context(|| format!("downloading integration {id}")),
+    };
+    let pkg = Arc::new(pkg);
+    if let Ok(mut m) = PACKAGE_CACHE.lock() {
+        m.insert(id.to_string(), (std::time::Instant::now(), pkg.clone()));
+    }
+    Ok(pkg)
+}
+
+/// What the cluster target of `deployment` has installed for `id`: the
+/// package, the version it was installed at (which decides the artifact
+/// names, ADR-071) and the inputs turned on. `None` when it is not installed
+/// on the cluster. A monitor recorded without a version is an install from
+/// before versions existed: the bootstrap version.
+pub async fn installed_package(
+    deployment: &Deployment,
+    id: &str,
+) -> Result<
+    Option<(
+        Arc<velox_integrations::Package>,
+        String,
+        velox_integrations::InputSelection,
+    )>,
+> {
+    let versions = crate::k8s::integration_versions(deployment)
+        .await
+        .unwrap_or_default();
+    let version = match versions.get(id) {
+        Some(v) => v.clone(),
+        None if crate::k8s::monitors_of(deployment)
+            .await
+            .iter()
+            .any(|m| m == id) =>
+        {
+            BOOTSTRAP_VERSION.to_string()
+        }
+        None => return Ok(None),
+    };
+    let selection = crate::k8s::integration_inputs(deployment)
+        .await
+        .ok()
+        .and_then(|m| m.get(id).cloned())
+        .unwrap_or_default();
+    Ok(Some((package_for(id).await?, version, selection)))
+}
+
 /// Is this integration's backend half (pipeline, templates, dashboards)
 /// still needed on the deployment by a target other than `except`? The
 /// cluster counts when it has the integration recorded; a Velox Mesh policy

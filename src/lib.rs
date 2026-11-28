@@ -33,6 +33,9 @@ pub mod recipes;
 #[cfg(feature = "ssr")]
 pub mod agents;
 
+/// ADR-075: preflight, verification and reconcile of an installed integration.
+#[cfg(feature = "ssr")]
+pub mod integration_contract;
 #[cfg(feature = "ssr")]
 pub mod integrations;
 
